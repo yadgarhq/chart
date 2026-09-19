@@ -46,13 +46,11 @@ sources:
 # who pinned one version of this chart must get the same eight module versions a
 # year later.
 #
-# A CHANGE HERE IS NOT COMPLETE UNTIL `chart/charts/` AND `chart/Chart.lock`
-# AGREE WITH IT, and `scripts/vendored_matches_pins.py` refuses the commit that
-# leaves them behind. Measured on helm 3.20.2 and 4.2.3: a pin bumped here with
-# a stale tarball still in `chart/charts/` packages, lints `--strict` and
-# templates with exit 0 on all three, and publishes the OLD subchart under the
-# NEW version number. Only `helm dependency build` notices, and no gate in the
-# estate runs it.
+# A CHANGE HERE NEEDS NOTHING ELSE, per ADR-0725. The release pipeline resolves
+# these eight pins at package time (`helm package chart -u`), so `chart/charts/`
+# and `chart/Chart.lock` are never committed and never need to agree with this
+# block by hand — the resolve happens from these pins alone, every time. ADR-0722's
+# pin rewriter therefore writes this file only.
 dependencies:
   - name: config
     version: 0.1.5

@@ -84,12 +84,10 @@ jobs:
   # sits outside it, and it is what keeps this parent from becoming a ninth module
   # nobody declared by way of CI rather than by way of templates.
   #
-  # ONE THING THIS REPOSITORY DEPENDS ON AND DOES NOT CONTROL: the `chart` job
-  # runs a bare `helm package chart` with no `helm dependency update` in front of
-  # it. `helm package` REFUSES a chart whose declared dependencies are absent, so
-  # the resolved subcharts are committed under `chart/charts/` — see `.gitignore`
-  # and `scripts/vendored_matches_pins.py`, which is the gate that keeps them
-  # honest.
+  # ONE THING THIS REPOSITORY DEPENDS ON AND DOES NOT CONTROL: per ADR-0725 the
+  # `chart` job resolves this chart's eight dependencies at package time
+  # (`helm package chart -u`), so nothing here commits a subchart and
+  # `chart/charts/` stays ignored — see `.gitignore`.
   release:
     if: startsWith(github.ref, 'refs/tags/')
     uses: yadgarhq/actions/.github/workflows/ci-release.yaml@main

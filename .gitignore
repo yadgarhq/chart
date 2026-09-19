@@ -1,31 +1,22 @@
-# `helm package` output. A release packages in CI and nothing here commits a
-# parent tarball, but one lands in the working tree the moment somebody runs
-# `helm package chart` by hand — which this repository's own test suite does.
+# `helm package` output, and the subcharts it resolves. ADR-0725 has the release
+# pipeline resolve this chart's eight dependencies at package time
+# (`helm package chart -u`) rather than committing them, so `chart/charts/` is
+# ignored the same way `yadgarhq/config` ignores it — this repository no longer
+# differs from its siblings here. Both still land in the working tree the
+# moment somebody runs `helm dependency update` or `helm package chart -u` by
+# hand, which this repository's own test suite does.
 *.tgz
+chart/charts/
 
-# THE RESOLVED SUBCHARTS ARE COMMITTED, and this repository is the ONE place in
-# the estate where that is true. Its sibling `yadgarhq/config` ignores
-# `chart/charts/` outright, and copying that line here would have been silent
-# and fatal.
-#
-# The reason is measured rather than stylistic. `ci-release.yaml`'s `chart` job
-# runs `helm package chart` with NO `helm dependency update` in front of it, and
-# `helm package` REFUSES a chart whose declared dependencies are absent:
-#
-#   Error: found in Chart.yaml, but missing in charts/ directory:
-#   config, gateway, iam, iam-db, project, project-db, task, task-db
-#
-# Every other chart in this estate is a leaf, so that job has never had to
-# resolve anything. This is the first parent, and with `chart/charts/` ignored
-# its release would fail at the package step with nothing published.
-#
-# The negation is why the directory line is ABSENT rather than negated: git does
-# not reconsider a file whose parent directory is excluded, so `chart/charts/`
-# followed by `!chart/charts/*.tgz` would ignore the tarballs anyway.
-!chart/charts/*.tgz
+# WRITTEN BY `helm dependency update`, NEVER BY HAND — and per ADR-0725, not
+# committed either. Nothing reads a committed copy: the release job always
+# resolves fresh with `-u`, which regenerates this file and discards whatever
+# git held, and `Chart.yaml` already pins exact versions with no ranges, so a
+# committed lock would add nothing a reader could not already read there.
+chart/Chart.lock
 
-# Python bytecode, which `scripts/tests/` produces the first time it runs. The
-# pin gate and its suite are the only Python here and neither is packaged.
+# Python bytecode, which `scripts/tests/` produces the first time it runs. Its
+# suite is the only Python here and it is not packaged.
 __pycache__/
 *.pyc
 .pytest_cache/

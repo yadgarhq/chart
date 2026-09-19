@@ -66,51 +66,30 @@ repos:
       # hard-fails is what ADR-0584 forbids. The eight subcharts each carry those
       # assertions in their own repositories, which is where the pod specs live.
 
-  # LOCAL, because it encodes a rule about THIS repository's shape rather than one
-  # the estate shares: the resolved subcharts are COMMITTED here, and they have to
-  # agree with the pins that name them.
+  # LOCAL, because it encodes properties of THIS chart's render rather than one
+  # the estate shares.
   #
   # `language: python` rather than `system`: pre-commit builds the environment and
-  # installs PyYAML, which a bare CI interpreter does not carry.
+  # installs PyYAML, which a bare CI interpreter does not carry — `Chart.yaml` and
+  # `values.yaml` are read with it, and so is a rendered ConfigMap's own YAML body.
   #
-  # `always_run` with `pass_filenames: false`, because the question is about the
-  # WHOLE directory. A mismatch is a property of two files together, and a hook
-  # that only saw the changed one would miss half of every mismatch it exists to
-  # find — the same reasoning `one_source_per_knob.py` uses in `yadgarhq/config`
-  # and `versions_pinned.py` uses in `yadgarhq/argocd`. It also means hook
-  # ORDERING cannot defeat it.
+  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 38 objects
+  # of a default install, that the PACKAGED chart renders the same set as the
+  # directory, that an adopter's own value reaches a child's rendered object (goal
+  # item 6), and that every CRD-bearing resource can be switched off (D80). Per
+  # ADR-0725 the packaged-chart fixture resolves dependencies with
+  # `helm package chart -u`, the same as `ci-release.yaml`'s `chart` job, so this
+  # hook needs the registry reachable rather than running offline.
+  #
+  # PYYAML'S PIN matches `yadgarhq/actions`' own `pytest-scripts` hook.
+  #
+  # `always_run` with `pass_filenames: false`, and `files:` is omitted rather
+  # than written as documentation: a hook filtered on `^scripts/` reports
+  # `Skipped`, exit 0, on a pull request that changes only `chart/Chart.yaml` —
+  # which is exactly the pull request whose effect on the render this suite exists
+  # to catch.
   - repo: local
     hooks:
-      - id: vendored-matches-pins
-        name: the committed subcharts match the pins that name them
-        entry: python scripts/vendored_matches_pins.py
-        language: python
-        additional_dependencies: [pyyaml]
-        always_run: true
-        pass_filenames: false
-
-      # THE GATE ABOVE IS THE ONLY THING between a bumped pin and a published
-      # parent carrying the wrong subchart under the right version number. helm
-      # exits 0 on that state at `package`, at `lint --strict` and at `template`,
-      # on helm 3 and helm 4 alike — measured — so a gate guarded by nothing is one
-      # refactor away from a green tick that checks nothing. The suite demands each
-      # of its refusals rather than only feeding it a conforming tree.
-      #
-      # IT ALSO CARRIES THE RENDER ASSERTIONS, and those are the ones an adopter
-      # cares about: the 38 objects of a default install, that the PACKAGED chart
-      # renders the same set as the directory, that an adopter's own value reaches a
-      # child's rendered object (goal item 6), and that every CRD-bearing resource
-      # can be switched off (D80). Every one of them runs offline, because the
-      # subcharts are committed.
-      #
-      # PYYAML IS FOR THE SUBJECT AS WELL AS THE SUITE, and both pins match
-      # `yadgarhq/actions`' own `pytest-scripts` hook.
-      #
-      # `always_run` with `pass_filenames: false`, and `files:` is omitted rather
-      # than written as documentation: a hook filtered on `^scripts/` reports
-      # `Skipped`, exit 0, on a pull request that changes only `chart/Chart.yaml` —
-      # which is exactly the pull request whose drift this suite proves the gate can
-      # still refuse.
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python

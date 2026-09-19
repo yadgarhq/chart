@@ -31,9 +31,11 @@ NO SKIPS (ADR-0650). `helm` absent is a failure, not a skip: this suite and the
 shared `helm lint and render` hook both need it, and a suite that skips when its
 subject is absent reports a pass nobody earned.
 
-THE RENDERS ARE OFFLINE. Every subchart is committed under `chart/charts/`, so
-nothing here reaches the registry and a machine with no network runs the whole
-suite.
+THE PACKAGED-CHART RENDERS ARE NOT OFFLINE. Per ADR-0725 nothing under
+`chart/charts/` is committed, so the `packaged` fixture below resolves this
+chart's eight dependencies from `oci://ghcr.io/yadgarhq/charts` with
+`helm package chart -u` — the same command `ci-release.yaml` runs — and needs
+the registry reachable. The directory-only renders (test 1) need no registry.
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -141,18 +143,19 @@ def crd_bearing(documents: list[dict]) -> list[tuple[str, str, str]]:
 def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The chart as `helm package` leaves it — the artifact an adopter downloads.
 
-    PACKAGED THE WAY `ci-release.yaml` DOES IT: a bare `helm package chart`, with
-    no `helm dependency update` in front of it. That command REFUSES a chart whose
-    dependencies are absent, so this fixture is also the assertion that the
-    committed `chart/charts/` is what makes a release possible at all.
+    PACKAGED THE WAY `ci-release.yaml` DOES IT PER ADR-0725: `helm package chart -u`,
+    with `-u` resolving this chart's eight dependencies from
+    `oci://ghcr.io/yadgarhq/charts` before packaging. Nothing under `chart/charts/`
+    is committed, so this fixture is also the assertion that resolving at package
+    time is what makes a release possible at all.
     """
     workspace = tmp_path_factory.mktemp("package")
     shutil.copytree(CHART, workspace / "chart")
-    result = helm("package", "chart", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
+    result = helm("package", "chart", "-u", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
     assert result.returncode == 0, (
-        "`helm package chart` failed, which is exactly what `ci-release.yaml` runs. "
-        f"If it names a dependency missing from `charts/`, run `helm dependency "
-        f"update chart` and commit the result.\n{result.stderr}"
+        "`helm package chart -u` failed, which is exactly what `ci-release.yaml` runs. "
+        f"If it names a dependency it cannot resolve, check the registry and the pin "
+        f"in `chart/Chart.yaml`.\n{result.stderr}"
     )
     tarball = workspace / "yadgar-0.1.0.tgz"
     assert tarball.is_file(), sorted(path.name for path in workspace.iterdir())
@@ -163,10 +166,16 @@ def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_the_parent_declares_no_templates_of_its_own(tmp_path: Path) -> None:
-    """Every rendered object comes from a subchart, asserted by removing them all."""
+    """Every rendered object comes from a subchart, asserted by removing them all.
+
+    `chart/charts/` and `chart/Chart.lock` are git-ignored rather than committed
+    (ADR-0725), so a copy of `CHART` may or may not carry them depending on
+    whether a contributor ran `helm dependency update` locally — hence
+    `ignore_errors`/`missing_ok` rather than an assertion either way existed.
+    """
     shutil.copytree(CHART, tmp_path / "chart")
-    shutil.rmtree(tmp_path / "chart" / "charts")
-    (tmp_path / "chart" / "Chart.lock").unlink()
+    shutil.rmtree(tmp_path / "chart" / "charts", ignore_errors=True)
+    (tmp_path / "chart" / "Chart.lock").unlink(missing_ok=True)
     stripped = yaml.safe_load((tmp_path / "chart" / "Chart.yaml").read_text())
     stripped.pop("dependencies", None)
     (tmp_path / "chart" / "Chart.yaml").write_text(yaml.safe_dump(stripped, sort_keys=False))

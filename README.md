@@ -31,14 +31,16 @@ version that does not exist.
 
 ```
 chart/Chart.yaml          the eight pins, and nothing else of substance
-chart/Chart.lock          written by `helm dependency update`, never by hand
-chart/charts/*.tgz        THE RESOLVED SUBCHARTS, COMMITTED — see below
 chart/values.yaml         almost empty, and the comment explains the one line in it
 chart/templates/          one partial that renders nothing, and it says why
 example/application.yaml  what you commit to your own repository
 example/values.yaml       how you set a module's knob from your own repository
-scripts/vendored_matches_pins.py   the gate that keeps chart/charts/ honest
 ```
+
+`chart/charts/` and `chart/Chart.lock` are not in that list, and not in the
+repository: per ADR-0725 the release pipeline resolves the eight pins at
+package time (`helm package chart -u`), so nothing here is ever committed.
+`chart/charts/` is git-ignored the same way `yadgarhq/config`'s is.
 
 **It renders no objects of its own.** Every one of the 38 objects a default
 install produces comes from one of the eight module charts, each reviewed, gated
@@ -58,40 +60,38 @@ every level, so a typo under `config:` is refused by name. Closing the gap for t
 other seven belongs in those seven charts, not in a file here that would own their
 interfaces from outside them.
 
-## The subcharts are committed, and this is the one place this repository differs from its siblings
+## The subcharts are resolved at release time, not committed
 
-`yadgarhq/config` ignores `chart/charts/` outright. Copying that line here would
-have been silent and fatal, so here is the measurement.
+`ci-release.yaml`'s `chart` job in `yadgarhq/actions` runs
+`helm package chart -u --version ... --app-version ...` (ADR-0725). The `-u`
+resolves this chart's eight dependencies from `oci://ghcr.io/yadgarhq/charts`
+before packaging, so nothing here has to be committed for a release to
+publish — `chart/charts/` stays git-ignored, exactly as `yadgarhq/config`'s is.
 
-`ci-release.yaml`'s `chart` job in `yadgarhq/actions` runs a bare
-`helm package chart`. Every other chart in this estate is a leaf with no
-dependencies, so that job has never had to resolve anything — and `helm package`
-refuses a chart whose declared dependencies are absent:
+The first cut of this repository committed the resolved tarballs instead,
+because `yadgarhq/actions` was out of scope at the time and a bare
+`helm package chart` with no `-u` refuses a chart whose declared dependencies
+are absent:
 
 ```
 Error: found in Chart.yaml, but missing in charts/ directory:
 config, gateway, iam, iam-db, project, project-db, task, task-db
 ```
 
-With `chart/charts/` ignored, this repository's first release would fail at the
-package step with nothing published. The subcharts are therefore resolved at
-commit time and committed, which is 216 KB across eight files.
+ADR-0725 rules that out. A stale vendored subchart is silent on every tool
+this estate runs — `helm package`, `helm lint --strict` and `helm template`
+all exited 0 on a `Chart.yaml` pinning `gateway 0.9.49` while `chart/charts/`
+still held `gateway-0.9.48.tgz`, on helm 3 and helm 4 alike, and the published
+artifact shipped the old subchart under the new version number. Resolving at
+release time removes that disagreement rather than adding a gate to detect it.
 
-**What that buys an adopter:** a self-contained package. `helm install` does not
-resolve dependencies — it expects the subcharts to be inside the artifact — and
-measured 2026-09-19, the published parent carries all eight expanded under
-`yadgar/charts/<module>/`. So an install needs exactly one anonymous pull and
-touches no other registry path.
-
-**What it costs, and what stops it hurting.** A pin bumped in `chart/Chart.yaml`
-with a stale tarball still in `chart/charts/` packages, lints `--strict` and
-templates with **exit 0** on both helm 3.20.2 and helm 4.2.3, and publishes the
-old subchart under the new version number. The only helm command that notices is
-`helm dependency build`, and no gate in this estate runs it.
-`scripts/vendored_matches_pins.py` is what turns that into a refused commit: it
-compares `Chart.yaml`, `Chart.lock` and each tarball's own inner `Chart.yaml`, so
-a renamed file does not satisfy it either. ADR-0722's automatic pin bump has to
-refresh `chart/charts/` in the same commit, and this gate is what says so.
+**What an adopter still gets is a self-contained package.** `helm install`
+does not resolve dependencies — it expects the subcharts to be inside the
+artifact — and `-u` expands OCI dependencies into the tarball as directories
+(`yadgar/charts/<module>/Chart.yaml`), not nested archives, before the package
+is written. So an install needs exactly one anonymous pull and touches no
+other registry path; only the release job, not the adopter, ever resolves
+anything.
 
 ## Every version here is the semver maximum, never the lexical one
 
@@ -105,8 +105,9 @@ maximum pins a downgrade and nothing downstream notices.
 ## How a change here is proven
 
 `python3 -m pytest scripts/tests/ -q`, which the `pytest-scripts` pre-commit hook
-runs on every commit. Everything below runs offline, because the subcharts are
-committed.
+runs on every commit. The packaged-chart fixture resolves dependencies with
+`helm package chart -u`, the same command `ci-release.yaml` runs, so this
+suite needs the registry reachable rather than running offline.
 
 | what                                                  | asserted as                                                                                            |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -116,7 +117,6 @@ committed.
 | the package is self-contained                         | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                            |
 | an adopter's value reaches a child (goal item 6)      | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300 |
 | it installs on a bare cluster (D80)                   | the all-off render carries no resource outside the built-in Kubernetes API groups                      |
-| the committed subcharts match the pins                | each refusal of `vendored_matches_pins.py` demanded, not only a conforming tree                        |
 
 The object count is an equality rather than a ceiling on purpose. A module release
 that adds or drops an object changes what an adopter of the parent receives, and
