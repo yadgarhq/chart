@@ -19,7 +19,13 @@ edit marked. `example/values.yaml` is how you change a module's setting from you
 own repository without forking anything.
 
 **There is no published parent yet.** `ghcr.io/yadgarhq/charts/yadgar` has no tags
-as of 2026-09-19. The first one appears when this repository is tagged.
+as of 2026-09-19. The first one appears when this repository is tagged, and the
+`0.1.0` above assumes that tag is `v0.1.0` — `next_version.py` derives every
+version after the first from the Changelog but has an explicit branch saying "the
+first tag of a repository is cut by hand", so the number is whoever cuts it's
+choice. A different first tag makes this snippet, `example/application.yaml`'s
+`targetRevision` and `example/values.yaml`'s two `--version` examples name a
+version that does not exist.
 
 ## What it contains, and what it deliberately does not
 

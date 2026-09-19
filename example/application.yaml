@@ -93,6 +93,15 @@ spec:
     # THERE IS NO PUBLISHED PARENT YET. `ghcr.io/yadgarhq/charts/yadgar` has no
     # tags as of 2026-09-19; the first one appears when this repository is tagged.
     # Until then this Application has nothing to pull.
+    #
+    # `0.1.0` HERE ASSUMES THE FIRST TAG IS `v0.1.0`, and it is an assumption
+    # rather than a derivation. Every version after the first is computed from the
+    # Changelog, but `next_version.py` has an explicit branch for a repository with
+    # no `v*` tag at all: "the first tag of a repository is cut by hand". So
+    # whoever cuts it chooses the number, and if they choose another one, this
+    # line, the install snippet in `README.md` and the two `--version` examples in
+    # `example/values.yaml` are the three places that then name a version which
+    # does not exist.
     targetRevision: 0.1.0
   destination:
     server: https://kubernetes.default.svc
