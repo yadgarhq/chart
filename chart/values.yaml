@@ -34,7 +34,7 @@
 # first, the `HTTPRoute` survives, and the job fails the parent for a
 # `gateway.networking.k8s.io` resource an adopter supposedly cannot switch off —
 # when in fact they can. Measured 2026-09-19: with this file empty the all-off
-# render keeps the HTTPRoute; with the line below it renders 37 objects and no
+# render keeps the HTTPRoute; with the line below it renders 31 objects and no
 # resource outside the built-in groups.
 #
 # THE FAILURE DIRECTION IS LOUD, which is what makes the duplication tolerable.
