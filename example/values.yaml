@@ -1,0 +1,58 @@
+# THE VALUES FILE AN ORGANISATION COMMITS BESIDE `application.yaml`, in its OWN
+# GitOps repository. Copy it there and point the Application at it.
+#
+# COPYING IT AS IT STANDS CHANGES NOTHING: this file is `{}` and the parent renders
+# the same 38 objects with it as without it.
+#
+# ─── how a knob is addressed ─────────────────────────────────────────────────
+#
+# THE OUTERMOST KEY IS THE MODULE'S CHART NAME, and the rest is that chart's own
+# values path. Helm scopes a subchart's values under a key named after the
+# subchart, per leaf, so a key you do not state keeps that module's own default:
+#
+#   config:
+#     shared:
+#       tlsRotation:
+#         pollSeconds: 45      # <- yours
+#                              #    splayMaxSeconds stays at the chart's 300
+#
+#   gateway:
+#     replicaCount: 3
+#
+# The eight names are `config`, `gateway`, `iam`, `iam-db`, `project`,
+# `project-db`, `task` and `task-db`. `helm show values` on the parent prints the
+# parent's own file, which is almost empty by design — render the version you
+# pinned instead, and read the children's values from it:
+#
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.1.0
+#
+# ─── what happens if you set something no child declares ─────────────────────
+#
+# IT IS ACCEPTED AND IGNORED, silently, in seven cases out of eight. THIS PARENT
+# CARRIES NO `values.schema.json` — see `chart/values.yaml` upstream for why one
+# would have to enumerate every child's knobs and would then drift from them — and
+# seven of the eight module charts carry no schema either. So `gateway:
+# replicaCont: 3` renders exit 0, no warning, and no replicas changed.
+#
+# `config` IS THE EXCEPTION and it is worth knowing which way round it is. That
+# chart's schema is closed at every level, so a typo under `config:` is REFUSED BY
+# NAME and your sync fails rather than quietly doing nothing.
+#
+# UNTIL A PARENT SCHEMA EXISTS, THE CHECK IS YOURS: render before you sync, and
+# read the object you meant to change.
+#
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
+#     --version 0.1.0 -f values.yaml | less
+#
+# ─── one trap, measured ──────────────────────────────────────────────────────
+#
+# HELM DOES NOT TELL YOU A VALUES FILE IS MALFORMED. It reads what it can and
+# renders: measured on helm 3 and helm 4, a comment block followed by a stray
+# top-level key — which PyYAML rejects outright — rendered the chart's own
+# defaults and exited 0, silently.
+#
+# So if a knob you believe you set has no effect, PARSE YOUR FILE before you doubt
+# the chart:
+#
+#   python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' values.yaml
+{}

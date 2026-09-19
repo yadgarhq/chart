@@ -1,0 +1,106 @@
+# WHAT AN ORGANISATION COMMITS TO ITS OWN GitOps REPOSITORY TO RUN YADGAR. Copy
+# this file into your repository, pin the version you want, and you have an
+# installation. You clone nothing and you never fork the chart (ADR-0705, D60 as
+# amended by ADR-0706).
+#
+# ONE APPLICATION, EIGHT MODULES. The chart this points at declares every module
+# as a dependency pinned to a released version, so a bump of the single number
+# below moves the whole estate to a set of versions that were released together.
+# Standing up eight Applications and keeping their versions in step by hand is
+# what this replaces.
+#
+# THIS FILE IS A REFERENCE, NOT A LIVE MANIFEST. Nothing in this repository syncs
+# it. The `yadgarhq` reference installation does not use it either yet — converting
+# our own cluster to the parent is a later phase and needs a published parent
+# version to pin first — so treat the shape as documented rather than as
+# exercised. Render it yourself before you rely on it.
+#
+# WHAT YOU MAY OVERRIDE: every knob any of the eight module charts defines,
+# stated under that module's own name. `example/values.yaml` beside this file is
+# the shape. There is NO parent schema, so a key no child declares is accepted
+# and silently ignored rather than refused by name — see that file for what that
+# costs you and which child is the exception.
+#
+# TO PASS A VALUES FILE you need Argo's MULTI-SOURCE form, because the chart comes
+# from a registry and the values file from your git repository. THE BLOCK BELOW IS
+# COMMENTED OUT ON PURPOSE and `spec.source` further down is live instead — a WRONG
+# `$values` PATH FAILS THE SYNC HARD, so it stays inert until you have a file to
+# point it at. Uncomment it, delete `spec.source`, and fill in your own repository
+# the day you set your first knob.
+#
+#   spec:
+#     sources:
+#       - repoURL: ghcr.io/yadgarhq/charts
+#         chart: yadgar
+#         targetRevision: 0.1.0
+#         helm:
+#           valueFiles:
+#             # $<ref> BELOW, NOT `$self`. The name is yours to choose and it has to
+#             # match the `ref:` on the second source; `self` is not a reserved word
+#             # and nothing supplies one. The path is relative to that repository's
+#             # ROOT, so it is the path you committed the file at.
+#             - $values/yadgar/values.yaml
+#       # A REF-ONLY SOURCE: no `chart:` and no `path:`, because it contributes no
+#       # manifests. Exactly one source in a multi-source Application may render;
+#       # this one only lends its checkout to the interpolation above.
+#       - repoURL: https://github.com/YOUR-ORG/YOUR-GITOPS-REPO.git
+#         targetRevision: main
+#         ref: values
+#
+# THE SCHEME-LESS `repoURL` IS DELIBERATE. Argo auto-enables OCI for a Helm source
+# whose `repoURL` carries no scheme, which is why `chart:` sits beside it. The
+# explicit `oci://` form also works but takes `path: .` instead of `chart:`, and
+# the two must not be mixed.
+#
+# NO REPOSITORY SECRET, AND NO REGISTRY ACCESS AT INSTALL TIME BEYOND THIS ONE
+# PULL. Measured 2026-09-19: the published parent package carries all eight
+# subcharts inside it, expanded under `yadgar/charts/<module>/`, so Argo resolves
+# nothing further. `helm install` does not resolve dependencies at all — it expects
+# a self-contained package — and this one is. The parent package and every module
+# package are public, so the pull is anonymous.
+#
+# NO SYNC WAVE ON THIS APPLICATION, and that is the one thing to read before you
+# deploy it. The reference installation runs configuration at wave -12, ahead of
+# every module, because a ConfigMap volume is `optional: false` and a pod whose
+# ConfigMap has not synced sits in `ContainerCreating` indefinitely. Inside ONE
+# Application there are no waves between the children: Argo applies the whole
+# rendered set together, and a pod may therefore start before its ConfigMap
+# exists, recover when the ConfigMap arrives, and look stuck in between. That is
+# slower rather than broken, and it is why the first install of a new namespace is
+# worth watching rather than assuming.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yadgar
+  # ARGO'S namespace, not the workload's. `destination.namespace` below is where
+  # the objects land.
+  namespace: argocd
+spec:
+  # CHANGE THIS if your Argo uses a project other than `default`.
+  project: default
+  source:
+    repoURL: ghcr.io/yadgarhq/charts
+    chart: yadgar
+    # EDIT THIS, and bump it deliberately. This is the line an upgrade moves, and
+    # it is the only thing that changes what you get.
+    #
+    # BARE SEMVER, no leading `v`. The git tag is `v0.1.0`; the chart version is
+    # `0.1.0`, because the release pipeline strips the `v` once and every published
+    # artifact carries the bare form. `chart/Chart.yaml` in this repository also
+    # reads `0.1.0` and that is not what decides the published version — the
+    # release packages with `--version` taken from the tag.
+    #
+    # THERE IS NO PUBLISHED PARENT YET. `ghcr.io/yadgarhq/charts/yadgar` has no
+    # tags as of 2026-09-19; the first one appears when this repository is tagged.
+    # Until then this Application has nothing to pull.
+    targetRevision: 0.1.0
+  destination:
+    server: https://kubernetes.default.svc
+    # WHERE EVERY OBJECT LANDS, and it has to be one namespace: a pod can only
+    # mount a ConfigMap from the namespace it runs in, and the modules' ConfigMaps
+    # come from the same chart. EDIT THIS if you want the estate somewhere other
+    # than a namespace called `yadgar`.
+    namespace: yadgar
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]

@@ -1,0 +1,9 @@
+# Helm templates are Go templates wearing YAML. Prettier cannot parse them and
+# would mangle them if it could.
+chart/templates/
+
+# WRITTEN BY `helm dependency update`, NEVER BY HAND. Reformatting it would make
+# the next `helm dependency update` produce a diff that looks like a change and is
+# not, and `helm dependency build` compares this file byte for byte against
+# `chart/Chart.yaml`'s dependency list.
+chart/Chart.lock

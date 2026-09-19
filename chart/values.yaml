@@ -1,0 +1,47 @@
+# WHAT THIS PARENT STATES ON ITS OWN BEHALF, and it is deliberately almost
+# nothing. Every knob an adopter can set belongs to a child chart and is reached
+# through the child's own name — `config.shared.tlsRotation.pollSeconds`,
+# `gateway.replicaCount`, and so on. `example/values.yaml` beside this chart is
+# the shape.
+#
+# NO `values.schema.json`, AND THE ABSENCE IS A DECISION RATHER THAN AN OVERSIGHT.
+# A parent schema would have to enumerate every knob of all eight children to
+# avoid refusing a legitimate one, and it would then drift from them on the first
+# module release that adds a knob — a refusal of a key the child accepts, from a
+# file nobody thought to update. Seven of the eight module charts carry no schema
+# of their own, so a typo in an adopter's values for those seven is silently
+# ignored today; that gap is real and it is filed as its own row rather than
+# solved here, because solving it in this file means owning every child's
+# interface from outside it. `config` is the one child with a closed schema, and
+# a typo under `config:` is still refused BY NAME through this parent.
+#
+# ONE EXCEPTION, AND IT IS FORCED BY A GATE RATHER THAN CHOSEN --------------------
+#
+# `gateway.gateway.enabled` below restates a default that already lives in the
+# gateway chart. That is two writers for one value and it is normally the thing
+# this estate refuses, so here is exactly why it is here.
+#
+# `ci-pr.yaml`'s `portability` job runs `scripts/d80_portability.py`, which proves
+# D80's installable-on-a-bare-cluster property by rendering the chart twice: once
+# at its defaults, once with EVERY VALUES KEY NAMED `enabled` SET TO FALSE, and it
+# requires the second render to contain nothing outside the built-in Kubernetes
+# API groups. It reads those keys out of THIS FILE — `chart/values.yaml` of the
+# chart under review — and nothing else.
+#
+# The gateway chart's `HTTPRoute` is guarded by `.Values.gateway.enabled` inside
+# that chart, which through this parent is `gateway.gateway.enabled`. With this
+# file empty the gate finds no `enabled` key at all, the second render equals the
+# first, the `HTTPRoute` survives, and the job fails the parent for a
+# `gateway.networking.k8s.io` resource an adopter supposedly cannot switch off —
+# when in fact they can. Measured 2026-09-19: with this file empty the all-off
+# render keeps the HTTPRoute; with the line below it renders 37 objects and no
+# resource outside the built-in groups.
+#
+# THE FAILURE DIRECTION IS LOUD, which is what makes the duplication tolerable.
+# If the gateway chart ever renames or removes that key, this line stops reaching
+# anything, the child's own default renders the HTTPRoute again, the all-off
+# render keeps it, and the `portability` job goes RED naming the resource. It does
+# not go quietly green on a stale value.
+gateway:
+  gateway:
+    enabled: true
