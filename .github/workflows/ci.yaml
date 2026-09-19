@@ -12,8 +12,11 @@ name: ci
 # THE PUSH PATH IS VALIDATED, NOT ASSUMED, AND THE COMMENT THAT USED TO STAND HERE
 # WAS THE ROOT CAUSE. It read "the ruleset makes direct pushes impossible, so there
 # is no drift to catch". THERE IS NO RULESET ON THIS REPOSITORY. Measured
-# 2026-09-19: `GET /repos/yadgarhq/chart/rulesets` returns `[]` and
-# `branches/main/protection` returns 404 "Branch not protected". And ADR-0722's
+# 2026-09-19 on the endpoint that settles it rather than the weaker one:
+# `GET /repos/yadgarhq/chart/rules/branches/main` returns `[]`, and that call
+# includes ORGANISATION-LEVEL parents, so nothing applies to this branch from
+# above either. `rulesets?includes_parents=true` also returns `[]`, and
+# `branches/main` reports `protected: false`. And ADR-0722's
 # `parent_bump.py` writes the eight pins STRAIGHT TO `main` over the Contents API,
 # which is not a merge and passes through no pull request.
 #
@@ -47,9 +50,21 @@ jobs:
   # reads those secrets, and its own condition is `push` to `refs/heads/main`.
   # So the split costs nothing and removes the whole exposure.
   #
-  # THE NAME `ci` IS LOAD-BEARING. The ruleset on `main` requires the check
-  # `ci / passed`, which is `<caller job id> / <called job id>` — renaming this
-  # job breaks the merge gate rather than reporting anything.
+  # THE NAME `ci` IS LOAD-BEARING EVERYWHERE ELSE IN THE ESTATE, AND HERE IT IS
+  # NOT — which is the defect and not a licence to rename it. `ci / passed` is
+  # `<caller job id> / <called job id>`, and it is the one required check on
+  # `main` in every repository that HAS a ruleset. This repository has none:
+  # measured 2026-09-19, `GET /repos/yadgarhq/chart/rules/branches/main` returns
+  # `[]` — that endpoint includes organisation-level parents — and so does
+  # `rulesets?includes_parents=true`. For contrast the same call against
+  # `yadgarhq/config` returns 5 rules, so the estate does use rulesets and this
+  # repository was simply never given one.
+  #
+  # So renaming this job today breaks nothing, because nothing requires the
+  # check. Keep the name anyway: the ruleset this repository should have is one
+  # `gh api` call away, and a rename now means the check it asks for does not
+  # exist. `push_validation` below is what validates the push path in the
+  # meantime, and it is a notification rather than the wall a ruleset would be.
   ci:
     if: github.event_name == 'pull_request'
     uses: yadgarhq/actions/.github/workflows/ci-pr.yaml@main
@@ -57,9 +72,24 @@ jobs:
       contents: read
       checks: read
 
-  # THE SAME SHARED WORKFLOW ON THE PUSH PATH, where the credential is needed
-  # and where nothing unreviewed runs. A push to `main` here is a merge that has
-  # already passed `ci / passed`; the ruleset forbids any other kind.
+  # THE SAME SHARED WORKFLOW ON THE PUSH PATH, where the credential is needed.
+  #
+  # THIS USED TO SAY "nothing unreviewed runs" here, on the grounds that a push
+  # to `main` is a merge that already passed `ci / passed` and "the ruleset
+  # forbids any other kind". THERE IS NO RULESET — see the `ci` job above for the
+  # measurement — so a push to `main` is NOT necessarily a reviewed merge, and
+  # ADR-0722's `parent_bump.py` writes the pins over the Contents API precisely
+  # without passing through one.
+  #
+  # WHAT THAT MEANS FOR THE CREDENTIAL, said plainly rather than left implied:
+  # the two secrets below reach a workflow run whose `ci.yaml` came from the
+  # pushed commit, and only a ruleset requiring `ci / passed` makes that commit
+  # a reviewed one. `version` is still the only job that reads them and its own
+  # condition is `push` to `refs/heads/main`, so the split from the pull-request
+  # path above still removes the whole PULL-REQUEST exposure it was made for —
+  # that reasoning is untouched and remains correct. Narrowing the push-path
+  # exposure needs the ruleset, which is a repository-settings change and not a
+  # change to this file.
   #
   # NAMED RATHER THAN `secrets: inherit`, and that is the estate's own tooling
   # deciding rather than a preference. `inherit` was the chosen form — same
