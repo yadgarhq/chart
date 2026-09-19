@@ -9,9 +9,25 @@ name: ci
 # job's `packages: write` invalid — and the failure is a run with ZERO JOBS and
 # no logs, which says nothing about permissions. Each job states its own instead.
 #
-# Push to main runs the version report only. Validating there would re-run what
-# the pull request just passed, on code already merged, with nobody watching —
-# and the ruleset makes direct pushes impossible, so there is no drift to catch.
+# THE PUSH PATH IS VALIDATED, NOT ASSUMED, AND THE COMMENT THAT USED TO STAND HERE
+# WAS THE ROOT CAUSE. It read "the ruleset makes direct pushes impossible, so there
+# is no drift to catch". THERE IS NO RULESET ON THIS REPOSITORY. Measured
+# 2026-09-19: `GET /repos/yadgarhq/chart/rulesets` returns `[]` and
+# `branches/main/protection` returns 404 "Branch not protected". And ADR-0722's
+# `parent_bump.py` writes the eight pins STRAIGHT TO `main` over the Contents API,
+# which is not a merge and passes through no pull request.
+#
+# So the one commit that ever changes what an adopter receives was the one commit
+# nothing checked. Measured on `adf30008` ("ci: pin gateway 0.9.49 in the parent
+# chart"): `main / detect`, `precommit`, `template`, `test`, `portability`,
+# `workflows` and `vulnerabilities` all `skipped` — correctly, since each of those
+# jobs in `ci-pr.yaml` reads `github.event_name != 'push'` — while `main / passed`
+# reported SUCCESS. `EXPECTED["ConfigMap"]` then said 9 against a render of 3 for
+# seven consecutive pin commits with nothing going red.
+#
+# `push_validation` below is this repository's own answer, kept local because
+# `ci-pr.yaml`'s conditions are right for the eighteen other repositories that
+# call it and widening them there would double every merge's CI across the estate.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -88,6 +104,71 @@ jobs:
   # `chart` job resolves this chart's eight dependencies at package time
   # (`helm package chart -u`), so nothing here commits a subchart and
   # `chart/charts/` stays ignored — see `.gitignore`.
+  # WHAT VALIDATES A PIN COMMIT, AND THE REASON IT IS HERE RATHER THAN SHARED.
+  # See the header above for the measurement. This runs on a push to `main` and
+  # runs what actually matters for a change to the eight pins: the render
+  # assertions and `helm lint --strict`.
+  #
+  # IT IS A NOTIFICATION AND NOT A WALL, said here so nobody reads it as more.
+  # Publishing fires on the TAG through `release` below and depends on no job in
+  # this file — measured on `adf30008`, where `release / chart` SUCCEEDED while
+  # every `main / *` validation job skipped. So a broken pin makes `main` red and
+  # visible, and `charts/yadgar` still publishes. Making it a wall means changing
+  # the shared `ci-release.yaml`, which is a separate decision.
+  #
+  # NO `needs:`, DELIBERATELY. A job whose `if:` calls none of
+  # `always()`/`success()`/`failure()`/`cancelled()` is skipped when an ancestor
+  # did not conclude `success` — including an INDIRECT one, which is how
+  # `ci-release.yaml`'s `parent` job shipped dark. With no `needs:` there is no
+  # ancestor that can turn this off. `test_the_push_path_job_admits_a_push_to_main`
+  # asserts both the condition and the absence of `needs:`.
+  #
+  # NOT PART OF `ci / passed`. That check is the `passed` job INSIDE `ci-pr.yaml`
+  # and sees only jobs of that reusable workflow, so adding this one changes no
+  # merge gate.
+  push_validation:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # A JOB STATES ITS OWN, per the header: there is no workflow-level block, so a
+    # job that asks for nothing gets the default. Reading the tree is all this does.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # zizmor's `artipacked` audit: the checkout credential is written into
+          # `.git/config` and this job pushes nothing.
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      # THE SAME HELM THE ESTATE SETTLED ON, action and version both. Argo CD's
+      # bundled helm is what `ci-pr.yaml` pins to and `helm_pin_agrees.py` in
+      # `yadgarhq/actions` exists because a second answer to this question is a
+      # defect. That gate reads `.github/workflows/` of ITS OWN repository and does
+      # not police this file, so the agreement here is kept by hand — which is
+      # exactly why it is written down rather than left to be noticed.
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+      - name: the render assertions and helm lint, on the pins as pushed
+        # NO `${{ }}` IN THIS BLOCK. An expression interpolated into a shell script
+        # is the template-injection class zizmor audits for, and this job needs no
+        # context value at all.
+        run: |
+          set -euo pipefail
+          # The suite's own versions, matching `.pre-commit-config.yaml`'s
+          # `pytest-scripts` hook so a local run and this one mean the same thing.
+          python3 -m pip install --quiet "pytest==9.1.1" "pyyaml==6.0.3"
+          # ADR-0725: this chart's dependencies are resolved, never vendored, and
+          # `helm lint --strict` REFUSES a chart whose `dependencies:` key is
+          # unresolved exactly as `helm package` does. So this runs FIRST, not after.
+          helm dependency update chart
+          helm lint --strict chart
+          # The suite re-resolves from a copy of `chart/` for its packaged fixture,
+          # which is the artifact an adopter actually installs.
+          python3 -m pytest scripts/tests/ -q
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
     uses: yadgarhq/actions/.github/workflows/ci-release.yaml@main

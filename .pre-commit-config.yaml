@@ -73,7 +73,7 @@ repos:
   # installs PyYAML, which a bare CI interpreter does not carry — `Chart.yaml` and
   # `values.yaml` are read with it, and so is a rendered ConfigMap's own YAML body.
   #
-  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 38 objects
+  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 32 objects
   # of a default install, that the PACKAGED chart renders the same set as the
   # directory, that an adopter's own value reaches a child's rendered object (goal
   # item 6), and that every CRD-bearing resource can be switched off (D80). Per

@@ -42,7 +42,7 @@ repository: per ADR-0725 the release pipeline resolves the eight pins at
 package time (`helm package chart -u`), so nothing here is ever committed.
 `chart/charts/` is git-ignored the same way `yadgarhq/config`'s is.
 
-**It renders no objects of its own.** Every one of the 38 objects a default
+**It renders no objects of its own.** Every one of the 32 objects a default
 install produces comes from one of the eight module charts, each reviewed, gated
 and released in its own repository. A parent that rendered a Deployment or a
 ConfigMap of its own would be a ninth module nobody declared, and ADR-0723 names
@@ -112,10 +112,13 @@ suite needs the registry reachable rather than running offline.
 | what                                                  | asserted as                                                                                            |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | the parent renders nothing of its own                 | an empty render with every subchart removed                                                            |
-| a default install is 38 objects                       | 9 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute             |
+| a default install is 32 objects                       | 3 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute             |
 | the PACKAGED chart renders what the directory renders | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                  |
 | the package is self-contained                         | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                            |
 | an adopter's value reaches a child (goal item 6)      | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300 |
+| a value for one child reaches no other                | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only    |
+| no knob is stated in two ConfigMaps                   | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path            |
+| a push to `main` is validated                         | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`       |
 | it installs on a bare cluster (D80)                   | the all-off render carries no resource outside the built-in Kubernetes API groups                      |
 
 The object count is an equality rather than a ceiling on purpose. A module release
@@ -124,6 +127,16 @@ ADR-0722 removed the compatibility gate that used to sit in front of that. A bum
 whose effect on the rendered set nobody looked at is exactly the state those
 numbers exist to interrupt: update them in the same commit as the pin, and say in
 the pull request which module moved them.
+
+`push_validation` in `.github/workflows/ci.yaml` runs that suite and
+`helm lint --strict` on a push to `main`. ADR-0722's `parent_bump.py` writes the
+eight pins straight to `main` over the Contents API, which passes through no pull
+request, and every validation job of the shared `ci-pr.yaml` skips on a push — so
+until it existed the one commit that ever changes the pins was checked by nothing.
+**It is a notification and not a wall.** Publishing fires on the TAG through
+`ci-release.yaml` and depends on no job in this file, so a broken pin makes `main`
+red and visible while `charts/yadgar` still publishes. Making it a wall means
+changing the shared release workflow.
 
 ## What lives elsewhere
 
