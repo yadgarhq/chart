@@ -1,0 +1,78 @@
+# THE WHOLE OF YADGAR, AS ONE THING AN ADOPTER INSTALLS (D60, as amended by
+# ADR-0706). An adopter commits one Argo `Application` pinned to one version of
+# this chart and gets every module, rather than standing up eight of them and
+# keeping their versions in step by hand.
+#
+# `type: application` rather than `library`, and it renders no objects of its own
+# — see `templates/_no_objects_of_its_own.tpl` for why that is not a
+# contradiction. A library chart cannot be installed, and being installed is the
+# only thing this chart does.
+#
+# NO `appVersion`. There is no application here to version: the content of this
+# chart is the eight pins below, and the version that means anything is the one
+# an adopter wrote in their `Application`. `ci-release.yaml` passes
+# `--app-version` from the tag anyway, so a value written here would be
+# overwritten at package time and would mislead anybody reading the source.
+apiVersion: v2
+name: yadgar
+description: The whole of yadgar as one chart — every module, pinned to a released version.
+type: application
+# THE PARENT'S OWN VERSION, AND NOTHING CONSUMES IT. `ci-release.yaml` packages
+# with `--version` taken from the git tag, so the published artifact's version is
+# the tag and this line is the number a local `helm package` uses. ADR-0722 rules
+# that a module release cuts a new parent version; the ladder is the estate's
+# existing one, because `next_version.py` already carries a pre-1.0 branch in
+# which a breaking change bumps minor and everything else bumps patch. No second
+# ladder is authored here.
+version: 0.1.0
+home: https://github.com/yadgarhq/chart
+sources:
+  - https://github.com/yadgarhq/chart
+
+# THE EIGHT MODULES, EACH PINNED TO AN EXACT PUBLISHED VERSION. Measured
+# 2026-09-19 against `ghcr.io/yadgarhq/charts` with no credential: all eight
+# resolve, eight `Pulled:` lines, exit 0.
+#
+# EVERY VERSION HERE IS THE SEMVER MAXIMUM, NEVER THE LEXICAL ONE, and that is
+# the one rule any automation touching this block must keep. A lexical sort of
+# gateway's 74 tags answers `0.9.9`; the newest is `0.9.48`. Lexical ordering is
+# wrong for six of these eight today — gateway, iam, iam-db, project, task and
+# task-db — and ADR-0690 records the same error producing nineteen downgrade
+# pull requests in this estate. A lexical maximum pins a DOWNGRADE and nothing
+# downstream notices.
+#
+# NO VERSION RANGES. A range would make the chart mean different things on
+# different days, which is the whole of what pinning exists to stop: an adopter
+# who pinned one version of this chart must get the same eight module versions a
+# year later.
+#
+# A CHANGE HERE NEEDS NOTHING ELSE, per ADR-0725. The release pipeline resolves
+# these eight pins at package time (`helm package chart -u`), so `chart/charts/`
+# and `chart/Chart.lock` are never committed and never need to agree with this
+# block by hand — the resolve happens from these pins alone, every time. ADR-0722's
+# pin rewriter therefore writes this file only.
+dependencies:
+  - name: config
+    version: 0.1.5
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: gateway
+    version: 0.9.48
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: iam
+    version: 0.8.39
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: iam-db
+    version: 0.7.40
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: project
+    version: 0.1.17
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: project-db
+    version: 0.3.5
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: task
+    version: 0.5.28
+    repository: oci://ghcr.io/yadgarhq/charts
+  - name: task-db
+    version: 0.6.29
+    repository: oci://ghcr.io/yadgarhq/charts
