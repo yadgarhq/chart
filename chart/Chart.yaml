@@ -56,7 +56,7 @@ dependencies:
     version: 0.2.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
-    version: 0.9.49
+    version: 0.9.50
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
     version: 0.8.40
