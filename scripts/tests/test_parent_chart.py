@@ -228,7 +228,14 @@ ADOPTER_OBJECTS = 77
 # IT IS TWO TODAY BECAUSE THE PREFLIGHT IS ONE JOB TODAY. The post-install Envoy
 # Gateway probe in `plans/the-platform-layer-in-the-charts.md` adds a second
 # preflight Job with a triple of its own; that step is not in `platform` 0.1.6 and
-# this number moves when it lands.
+# this number moves when it lands. MEASURED at a real 0.1.7 spliced into this parent
+# on 2026-09-24: `RBAC_TRIPLE_NAMES_AT_R5` gains `envoy-gateway-probe` and
+# `HOOK_JOBS_AT_R5` goes to 4, alongside `ADOPTER_OBJECTS` 77 → 81.
+#
+# `AGREEMENT_PAIRS_AT_R5` DOES NOT MOVE WITH THEM, and the asymmetry is the point.
+# The new Job is a second RBAC identity and a fourth hook, so these two counts see
+# it; its probe pairs two of `platform`'s own keys, so the parent's pair count does
+# not. The two numbers move at different pins, never together.
 RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "preflight"]
 HOOK_JOBS_AT_R5 = 3
 
@@ -265,17 +272,30 @@ LADDER = {
 # visible — `autoscaling.enabled` and `database.create` are sibling charts' keys —
 # so each probe is asserted against the OBJECTS in the same render.
 #
-# THREE PAIRS, NOT FOUR, AND THE FOURTH IS NAMED RATHER THAN FORGOTTEN.
-# `plans/the-platform-layer-in-the-charts.md` states four at this render: the
-# fourth is `probes.envoyGateway` against `gatewayListener.create`, and the key
-# does not exist in `platform` 0.1.6 — the post-install Envoy Gateway probe that
-# creates it is a later step of that plan.
+# THREE PAIRS, AND THREE IS PERMANENT RATHER THAN PENDING A PIN.
+# `plans/the-platform-layer-in-the-charts.md` states four at this render. The fourth
+# is `probes.envoyGateway` against `gatewayListener.create`, and it does not belong
+# at this scope: BOTH halves of that pair are `platform`'s OWN keys. `platform` can
+# see them both, and its own suite already pairs them, with a red case at
+# `gatewayListener.create: false`. The three above are here for the opposite reason
+# — no chart alone can see both halves of any of them, because `autoscaling.enabled`
+# and `database.create` are SIBLING charts' keys. The parent asserts the pairs it
+# alone can see; a pair whose two halves live inside one chart is that chart's own
+# obligation.
+#
+# SO THE `platform` PIN THAT BRINGS THE FOURTH PROBE DOES NOT MOVE THIS NUMBER, and
+# that is measured rather than reasoned. `platform`'s Envoy Gateway probe is a
+# SECOND Job — `envoy-gateway-probe`, post-install, with its own `PROBES=` line —
+# and `probes_declared` below reads the `preflight` Job alone. Built at a real 0.1.7
+# and spliced into this parent on 2026-09-24, the render declares `{preflight:
+# [cert-manager, keda, mariadb-operator], envoy-gateway-probe: [envoy-gateway]}` and
+# `unpaired_probes` returns []. `ADOPTER_OBJECTS`, `HOOK_JOBS_AT_R5` and
+# `RBAC_TRIPLE_NAMES_AT_R5` DO move at that pin. This one does not.
 #
 # THIS NUMBER IS A CROSS-CHECK ON `PAIR_OFF_END`, NOT THE DENOMINATOR. The
 # denominator is read off the RENDER by `unpaired_probes`, because a count of the
-# pairs this file iterates agrees with this file whatever the estate does. The pin
-# that brings the fourth probe reddens `unpaired_probes` naming the operator; this
-# constant is what reddens if somebody adds the pair and forgets the number.
+# pairs this file iterates agrees with this file whatever the estate does. This
+# constant is what reddens if somebody adds a pair and forgets the number.
 AGREEMENT_PAIRS_AT_R5 = 3
 
 # The operator each probe names in the rendered script, and the kind whose
@@ -1364,11 +1384,19 @@ def test_two_leaves_sharing_a_rung_redden_the_ladder_gate(tmp_path: Path) -> Non
 
 
 def probes_declared(documents: list[dict]) -> list[str]:
-    """The operators the rendered preflight Job actually probes.
+    """The operators the rendered `preflight` Job actually probes.
 
     READ OUT OF THE RENDERED SCRIPT rather than out of the values file, because
     what the values ASK for and what the template RESOLVES are the two halves this
     gate exists to compare.
+
+    THE `preflight` FILTER IS DELIBERATE, AND IT IS PERMANENT. A later `platform`
+    release renders a SECOND probe Job — `envoy-gateway-probe`, post-install, with a
+    `PROBES=` line this regex matches just as happily. Its one probe pairs
+    `probes.envoyGateway` with `gatewayListener.create`, and both of those are
+    `platform`'s own keys, so `platform`'s suite is where that pair is asserted. What
+    the parent adds is the pairs NO chart can see alone, and every one of those is
+    declared by the pre-install `preflight` Job. So this reads that Job and no other.
     """
     jobs = [
         document
@@ -1483,10 +1511,15 @@ def unpaired_probes(declared: list[str]) -> list[str]:
     many probes the RENDER declares, and a probe the estate gained with no pair
     here is the thing this has to catch.
 
-    THE FOURTH PROBE IS WHY IT HAS TO CATCH IT. `probes.envoyGateway` does not
-    exist in `platform` 0.1.6; the pin that brings it makes the render declare an
-    operator no entry in `PAIR_OFF_END` names, and this is what turns that into a
-    red test naming the probe rather than a pair nobody paired.
+    WHAT IT HAS TO CATCH IS A PRE-INSTALL PROBE ADDED UPSTREAM AND PAIRED NOWHERE.
+    `platform.preflight.probes` in `platform`'s `_preflight.tpl` resolves a list that
+    can grow, and a fourth operator appended to it lands in the `preflight` Job's
+    `PROBES=` line with no entry in `PAIR_OFF_END` naming it. That is the red this
+    produces, and it names the operator rather than leaving a pair nobody paired.
+
+    IT IS NOT `probes.envoyGateway`. That key enables a SEPARATE post-install Job,
+    which `probes_declared` does not read, so the pin that brings it leaves this
+    green — measured at a real 0.1.7 on 2026-09-24. See `AGREEMENT_PAIRS_AT_R5`.
     """
     paired = {PROBE_OPERATOR[probe] for probe in PAIR_OFF_END}
     if len(paired) != AGREEMENT_PAIRS_AT_R5:
@@ -1505,10 +1538,14 @@ def unpaired_probes(declared: list[str]) -> list[str]:
 def test_a_probe_the_estate_gained_with_no_pair_reddens_the_denominator() -> None:
     """THE DENOMINATOR'S RED CASE, and it is pure because nothing here can render one.
 
-    A fourth operator in the declared list is what a `platform` pin carrying the
-    post-install Envoy Gateway probe produces. No values file available today can
-    make the render declare it, which is exactly why the predicate takes the list
-    rather than the render.
+    `"envoy-gateway"` IS A SYNTHETIC STAND-IN AND NOT A PREDICTION. It stands for a
+    fourth operator appended to `platform`'s PRE-INSTALL probe set, which is the
+    change this gate exists to catch. The real `envoy-gateway` never reaches the
+    `preflight` Job's list — it enables a separate post-install Job — so no
+    `platform` pin turns this assertion into one that examines nothing, and the name
+    stays available as a fake. No values file can make the render declare a fourth
+    operator today, which is exactly why the predicate takes the list rather than
+    the render.
     """
     paired = sorted(PROBE_OPERATOR[probe] for probe in PAIR_OFF_END)
     assert unpaired_probes(paired) == [], (
@@ -1521,7 +1558,7 @@ def test_a_probe_the_estate_gained_with_no_pair_reddens_the_denominator() -> Non
 
 
 def test_every_probe_agrees_with_the_toggle_that_renders_what_it_probes(tmp_path: Path) -> None:
-    """THREE PAIRS, and the fourth is named in `AGREEMENT_PAIRS_AT_R5` rather than forgotten."""
+    """THREE PAIRS, and three is the permanent number — `AGREEMENT_PAIRS_AT_R5` says why."""
     failures = agreement_failures(tmp_path)
     assert failures == [], "\n".join(failures)
 

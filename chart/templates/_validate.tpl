@@ -42,16 +42,42 @@ IT IS A `default` CHAIN AND NOT `dig`, AND THAT IS FORCED. `dig` is typed
 one, with `error calling dig: interface conversion`. ADR-0777 asks for `dig` OR an
 equivalent default chain; this is the equivalent one.
 
-THE CHAIN IS UNIFORM AT EVERY LEVEL, and one level of it is more than helm strictly
-needs. ONE missing key is tolerated — the lookup yields nil and nothing raises —
-but a SECOND field access on that nil does raise, which is why
+THE CHAIN IS UNIFORM AT EVERY LEVEL, AND NIL-SAFETY ALONE DOES NOT NEED IT UNIFORM.
+ONE missing key is tolerated — the lookup yields nil and nothing raises — but a
+SECOND field access on that nil DOES raise, which is why
 `.Values.gateway.adminBootstrap.tokenSecret` and
-`$platform.bootstrap.adminToken.secretName` cannot be written directly. Applying
-the same `default` at every level rather than only at the two that raise is what
-keeps the rule readable: a reader does not have to count how deep a lookup is to
-know whether it is safe. `test_the_refusals_are_nil_safe_with_every_subchart_removed`
-is where that is held, and it opens this guard over a tree with no subchart values
-at all, which is the only render where every level is genuinely empty.
+`$platform.bootstrap.adminToken.secretName` cannot be written directly. Both forms
+were measured on 2026-09-24, on helm 3.18.4 and 4.3.0 alike: each aborts the render
+with `nil pointer evaluating interface {}.<field>`.
+
+WHAT RAISES IS AN UNBROKEN DOTTED CHAIN, NOT DEPTH, and that is the part this
+comment used to leave a reader to guess at. A PARENTHESIS BREAKS THE CHAIN.
+`((.Values.a).b).c` and `(.Values.a.b).c` both yield nil and raise nothing; so does
+`((.Values.a).b).c.d`, because once the root of an access is a parenthesised
+expression no number of further accesses raises. Every read here that goes more than
+one level deep is parenthesised, so every one of them is already chain-broken —
+measured by removing EVERY `default` from the four deep reads while KEEPING the
+parentheses, where the guard still refuses correctly on all three overlays of
+`test_the_refusals_are_nil_safe_with_every_subchart_removed`, on both helms.
+
+SO THE `default`s COERCE THE VALUE, AND THEY ALSO CARRY THE PARENTHESES. Coercion
+is what keeps `empty`, `eq` and `toString` predictable on an absent key. The break
+is theirs too, and inseparably: `default dict .Values.gateway` cannot be written
+without parentheses around it, so deleting the call deletes the break with it and
+leaves `.Values.gateway.adminBootstrap.tokenSecret` behind — which raises. DO NOT
+"SIMPLIFY" ONE AWAY. Applying the same `default` at every level rather than only at
+the two that raise is what keeps the rule readable: a reader does not have to count
+how deep a lookup is to know whether it is safe.
+
+`test_the_refusals_are_nil_safe_with_every_subchart_removed` IS WHERE THIS IS HELD,
+and what it catches is stated rather than assumed. It opens this guard over a tree
+with no subchart values at all, which is the only render where every level is
+genuinely empty. It REDDENS on the mutation a contributor would really make — a
+`default` deleted together with its parentheses — and on a direct
+`.Values.platform.bootstrap.create`, each measured, each caught by the `nil pointer`
+assertion rather than by a changed refusal. It does NOT redden on the artificial
+deletion that keeps the parentheses, because that one leaves the chain broken and
+moves only the coercion.
 
 `test_the_parent_declares_no_templates_of_its_own` strips `dependencies` from a
 copy of `Chart.yaml` and renders, so `.Values.platform` is ABSENT: an unguarded
