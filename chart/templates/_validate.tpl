@@ -150,6 +150,56 @@ refusal rather than a clause of that one.
       "to one value."))
       (toString $minted) (toString $tokenSecret)) -}}
 {{- end -}}
+
+{{/*
+THE SAME SHAPE FOR `iam-keys`, AND THE ONE DIFFERENCE IS THAT ONLY ONE SIDE IS A
+KEY. `platform.bootstrap.iamKeys.create` mints a Secret whose name is a LITERAL
+in the Job's script — `mint iam-keys 32` and `create iam-keys`, with
+`"metadata":{"name":"iam-keys"}` in the body it POSTs. `iam` mounts its keys under
+`iam.keysSecret`, which IS a value and defaults to that same name. So an adopter
+who renames the value while the toggle is on gets a Job minting one name and a
+Deployment mounting another, and the volume is NOT optional: the pod sticks in
+`ContainerCreating` on a Secret nothing ever created. Measured 2026-09-25 on helm
+3.18.4 and 4.3.0 alike, before this clause existed: `example/values.yaml` plus
+`iam.keysSecret: my-own-iam-keys` rendered exit 0 and 81 objects, the Job carrying
+`"metadata":{"name":"iam-keys"}` and the `iam` Deployment `secretName:
+my-own-iam-keys`.
+
+IT IS NESTED UNDER `bootstrap.create` BECAUSE THE JOB IS. `platform`'s
+`templates/bootstrap-secrets.yaml` opens `{{ if .Values.bootstrap.create }}` at
+the top of the file and `{{ if $bootstrap.iamKeys.create }}` inside it, so
+`iamKeys.create` true with `bootstrap.create` false mints NOTHING. Keyed on
+`iamKeys.create` alone this would refuse a configuration that is not broken.
+
+THE COMPARISON IS EXACT, NOT A PREFIX AND NOT A SUBSTRING, and the distinction is
+load-bearing rather than pedantic: `my-own-iam-keys` and `iam-keys-2` both CONTAIN
+`iam-keys` and both name a Secret the Job never mints.
+`test_the_parent_refuses_a_renamed_iam_keys_secret` builds the superset case as
+well as the disjoint one, so an implementation that matched loosely would go red.
+
+THIS CLAUSE ASSUMES THE MINTED NAME IS A LITERAL, AND THAT MUST BE REVISITED IF IT
+STOPS BEING ONE. `platform.bootstrap.iamKeys` carries `create` and nothing else
+today — verified at `platform` 0.1.8, where that chart's own `values.yaml` argues
+the omission under "WHY THE THREE NAMES ARE NOT KEYS HERE". Should `platform` ever
+gain a key for the minted name, an adopter could rename BOTH sides coherently, and
+a refusal keyed only on `iam.keysSecret` would then fire on a correct setup: the
+comparison has to become minted-versus-mounted, like the admin token's above.
+`test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes` reads the
+rendered Job and reddens if the minted name stops being this literal.
+*/}}
+{{- if eq (default false (default dict $bootstrap.iamKeys).create) true -}}
+{{- $keysSecret := default "" (default dict .Values.iam).keysSecret -}}
+{{- if ne (toString $keysSecret) "iam-keys" -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.bootstrap.iamKeys.create is true, so the bootstrap Job mints a Secret named exactly "
+      "iam-keys, and iam.keysSecret is %q. The Job mints the first name and the iam Deployment mounts "
+      "the second as a volume that is not optional, so two different names leave the keys minted, "
+      "unread, and the iam pod stuck in ContainerCreating on a Secret nothing created. Set "
+      "iam.keysSecret to iam-keys, or set platform.bootstrap.iamKeys.create false and bring the "
+      "Secret yourself."))
+      (toString $keysSecret)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
