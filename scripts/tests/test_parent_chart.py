@@ -111,7 +111,7 @@ CHART = REPO / "chart"
 # `condition`, `platform.enabled`, which `chart/values.yaml` sets false. So the
 # default render gains no object — and no hook Job either, though `helm template`
 # does emit hooks. Re-measured 2026-09-24 on helm 3.18.4 and 4.3.0 with `platform`
-# 0.1.6 declared: 32 objects, the same six kinds, unchanged. ADR-0777 makes the
+# 0.1.7 declared: 32 objects, the same six kinds, unchanged. ADR-0777 makes the
 # assertion that this dict is UNCHANGED the load-bearing one; a step that adds an
 # object to `platform` moves `ADOPTER_EXPECTED` below and not this.
 EXPECTED = {
@@ -190,7 +190,7 @@ API_VERSIONS = tuple(
 
 # WHAT THE WHOLE ESTATE PLUS ITS PLATFORM LAYER IS, measured 2026-09-24 on helm
 # 3.18.4 and 4.3.0 against the nine pins in `chart/Chart.yaml` today, `platform`
-# at 0.1.6. A LITERAL for the same reason `EXPECTED` is one.
+# at 0.1.7. A LITERAL for the same reason `EXPECTED` is one.
 #
 # A `platform` RELEASE MOVES THIS ONE AND NOT `EXPECTED`, because `platform` is
 # absent from the default render. A MODULE release that adds or drops an object
@@ -205,39 +205,47 @@ ADOPTER_EXPECTED = {
     "GatewayClass": 1,
     "HTTPRoute": 1,
     "Issuer": 2,
-    "Job": 3,
+    "Job": 4,
     "MariaDB": 3,
     "NetworkPolicy": 2,
     "PodDisruptionBudget": 8,
-    "Role": 2,
-    "RoleBinding": 2,
+    "Role": 3,
+    "RoleBinding": 3,
     "ScaledObject": 7,
     "Service": 10,
-    "ServiceAccount": 9,
+    "ServiceAccount": 10,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 77
+ADOPTER_OBJECTS = 81
 
-# THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Three hook Jobs render and
-# TWO triples serve them: `preflight` holds its own, with `create`, `get` and
-# `delete` on the objects it submits; `bootstrap-secrets` holds one that BOTH
-# bootstrap Jobs use — `bootstrap-secrets` and `admin-bootstrap-token` mint
-# Secrets with the same permission, and a second identity would be the same
-# permission held twice. Neither is one triple in total.
+# THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
+# THREE triples serve them: `preflight` holds its own, with `create`, `get` and
+# `delete` on the objects it submits; `envoy-gateway-probe` holds its own for the
+# same reason, being a second preflight Job that submits objects of its own; and
+# `bootstrap-secrets` holds one that BOTH bootstrap Jobs use — `bootstrap-secrets`
+# and `admin-bootstrap-token` mint Secrets with the same permission, and a second
+# identity would be the same permission held twice. A triple per Job would be
+# four, and one triple in total would be one. It is neither.
 #
-# IT IS TWO TODAY BECAUSE THE PREFLIGHT IS ONE JOB TODAY. The post-install Envoy
-# Gateway probe in `plans/the-platform-layer-in-the-charts.md` adds a second
-# preflight Job with a triple of its own; that step is not in `platform` 0.1.6 and
-# this number moves when it lands. MEASURED at a real 0.1.7 spliced into this parent
-# on 2026-09-24: `RBAC_TRIPLE_NAMES_AT_R5` gains `envoy-gateway-probe` and
-# `HOOK_JOBS_AT_R5` goes to 4, alongside `ADOPTER_OBJECTS` 77 → 81.
+# IT IS THREE BECAUSE THE PREFLIGHT IS TWO JOBS. The post-install Envoy Gateway
+# probe in `plans/the-platform-layer-in-the-charts.md` is the second preflight
+# Job, and it landed in `platform` 0.1.7. MEASURED at that pin on 2026-09-24,
+# which is the pin `chart/Chart.yaml` declares: `RBAC_TRIPLE_NAMES_AT_R5` gained
+# `envoy-gateway-probe` and `HOOK_JOBS_AT_R5` went to 4, alongside
+# `ADOPTER_OBJECTS` 77 → 81.
 #
-# `AGREEMENT_PAIRS_AT_R5` DOES NOT MOVE WITH THEM, and the asymmetry is the point.
-# The new Job is a second RBAC identity and a fourth hook, so these two counts see
+# `AGREEMENT_PAIRS_AT_R5` DID NOT MOVE WITH THEM, and the asymmetry is the point.
+# The new Job is a third RBAC identity and a fourth hook, so these two counts see
 # it; its probe pairs two of `platform`'s own keys, so the parent's pair count does
 # not. The two numbers move at different pins, never together.
-RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "preflight"]
-HOOK_JOBS_AT_R5 = 3
+#
+# THE RED CASE FOR BOTH IS A VALUES FLIP, NOT AN EDITED CHART.
+# `platform.preflight.probes.envoyGateway: false` is always honoured, and it drops
+# the second preflight Job: the render falls to three Jobs, two triples and 77
+# objects. So one flip reddens these two constants, `ADOPTER_OBJECTS` and
+# `ADOPTER_EXPECTED` together.
+RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "envoy-gateway-probe", "preflight"]
+HOOK_JOBS_AT_R5 = 4
 
 # THE RENEWAL LADDER, lifted from `yadgarhq/platform`'s own `test_ladder.py` to the
 # whole-estate render. The invariant is that every leaf's `renewBefore` is
@@ -273,24 +281,24 @@ LADDER = {
 # so each probe is asserted against the OBJECTS in the same render.
 #
 # THREE PAIRS, AND THREE IS PERMANENT RATHER THAN PENDING A PIN.
-# `plans/the-platform-layer-in-the-charts.md` states four at this render. The fourth
-# is `probes.envoyGateway` against `gatewayListener.create`, and it does not belong
-# at this scope: BOTH halves of that pair are `platform`'s OWN keys. `platform` can
-# see them both, and its own suite already pairs them, with a red case at
-# `gatewayListener.create: false`. The three above are here for the opposite reason
-# — no chart alone can see both halves of any of them, because `autoscaling.enabled`
-# and `database.create` are SIBLING charts' keys. The parent asserts the pairs it
-# alone can see; a pair whose two halves live inside one chart is that chart's own
-# obligation.
+# `plans/the-platform-layer-in-the-charts.md` now also states three, for the same
+# reason: the fourth is `probes.envoyGateway` against `gatewayListener.create`, and
+# it does not belong at this scope. BOTH halves of that pair are `platform`'s OWN
+# keys. `platform` can see them both, and its own suite already pairs them, with a
+# red case at `gatewayListener.create: false`. The three above are here for the
+# opposite reason — no chart alone can see both halves of any of them, because
+# `autoscaling.enabled` and `database.create` are SIBLING charts' keys. The parent
+# asserts the pairs it alone can see; a pair whose two halves live inside one chart
+# is that chart's own obligation.
 #
-# SO THE `platform` PIN THAT BRINGS THE FOURTH PROBE DOES NOT MOVE THIS NUMBER, and
+# SO THE `platform` PIN THAT BROUGHT THE FOURTH PROBE DID NOT MOVE THIS NUMBER, and
 # that is measured rather than reasoned. `platform`'s Envoy Gateway probe is a
 # SECOND Job — `envoy-gateway-probe`, post-install, with its own `PROBES=` line —
-# and `probes_declared` below reads the `preflight` Job alone. Built at a real 0.1.7
-# and spliced into this parent on 2026-09-24, the render declares `{preflight:
+# and `probes_declared` below reads the `preflight` Job alone. At 0.1.7, the pin
+# `chart/Chart.yaml` declares, measured 2026-09-24: the render declares `{preflight:
 # [cert-manager, keda, mariadb-operator], envoy-gateway-probe: [envoy-gateway]}` and
 # `unpaired_probes` returns []. `ADOPTER_OBJECTS`, `HOOK_JOBS_AT_R5` and
-# `RBAC_TRIPLE_NAMES_AT_R5` DO move at that pin. This one does not.
+# `RBAC_TRIPLE_NAMES_AT_R5` moved at that pin. This one did not.
 #
 # THIS NUMBER IS A CROSS-CHECK ON `PAIR_OFF_END`, NOT THE DENOMINATOR. The
 # denominator is read off the RENDER by `unpaired_probes`, because a count of the
@@ -1241,9 +1249,10 @@ def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_
 ) -> None:
     """THE TRIPLES ARE COUNTED, AND THE COUNT IS NOT ONE PER JOB.
 
-    Three hook Jobs, two triples. `preflight` holds its own — `create`, `get` and
-    `delete` on the objects it submits — and `bootstrap-secrets` holds one that
-    BOTH bootstrap Jobs use, because `bootstrap-secrets` and
+    Four hook Jobs, three triples. `preflight` holds its own — `create`, `get` and
+    `delete` on the objects it submits — and so does `envoy-gateway-probe`, the
+    second preflight Job, which submits objects of its own. `bootstrap-secrets`
+    holds one that BOTH bootstrap Jobs use, because `bootstrap-secrets` and
     `admin-bootstrap-token` mint Secrets with the same permission and a second
     identity would be that permission held twice.
 
@@ -1266,7 +1275,7 @@ def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_
         assert names_of(adopter, kind) == RBAC_TRIPLE_NAMES_AT_R5, (
             f"the {kind}s in the adopter-values render are "
             f"{names_of(adopter, kind)} and this gate expects "
-            f"{RBAC_TRIPLE_NAMES_AT_R5}. A triple per hook Job would be three; one "
+            f"{RBAC_TRIPLE_NAMES_AT_R5}. A triple per hook Job would be four; one "
             f"triple in total would be one. It is neither."
         )
     for name in RBAC_TRIPLE_NAMES_AT_R5:
@@ -1518,8 +1527,8 @@ def unpaired_probes(declared: list[str]) -> list[str]:
     produces, and it names the operator rather than leaving a pair nobody paired.
 
     IT IS NOT `probes.envoyGateway`. That key enables a SEPARATE post-install Job,
-    which `probes_declared` does not read, so the pin that brings it leaves this
-    green — measured at a real 0.1.7 on 2026-09-24. See `AGREEMENT_PAIRS_AT_R5`.
+    which `probes_declared` does not read, so the pin that brought it left this
+    green — measured at 0.1.7 on 2026-09-24. See `AGREEMENT_PAIRS_AT_R5`.
     """
     paired = {PROBE_OPERATOR[probe] for probe in PAIR_OFF_END}
     if len(paired) != AGREEMENT_PAIRS_AT_R5:

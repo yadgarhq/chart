@@ -101,6 +101,6 @@ dependencies:
   # no path its `condition` names resolves. The key in `chart/values.yaml` is what
   # makes this line mean `false`, and it is not a restatement of a child default.
   - name: platform
-    version: 0.1.6
+    version: 0.1.7
     repository: oci://ghcr.io/yadgarhq/charts
     condition: platform.enabled
