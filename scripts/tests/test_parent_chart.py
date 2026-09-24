@@ -904,10 +904,13 @@ def test_every_crd_bearing_resource_can_be_switched_off(tmp_path: Path) -> None:
     assert len(created) == CREATE_KEYS_IN_THE_ADOPTER_VALUES, (
         f"`example/values.yaml` states {len(created)} `create` key(s) and this gate "
         f"expects {CREATE_KEYS_IN_THE_ADOPTER_VALUES}: {created}. A `create` toggle "
-        f"that left the adopter values is one this pass no longer flips. TEN of the "
-        f"eleven are then PROVED switchable by the render below; "
-        f"`bootstrap.iamKeys.create` is not, because it renders no CRD-bearing "
-        f"object at all — for that one this count is the whole of the coverage."
+        f"that left the adopter values is one this pass no longer flips. NOT ALL of "
+        f"them are then PROVED switchable by the render below: some render no "
+        f"CRD-bearing object at all — `bootstrap.iamKeys.create` among them — and "
+        f"for those this count is the whole of the coverage. No number is stated "
+        f"here beyond the one asserted above, because how many of the eleven render "
+        f"a CRD-bearing object is a property of the pinned subcharts and moves "
+        f"whenever they do."
     )
     flip_every(adopter, "enabled", False)
     adopter = merged(off, adopter)
@@ -2216,16 +2219,33 @@ def test_the_parent_refuses_a_renamed_iam_keys_secret(tmp_path: Path) -> None:
 THE_MINTED_IAM_KEYS_BODY = '"metadata":{"name":"iam-keys"}'
 THE_JOB_THAT_MINTS_IT = "bootstrap-secrets"
 
+# WHERE THAT LITERAL LIVES IN THE VENDORED TARBALL, so the gate above can be
+# reddened rather than argued about. The fragment carries its trailing comma and
+# occurs EXACTLY ONCE in the template — the bare name appears several times more,
+# in the Job's prose comments and in the `mint`/`create` shell calls, and deleting
+# one of those would be a different mutation from the one this red case means.
+THE_MINTING_TEMPLATE = "platform/templates/bootstrap-secrets.yaml"
+THE_MINTED_NAME_IN_THE_POSTED_BODY = '"metadata":{"name":"iam-keys"},'
+
 
 def test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes(
     adopter: list[dict],
 ) -> None:
     """The refusal's assumption about `platform`, read off the render rather than trusted.
 
-    A FILE-READ-SHAPED GATE AND NOT A RENDER-LITERAL ONE, so it needs no dedicated
-    red case: its red case is a `platform` release that renames the Secret, and the
-    assertion is against the vendored chart rather than against this repository's
-    own output. Bump the pin to such a release and this goes red in the same run.
+    A RENDER-LITERAL GATE, SO IT SHIPS ITS OWN RED CASE. It opens no file. It reads
+    `spec.template.spec.containers[].args` off the `adopter` fixture, and that
+    fixture is `helm template` output — so the standing rule applies and
+    `test_a_vendored_job_that_renamed_the_minted_secret_reddens_the_drift_guard`
+    below constructs the red case, by deleting the minted name from the vendored
+    `platform` template and repacking the tarball.
+
+    THAT RED CASE CLOSED A STANDING-RULE VIOLATION AND NOT A LIVE HOLE, which is
+    worth stating so the fix is not read as larger than it is. The assertion below
+    is an EQUALITY against `[bootstrap-secrets]`, so a render in which no Job posts
+    the literal at all reddens on the empty list: this gate could never have passed
+    vacuously. What was missing was the constructed proof of that, and a docstring
+    that described the gate correctly.
 
     ASSERTED ON THE POSTED BODY, EXACTLY. `iam-keys` alone appears in the Job's
     prose comments and in the mount path `/var/run/secrets/iam-keys`, so a bare
@@ -2248,6 +2268,50 @@ def test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes(
         f"`_validate.tpl` compares `iam.keysSecret` against that literal, so a "
         f"`platform` release that renamed it would leave the clause refusing the "
         f"corrected configuration and passing the broken one."
+    )
+
+
+def test_a_vendored_job_that_renamed_the_minted_secret_reddens_the_drift_guard(
+    tmp_path: Path,
+) -> None:
+    """THE DRIFT GUARD'S RED CASE, constructed here rather than deferred to a release.
+
+    WHY IT TAKES AN EDITED CHART. The minted name is a shell literal inside
+    `platform`'s Job script, written unconditionally and backed by no values key —
+    `platform` 0.1.8's own `values.yaml` argues that omission under "WHY THE THREE
+    NAMES ARE NOT KEYS HERE". So no values file can rename it, and the only
+    constructible form of "a release renamed what the Job mints" is an edited
+    chart, which for the parent means the VENDORED TARBALL. This reuses the same
+    helper the hook-annotation red case above uses, unchanged.
+
+    IT REDDENS THE GATE ITSELF RATHER THAN A RESTATEMENT OF IT. The function under
+    test is called directly on the mutated render, so what is shown failing is the
+    shipped assertion and not a second copy of its logic that could drift from it.
+
+    THE COUNT MUST STAY SILENT ON THIS SAME INPUT, and that is asserted. The
+    deleted fragment sits inside a heredoc in a shell script, which helm renders as
+    opaque text, so the Job still renders and the object total does not move. If it
+    did move, the mutation would have perturbed more than the minted name and this
+    case would not isolate the assertion it claims to isolate.
+    """
+    documents = render(
+        str(
+            chart_with_a_vendored_line_deleted(
+                tmp_path, THE_MINTING_TEMPLATE, THE_MINTED_NAME_IN_THE_POSTED_BODY
+            )
+        ),
+        *API_VERSIONS,
+        "-f",
+        str(ADOPTER_VALUES),
+    )
+
+    with pytest.raises(AssertionError) as renamed:
+        test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes(documents)
+    assert f"0 Job(s) POST {THE_MINTED_IAM_KEYS_BODY}" in str(renamed.value), str(renamed.value)
+
+    assert len(documents) == ADOPTER_OBJECTS, (
+        f"the deletion left {len(documents)} objects where {ADOPTER_OBJECTS} was "
+        f"expected; the count gate is supposed to stay silent on this input"
     )
 
 
@@ -2338,6 +2402,14 @@ def test_the_refusals_are_nil_safe_with_every_subchart_removed(tmp_path: Path) -
                 f"`{name}` made the guard RAISE instead of refuse: {result.stderr}"
             )
         assert "gateway.adminBootstrap.tokenSecret is empty" in result.stderr, result.stderr
+
+        # THE FOURTH OVERLAY IS PINNED TO THE CLAUSE IT WAS ADDED FOR, and the
+        # other three are deliberately left unpinned because no `iam-keys` clause
+        # runs on them. Without this, all three assertions above are satisfied by
+        # the admin-token clause alone: measured, making the whole `iam-keys`
+        # clause unreachable left this test reporting 1 passed.
+        if name == "bootstrap-minting-the-iam-keys":
+            assert "platform.bootstrap.iamKeys.create is true" in result.stderr, result.stderr
 
 
 def test_breaking_the_guard_makes_the_default_render_refuse(tmp_path: Path) -> None:
