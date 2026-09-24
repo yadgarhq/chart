@@ -29,9 +29,10 @@ home: https://github.com/yadgarhq/chart
 sources:
   - https://github.com/yadgarhq/chart
 
-# THE EIGHT MODULES, EACH PINNED TO AN EXACT PUBLISHED VERSION. Measured
-# 2026-09-19 against `ghcr.io/yadgarhq/charts` with no credential: all eight
-# resolve, eight `Pulled:` lines, exit 0.
+# THE EIGHT MODULES AND THE PLATFORM LAYER, EACH PINNED TO AN EXACT PUBLISHED
+# VERSION. Measured 2026-09-19 against `ghcr.io/yadgarhq/charts` with no
+# credential: all eight modules resolve, eight `Pulled:` lines, exit 0. `platform`
+# joined them on 2026-09-24 and resolves the same way.
 #
 # EVERY VERSION HERE IS THE SEMVER MAXIMUM, NEVER THE LEXICAL ONE, and that is
 # the one rule any automation touching this block must keep. A lexical sort of
@@ -47,10 +48,19 @@ sources:
 # year later.
 #
 # A CHANGE HERE NEEDS NOTHING ELSE, per ADR-0725. The release pipeline resolves
-# these eight pins at package time (`helm package chart -u`), so `chart/charts/`
+# these pins at package time (`helm package chart -u`), so `chart/charts/`
 # and `chart/Chart.lock` are never committed and never need to agree with this
 # block by hand — the resolve happens from these pins alone, every time. ADR-0722's
 # pin rewriter therefore writes this file only.
+#
+# THE RELEASE AUTOMATION NEEDED NO NEW LIST FOR `platform`, AND THAT IS MEASURED
+# RATHER THAN HOPED. `parent_bump.py` in `yadgarhq/actions` enumerates no
+# repository: it takes `MODULE` out of the environment, and `ci-release.yaml`'s
+# `parent` job admits every chart-bearing repository whose `github.repository`
+# is not `yadgarhq/chart`, gated only on that repository passing `RELEASE_APP_*`
+# to its own `release:` job. `yadgarhq/platform` passes both. So the tenth
+# chart-bearing repository is taught the moment its name appears below, and a pin
+# written for a chart missing from this block is what `parent_bump.py` refuses.
 dependencies:
   - name: config
     version: 0.2.0
@@ -76,3 +86,21 @@ dependencies:
   - name: task-db
     version: 0.6.32
     repository: oci://ghcr.io/yadgarhq/charts
+  # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
+  # module above is part of what an adopter installs when they install yadgar.
+  # `platform` is the estate's shared infrastructure — the internal certificate
+  # authority, its leaves, the edge leaf, the Gateway listener, Valkey, NATS and
+  # the bootstrap Jobs — and an adopter who already runs their own is entitled to
+  # all eight modules without any of it.
+  #
+  # `platform.enabled` IS DECLARED IN `chart/values.yaml`, AND THE CONDITION DOES
+  # NOTHING WITHOUT IT. Measured 2026-09-24 on helm 3.18.4: with this `condition`
+  # present and no `platform.enabled` key declared anywhere,
+  # `helm template chart --set platform.valkey.create=true` rendered the Valkey
+  # Deployment, Service and NetworkPolicy — helm leaves a dependency ENABLED when
+  # no path its `condition` names resolves. The key in `chart/values.yaml` is what
+  # makes this line mean `false`, and it is not a restatement of a child default.
+  - name: platform
+    version: 0.1.7
+    repository: oci://ghcr.io/yadgarhq/charts
+    condition: platform.enabled

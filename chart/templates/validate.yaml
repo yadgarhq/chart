@@ -1,0 +1,17 @@
+{{/*
+THE ONE NON-PARTIAL IN THIS DIRECTORY, AND IT EMITS NOTHING. ADR-0777 is the
+record for it — `_no_objects_of_its_own.tpl` beside this file says a template in
+`templates/` is a decision to bring to the record, and that ADR is the decision.
+
+ITS ONLY CONTENT IS THE INCLUDE BELOW. The refusals, the guard they sit behind and
+the reasoning for both live in `_validate.tpl`. This file exists because helm never
+renders a file whose name begins with `_`: a `fail` inside a partial never
+executes, so the CALL has to sit in a rendered template. Do not add a second thing
+to this file, and do not give it an object to emit.
+
+`test_the_templates_directory_holds_only_partials` permits exactly this name and
+refuses the next one, and it asserts that the parent's own render is still empty
+rather than assuming it. A second non-partial here needs its own ruling and its
+own amendment to that test, which is the intended cost.
+*/}}
+{{- include "yadgar.validate" . -}}

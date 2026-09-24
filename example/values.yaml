@@ -1,8 +1,12 @@
 # THE VALUES FILE AN ORGANISATION COMMITS BESIDE `application.yaml`, in its OWN
 # GitOps repository. Copy it there and point the Application at it.
 #
-# COPYING IT AS IT STANDS CHANGES NOTHING: this file is `{}` and the parent renders
-# the same 32 objects with it as without it.
+# COPYING IT AS IT STANDS TURNS THE PLATFORM LAYER ON, and that changed on
+# 2026-09-24. This file used to be `{}` and its header used to say that copying it
+# changed nothing. It is now the render this repository's suite calls the ADOPTER
+# VALUES: every `platform.*.create` toggle true, autoscaling on, a database in each
+# of the three `-db` modules. Read the block at the bottom before you copy it, and
+# delete what you do not want — every key below is a choice, not a requirement.
 #
 # ─── how a knob is addressed ─────────────────────────────────────────────────
 #
@@ -19,19 +23,19 @@
 #   gateway:
 #     replicaCount: 3
 #
-# The eight names are `config`, `gateway`, `iam`, `iam-db`, `project`,
-# `project-db`, `task` and `task-db`. `helm show values` on the parent prints the
-# parent's own file, which is almost empty by design — render the version you
-# pinned instead, and read the children's values from it:
+# The nine names are `config`, `gateway`, `iam`, `iam-db`, `project`,
+# `project-db`, `task`, `task-db` and `platform`. `helm show values` on the parent
+# prints the parent's own file, which is almost empty by design — render the
+# version you pinned instead, and read the children's values from it:
 #
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.1.0
 #
 # ─── what happens if you set something no child declares ─────────────────────
 #
-# IT IS ACCEPTED AND IGNORED, silently, in seven cases out of eight. THIS PARENT
+# IT IS ACCEPTED AND IGNORED, silently, in eight cases out of nine. THIS PARENT
 # CARRIES NO `values.schema.json` — see `chart/values.yaml` upstream for why one
 # would have to enumerate every child's knobs and would then drift from them — and
-# seven of the eight module charts carry no schema either. So `gateway:
+# eight of the nine charts carry no schema either. So `gateway:
 # replicaCont: 3` renders exit 0, no warning, and no replicas changed.
 #
 # `config` IS THE EXCEPTION and it is worth knowing which way round it is. That
@@ -44,6 +48,24 @@
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
 #     --version 0.1.0 -f values.yaml | less
 #
+# ─── rendering this file OFFLINE needs three flags ───────────────────────────
+#
+# THE PLATFORM LAYER AND THE THREE DATABASES CARRY RENDER CHECKS, which refuse
+# rather than let an install fail half-way through with `no matches for kind`.
+# A check asks `.Capabilities.APIVersions.Has`, and helm populates that from a
+# LIVE CLUSTER only — never from a bare `helm template`. So a render of this file
+# with no cluster is refused by the first check it reaches, naming the operator you
+# would have to install. Measured 2026-09-24 on helm 3.18.4, dropping one flag at a
+# time: three of them are required and `keda.sh/v1alpha1` is not.
+#
+#   helm template yadgar chart -f example/values.yaml \
+#     --api-versions cert-manager.io/v1 \
+#     --api-versions gateway.envoyproxy.io/v1alpha1 \
+#     --api-versions k8s.mariadb.com/v1alpha1
+#
+# Against a real cluster there is nothing to pass: Argo renders with the cluster's
+# own API versions, and so does `helm install`.
+#
 # ─── one trap, measured ──────────────────────────────────────────────────────
 #
 # HELM DOES NOT TELL YOU A VALUES FILE IS MALFORMED. It reads what it can and
@@ -55,4 +77,129 @@
 # the chart:
 #
 #   python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' values.yaml
-{}
+
+# ═══ THE PLATFORM LAYER ═══════════════════════════════════════════════════════
+#
+# WHAT IT IS: the estate's shared infrastructure — an internal certificate
+# authority, the leaves it issues, the edge leaf a DIFFERENT authority issues, the
+# Gateway listener, Valkey, NATS, and the Jobs that mint the estate's credentials
+# before anything else starts. It is a separate chart (`yadgarhq/platform`,
+# ADR-0752) and the parent declares it under `condition: platform.enabled`.
+#
+# WHAT YOU NEED FIRST, and the charts install none of it: cert-manager,
+# mariadb-operator, KEDA, Envoy Gateway and Argo CD. Everything above those is
+# rendered from here.
+#
+# IF YOU RUN YOUR OWN PLATFORM LAYER, delete this whole block. The eight modules
+# install against it and the parent asks nothing of you — including, and this is
+# stated rather than buried, no refusal for an empty admin token. ADR-0777 records
+# that narrowing and the operator accepted it.
+platform:
+  # WITHOUT THIS LINE EVERY `create` BELOW RENDERS NOTHING, and the parent refuses
+  # rather than letting you find that out after the sync. `platform` sits behind
+  # `condition: platform.enabled`: a file that sets a `create` true and leaves this
+  # alone reads as fully configured and renders NONE of it. That is the third
+  # refusal in `chart/templates/_validate.tpl`, and it names both keys.
+  enabled: true
+
+  # THE INTERNAL CERTIFICATE AUTHORITY: a self-signed Issuer, the CA Certificate it
+  # signs, and the Issuer that then signs every leaf below.
+  internalCA:
+    create: true
+
+  # THE TEN INTERNAL LEAVES — six serving, four client — on one renewal ladder, six
+  # hours apart, so at most one service restarts per renewal instant.
+  certificates:
+    create: true
+
+  # THE EDGE LEAF, AND THE ONE THING YOU CANNOT COPY FROM HERE. It is issued by
+  # YOUR authority, not by the internal CA, and the chart carries no default for
+  # it: a guessed issuer renders a Certificate that never goes Ready, and you meet
+  # a pending object rather than a message naming the key you did not set. Both
+  # halves are required, because `kind` decides whether the name is looked up in
+  # this namespace or cluster-wide.
+  #
+  # `ClusterIssuer` AND `yadgar-edge-ca` ARE PLACEHOLDERS. Replace them with the
+  # issuer your organisation actually runs before you sync this.
+  edgeTLS:
+    create: true
+    issuerRef:
+      name: yadgar-edge-ca
+      kind: ClusterIssuer
+
+  # THE EDGE ITSELF: a GatewayClass, a Gateway and an EnvoyProxy. It needs Envoy
+  # Gateway in the cluster, and the render check says so before the install does.
+  gatewayListener:
+    create: true
+
+  # THE CACHE AND THE BROKER, each with the NetworkPolicy that fences it to the
+  # release namespace. `nats` is the upstream chart, adopted rather than forked.
+  valkey:
+    create: true
+  nats:
+    create: true
+
+  # THE BOOTSTRAP JOBS. They mint the estate's machine credentials and the FIRST
+  # administrator's token before any module starts, as `pre-install` hooks.
+  bootstrap:
+    create: true
+    adminToken:
+      # THE NAME THE JOB MINTS, AND IT MUST EQUAL `gateway.adminBootstrap.tokenSecret`
+      # BELOW. The Job creates a Secret under this name; the gateway mounts a Secret
+      # under that one. Two different names leave the token minted and unread, and
+      # the parent refuses the render naming both keys.
+      secretName: admin-bootstrap-token
+
+  preflight:
+    # THE TWO PROBES NOTHING CAN INFER FOR YOU. A probe's default is tied to the
+    # toggle that renders what it probes, and `platform` renders neither a
+    # ScaledObject nor a MariaDB CR — those come from the module charts, which a
+    # subchart cannot read. So these two are FALSE unless you say otherwise, and
+    # you say otherwise here because `autoscaling.enabled` and `database.create`
+    # are true further down. `probes.certManager` is left UNSET on purpose: its tie
+    # resolves it from the three `create` toggles above.
+    probes:
+      keda: true
+      mariadb: true
+
+# ═══ THE MODULES ══════════════════════════════════════════════════════════════
+
+gateway:
+  adminBootstrap:
+    # THE SECRET THE GATEWAY MOUNTS, and the same name the bootstrap Job mints
+    # above. EMPTY IS THE CHART'S DEFAULT and empty means the administrative
+    # bootstrap route is disabled: the estate serves everything else and answers
+    # 503 to the one request that creates the first administrator. With any
+    # `platform.*.create` true the parent refuses an empty value outright.
+    tokenSecret: admin-bootstrap-token
+  autoscaling:
+    enabled: true
+
+iam:
+  autoscaling:
+    enabled: true
+project:
+  autoscaling:
+    enabled: true
+task:
+  autoscaling:
+    enabled: true
+
+# THE THREE DATABASE MODULES. `database.create` renders a MariaDB CR for
+# mariadb-operator to reconcile; delete it in any module whose database you run
+# yourself, and drop `platform.preflight.probes.mariadb` with the last one.
+iam-db:
+  autoscaling:
+    enabled: true
+  database:
+    create: true
+project-db:
+  autoscaling:
+    enabled: true
+  database:
+    create: true
+task-db:
+  autoscaling:
+    enabled: true
+  database:
+    create: true

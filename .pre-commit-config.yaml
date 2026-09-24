@@ -15,12 +15,13 @@ repos:
         # parser rejects them. `helm lint` and `helm template` below are the checks
         # that actually apply to those.
         #
-        # THIS PARENT CARRIES NO YAML TEMPLATE TODAY — `chart/templates/` holds one
-        # `.tpl` partial and nothing else, for the reason that file gives. The
-        # exclusion is kept anyway rather than deleted as dead config: the day
-        # somebody adds a template here, the interesting failure is the review
-        # conversation about whether a parent may render objects at all, not a YAML
-        # parse error on a Go template.
+        # THE ONE `.yaml` IN THAT DIRECTORY IS NOT A MANIFEST. `validate.yaml`
+        # carries the parent's own refusals and its whole content is an include of
+        # a partial; it emits nothing (ADR-0777). So the exclusion is load-bearing
+        # here rather than kept as dead config, and it stays scoped to the whole
+        # directory: the day somebody adds a template that DOES emit an object, the
+        # interesting failure is the review conversation about whether a parent may
+        # render objects at all, not a YAML parse error on a Go template.
         exclude: ^chart/templates/
 
   # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev

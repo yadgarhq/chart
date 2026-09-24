@@ -3,11 +3,12 @@
 # installation. You clone nothing and you never fork the chart (ADR-0705, D60 as
 # amended by ADR-0706).
 #
-# ONE APPLICATION, EIGHT MODULES. The chart this points at declares every module
-# as a dependency pinned to a released version, so a bump of the single number
-# below moves the whole estate to a set of versions that were released together.
-# Standing up eight Applications and keeping their versions in step by hand is
-# what this replaces.
+# ONE APPLICATION, EIGHT MODULES AND THE PLATFORM LAYER. The chart this points at
+# declares every module as a dependency pinned to a released version, so a bump of
+# the single number below moves the whole estate to a set of versions that were
+# released together. Standing up eight Applications and keeping their versions in
+# step by hand is what this replaces. The ninth dependency, `platform`, is behind
+# `condition: platform.enabled` and is OFF unless your values file turns it on.
 #
 # THIS FILE IS A REFERENCE, NOT A LIVE MANIFEST. Nothing in this repository syncs
 # it. The `yadgarhq` reference installation does not use it either yet — converting
@@ -15,11 +16,11 @@
 # version to pin first — so treat the shape as documented rather than as
 # exercised. Render it yourself before you rely on it.
 #
-# WHAT YOU MAY OVERRIDE: every knob any of the eight module charts defines,
-# stated under that module's own name. `example/values.yaml` beside this file is
-# the shape. There is NO parent schema, so a key no child declares is accepted
-# and silently ignored rather than refused by name — see that file for what that
-# costs you and which child is the exception.
+# WHAT YOU MAY OVERRIDE: every knob any of the nine charts defines, stated under
+# that chart's own name. `example/values.yaml` beside this file is the shape.
+# There is NO parent schema, so a key no child declares is accepted and silently
+# ignored rather than refused by name — see that file for what that costs you and
+# which child is the exception.
 #
 # TO PASS A VALUES FILE you need Argo's MULTI-SOURCE form, because the chart comes
 # from a registry and the values file from your git repository. THE BLOCK BELOW IS
@@ -27,6 +28,13 @@
 # `$values` PATH FAILS THE SYNC HARD, so it stays inert until you have a file to
 # point it at. Uncomment it, delete `spec.source`, and fill in your own repository
 # the day you set your first knob.
+#
+# AND `example/values.yaml` IS NOW A FILE WITH CONTENT, which changed on
+# 2026-09-24. It used to be `{}`, so copying both files and leaving the block below
+# commented out cost nothing. It turns the whole platform layer on today, so an
+# adopter who copies both and leaves this inert gets the eight modules and NONE of
+# the platform layer — fully configured on paper, absent in fact. If you want what
+# that file states, you need the multi-source form below.
 #
 #   spec:
 #     sources:
