@@ -111,7 +111,8 @@ CHART = REPO / "chart"
 # `condition`, `platform.enabled`, which `chart/values.yaml` sets false. So the
 # default render gains no object — and no hook Job either, though `helm template`
 # does emit hooks. Re-measured 2026-09-24 on helm 3.18.4 and 4.3.0 with `platform`
-# 0.1.7 declared: 32 objects, the same six kinds, unchanged. ADR-0777 makes the
+# 0.1.8 declared, which is the pin `chart/Chart.yaml` carries today: 32 objects, the
+# same six kinds, unchanged. It first read that way at 0.1.7. ADR-0777 makes the
 # assertion that this dict is UNCHANGED the load-bearing one; a step that adds an
 # object to `platform` moves `ADOPTER_EXPECTED` below and not this.
 EXPECTED = {
@@ -188,9 +189,9 @@ API_VERSIONS = tuple(
     part for group in DECLARED_API_VERSIONS for part in ("--api-versions", group)
 )
 
-# WHAT THE WHOLE ESTATE PLUS ITS PLATFORM LAYER IS, measured 2026-09-24 on helm
+# WHAT THE WHOLE ESTATE PLUS ITS PLATFORM LAYER IS, re-measured 2026-09-24 on helm
 # 3.18.4 and 4.3.0 against the nine pins in `chart/Chart.yaml` today, `platform`
-# at 0.1.7. A LITERAL for the same reason `EXPECTED` is one.
+# at 0.1.8. A LITERAL for the same reason `EXPECTED` is one.
 #
 # A `platform` RELEASE MOVES THIS ONE AND NOT `EXPECTED`, because `platform` is
 # absent from the default render. A MODULE release that adds or drops an object
@@ -229,10 +230,10 @@ ADOPTER_OBJECTS = 81
 #
 # IT IS THREE BECAUSE THE PREFLIGHT IS TWO JOBS. The post-install Envoy Gateway
 # probe in `plans/the-platform-layer-in-the-charts.md` is the second preflight
-# Job, and it landed in `platform` 0.1.7. MEASURED at that pin on 2026-09-24,
-# which is the pin `chart/Chart.yaml` declares: `RBAC_TRIPLE_NAMES_AT_R5` gained
-# `envoy-gateway-probe` and `HOOK_JOBS_AT_R5` went to 4, alongside
-# `ADOPTER_OBJECTS` 77 → 81.
+# Job, and it landed in `platform` 0.1.7. MEASURED at that pin on 2026-09-24:
+# `RBAC_TRIPLE_NAMES_AT_R5` gained `envoy-gateway-probe` and `HOOK_JOBS_AT_R5` went
+# to 4, alongside `ADOPTER_OBJECTS` 77 → 81. RE-MEASURED THE SAME DAY at 0.1.8,
+# which is the pin `chart/Chart.yaml` declares today: all three still read that way.
 #
 # `AGREEMENT_PAIRS_AT_R5` DID NOT MOVE WITH THEM, and the asymmetry is the point.
 # The new Job is a third RBAC identity and a fourth hook, so these two counts see
@@ -257,7 +258,8 @@ RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "envoy-gateway-probe", "prefligh
 HOOK_JOBS_AT_R5 = 4
 
 # WHAT THE FLIP ABOVE LEAVES BEHIND, a literal for the same reason the two above
-# are literals. MEASURED 2026-09-24 on helm 3.18.4 and 4.3.0 at `platform` 0.1.7.
+# are literals. MEASURED 2026-09-24 at `platform` 0.1.7, and re-measured the same
+# day on helm 3.18.4 and 4.3.0 at 0.1.8, the pin `chart/Chart.yaml` declares today.
 #
 # THE POSITIVE FORM IS WHAT MAKES THE RED CASE NON-VACUOUS. `!=
 # RBAC_TRIPLE_NAMES_AT_R5` alone goes green for a great many wrong lists, so a
@@ -316,11 +318,12 @@ LADDER = {
 # SO THE `platform` PIN THAT BROUGHT THE FOURTH PROBE DID NOT MOVE THIS NUMBER, and
 # that is measured rather than reasoned. `platform`'s Envoy Gateway probe is a
 # SECOND Job — `envoy-gateway-probe`, post-install, with its own `PROBES=` line —
-# and `probes_declared` below reads the `preflight` Job alone. At 0.1.7, the pin
-# `chart/Chart.yaml` declares, measured 2026-09-24: the render declares `{preflight:
-# [cert-manager, keda, mariadb-operator], envoy-gateway-probe: [envoy-gateway]}` and
-# `unpaired_probes` returns []. `ADOPTER_OBJECTS`, `HOOK_JOBS_AT_R5` and
-# `RBAC_TRIPLE_NAMES_AT_R5` moved at that pin. This one did not.
+# and `probes_declared` below reads the `preflight` Job alone. At 0.1.8, the pin
+# `chart/Chart.yaml` declares, re-measured 2026-09-24: the render declares
+# `{preflight: [cert-manager, keda, mariadb-operator], envoy-gateway-probe:
+# [envoy-gateway]}` and `unpaired_probes` returns []. `ADOPTER_OBJECTS`,
+# `HOOK_JOBS_AT_R5` and `RBAC_TRIPLE_NAMES_AT_R5` moved at 0.1.7, where this was
+# first measured. This one did not move at either pin.
 #
 # THIS NUMBER IS A CROSS-CHECK ON `PAIR_OFF_END`, NOT THE DENOMINATOR. The
 # denominator is read off the RENDER by `unpaired_probes`, because a count of the
@@ -1219,8 +1222,45 @@ def names_of(documents: list[dict], kind: str) -> list[str]:
 
 
 def hook_annotations(document: dict) -> dict[str, str]:
+    """Every `helm.sh/hook*` annotation on one document — the phase AND its modifiers."""
     annotations = ((document.get("metadata") or {}).get("annotations")) or {}
     return {key: value for key, value in annotations.items() if "helm.sh/hook" in key}
+
+
+# THE ANNOTATION THAT MAKES A DOCUMENT A HOOK, AND IT IS THE PHASE ALONE.
+# `helm.sh/hook-weight` and `helm.sh/hook-delete-policy` are MODIFIERS: they order
+# and clean up a hook, and they mean nothing on a document that is not one.
+THE_HOOK_KEY = "helm.sh/hook"
+
+
+def jobs_that_are_not_hooks(documents: list[dict]) -> list[str]:
+    """Every Job in the render carrying no `helm.sh/hook` annotation. PURE.
+
+    KEYED ON THE EXACT `helm.sh/hook` KEY RATHER THAN ON A SUBSTRING, AND THAT IS
+    MEASURED RATHER THAN STYLE. This gate used to read `hook_annotations(job)`,
+    which matches any key CONTAINING `helm.sh/hook` — so a Job that kept
+    `helm.sh/hook-weight` and `helm.sh/hook-delete-policy` and lost only the phase
+    line still returned a truthy map and the gate stayed green. Measured 2026-09-24
+    on helm 3.18.4 and 4.3.0 by deleting that one line from the vendored
+    `platform` chart: the render put `envoy-gateway-probe` at the FRONT of the
+    document stream, out of helm's hook section and into the ordinary resources,
+    while the old assertion read `{'helm.sh/hook-weight': '-7',
+    'helm.sh/hook-delete-policy': 'before-hook-creation'}` and passed. The gate was
+    green over exactly the state its own message called the failure.
+
+    PURE AND DOCUMENT-TAKING, following `vendoring_failures` and
+    `stated_in_more_than_one_configmap` above, so the red case below feeds it a
+    render from a MUTATED COPY and the real gate feeds it the real one.
+    """
+    return [
+        f"the Job `{(job.get('metadata') or {}).get('name')}` carries no "
+        f"`{THE_HOOK_KEY}` annotation, so it is an ordinary object in the release "
+        f"rather than an install-time step. It carries "
+        f"{sorted(hook_annotations(job))}, and every one of those is a modifier "
+        f"that means nothing without the phase"
+        for job in documents
+        if job.get("kind") == "Job" and THE_HOOK_KEY not in hook_annotations(job)
+    ]
 
 
 # ── the object set, and the RBAC triples inside it ───────────────────────────
@@ -1284,33 +1324,35 @@ def test_every_job_the_platform_layer_renders_is_an_install_time_hook(
     Four hook Jobs: `bootstrap-secrets` and `admin-bootstrap-token` mint Secrets,
     `preflight` probes before the install and `envoy-gateway-probe` probes after it.
 
-    THE COUNT HAS A RED CASE. THE ANNOTATION LOOP DOES NOT. The split above gives
-    `len(jobs) == HOOK_JOBS_AT_R5` a values-flip red case — dropping
-    `platform.preflight.probes.envoyGateway` moves it, and the render check runs
-    that flip. `assert hook_annotations(job)` has no red case anywhere in this
-    suite: no values overlay can strip a `helm.sh/hook` annotation the chart
-    template writes unconditionally on a rendered Job, so nothing here can drive
-    that loop red. It stays a real assertion, not a decoration, but it is
-    unfalsified in this suite.
+    BOTH HALVES HAVE A RED CASE NOW, AND THEY ARE DIFFERENT KINDS OF CASE. The
+    split above gives `len(jobs) == HOOK_JOBS_AT_R5` a VALUES-FLIP red case —
+    dropping `platform.preflight.probes.envoyGateway` moves it, and
+    `test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gates`
+    runs that flip. The annotation half cannot be reached that way: no values
+    overlay can strip a `helm.sh/hook` annotation a chart template writes
+    unconditionally, and every one of `platform`'s four Job templates does. So its
+    red case is a CHART EDIT —
+    `test_a_vendored_job_that_lost_its_hook_annotation_reddens_the_hook_gate`
+    unpacks the vendored `platform` tarball, deletes one annotation line, repacks
+    it and renders the result.
 
-    THE GAP THIS LEAVES OPEN: a future `platform` ships a probe Job without its
-    `helm.sh/hook` annotation while the Job count stays 4. The Job then runs as
-    an ordinary release resource in the wrong phase, its ServiceAccount does not
-    exist yet when it is admitted, and nothing in this suite reddens. Closing
-    that gap needs a chart-edit mechanism — a render against a mutated copy of
-    the vendored `platform` chart — that this suite has no idiom for yet.
+    THE GAP THAT CLOSED, AND WHAT THE CLOSING FOUND. The gap was a future
+    `platform` shipping a probe Job without its `helm.sh/hook` annotation while
+    the Job count stays 4: the Job then runs as an ordinary release resource in
+    the wrong phase, its ServiceAccount does not exist yet when it is admitted,
+    and nothing reddened. Constructing that case showed the assertion was WEAKER
+    than this docstring used to claim — it read any key containing `helm.sh/hook`,
+    so a Job that kept the two modifiers and lost only the phase passed it. The
+    gate now reads the exact key, through `jobs_that_are_not_hooks`; see that
+    function for the measurement.
     """
     jobs = [document for document in adopter if document.get("kind") == "Job"]
     assert len(jobs) == HOOK_JOBS_AT_R5, (
         f"the adopter-values render holds {len(jobs)} Job(s) and this gate expects "
         f"{HOOK_JOBS_AT_R5}: {names_of(adopter, 'Job')}"
     )
-    for job in jobs:
-        assert hook_annotations(job), (
-            f"the Job `{(job.get('metadata') or {}).get('name')}` carries no "
-            f"`helm.sh/hook` annotation, so it is an ordinary object in the release "
-            f"rather than an install-time step"
-        )
+    not_hooks = jobs_that_are_not_hooks(adopter)
+    assert not_hooks == [], "\n".join(not_hooks)
 
 
 def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_its_own(
@@ -1473,6 +1515,200 @@ def test_the_rbac_triple_names_are_asserted_independently_of_the_job_count(
             f"and this proof is testing nothing"
         )
         assert "renamed-preflight" in names_of(documents, kind)
+
+
+# ── the annotation half of the hook gate, and it needs an edited subchart ────
+
+# THE ONE VENDORED TEMPLATE THE RED CASE BELOW EDITS, and the one line it deletes.
+# `envoy-gateway-probe` is the Job whose loss of the annotation is the defect the
+# gate names: it is the only post-install hook, so as an ordinary resource it would
+# be applied in the same wave as the objects it exists to probe.
+#
+# THE LINE IS THE PHASE AND NOT THE WHOLE BLOCK. Deleting all three annotations
+# would construct a mutation to fit the assertion rather than the defect; the
+# realistic release ships the modifiers and drops the phase, which is exactly the
+# case the old substring filter passed. This is also the faithful port of
+# `yadgarhq/platform`'s `chart_with_a_job_that_is_not_a_hook`, which deletes one
+# line from one template for the same reason.
+THE_VENDORED_SUBCHART = "platform"
+THE_PROBE_TEMPLATE = "platform/templates/envoy-gateway-probe.yaml"
+THE_HOOK_LINE = "    helm.sh/hook: post-install,post-upgrade\n"
+THE_JOB_THE_MUTATION_UNHOOKS = "envoy-gateway-probe"
+
+# A MEMBER OF THE SAME TARBALL THAT HELM NEVER RENDERS, and a line really inside
+# it. The vacuousness guard mutates this instead, so a mutation that reaches
+# nothing helm reads is shown to leave the gate green rather than being argued to.
+AN_UNRENDERED_MEMBER = "platform/charts/nats/UPGRADING.md"
+A_LINE_IN_THE_UNRENDERED_MEMBER = "# Upgrading from 0.x to 1.x\n"
+
+
+def chart_with_a_vendored_line_deleted(destination: Path, member: str, line: str) -> Path:
+    """A copy of the parent whose vendored `platform` tarball had one line deleted.
+
+    THE PARENT RENDERS FROM A TARBALL, NOT FROM A CHART DIRECTORY, which is why
+    this cannot be `platform`'s own helper copied across. Per ADR-0725 nothing
+    under `chart/charts/` is committed, so `helm dependency update chart` puts a
+    PACKAGED subchart there and the mutation has to unpack it, edit one member,
+    and repack it under the same name so the pin in `chart/Chart.yaml` still
+    resolves.
+
+    IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
+    whole chart, `charts/` included, and every edit lands inside `destination`.
+
+    THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE ANYTHING IS WRITTEN, and the
+    refusals name what was missing. A tarfile member list that does not hold the
+    named template, or a template whose line has moved, is a red case that has
+    stopped testing anything — and an empty match read as a pass is the exact
+    false green this whole family of gates exists to refuse.
+    """
+    import io
+    import tarfile
+
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+
+    # ONE TARBALL, ASSERTED. A glob that matches zero files would otherwise make
+    # this helper a no-op, and a glob that matches two would mutate whichever
+    # sorted first.
+    tarballs = sorted(copy.glob(f"charts/{THE_VENDORED_SUBCHART}-*.tgz"))
+    assert len(tarballs) == 1, (
+        f"`charts/` holds {len(tarballs)} `{THE_VENDORED_SUBCHART}` tarball(s) — "
+        f"{[path.name for path in tarballs]} — and this red case edits exactly one. "
+        f"Run `helm dependency update chart` first; nothing under `chart/charts/` "
+        f"is committed."
+    )
+
+    with tarfile.open(tarballs[0], "r:gz") as archive:
+        entries = [
+            (entry, archive.extractfile(entry).read() if entry.isfile() else None)
+            for entry in archive.getmembers()
+        ]
+
+    assert member in [entry.name for entry, _ in entries], (
+        f"`{member}` is not a member of `{tarballs[0].name}`, so this mutation "
+        f"would edit nothing and the render would be the unmutated one"
+    )
+
+    rewritten = io.BytesIO()
+    with tarfile.open(fileobj=rewritten, mode="w:gz") as archive:
+        for entry, body in entries:
+            if entry.name == member:
+                text = body.decode()
+                assert line in text, (
+                    f"`{line.strip()}` is not in `{member}`, so this red case is "
+                    f"now testing nothing — the line moved and the deletion would "
+                    f"be a no-op the render could not show"
+                )
+                body = text.replace(line, "", 1).encode()
+                entry.size = len(body)
+            archive.addfile(entry, io.BytesIO(body) if body is not None else None)
+
+    tarballs[0].write_bytes(rewritten.getvalue())
+    return copy
+
+
+def assert_the_mutation_reddened_the_gate(documents: list[dict]) -> list[str]:
+    """The red case's own premise, asserted rather than assumed. Returns the failures.
+
+    SHARED WITH THE VACUOUSNESS GUARD, which is the whole reason it is a function.
+    The guard feeds it a render whose mutation helm never read and shows THIS
+    assertion firing — so the refusal below is demonstrated to be load-bearing
+    rather than asserted to be.
+    """
+    failures = jobs_that_are_not_hooks(documents)
+    assert failures, (
+        "the vendored `platform` chart was unpacked, edited and repacked, and the "
+        "render still holds no Job without its `helm.sh/hook` annotation. The "
+        "mutation reached nothing helm renders, so this red case is testing nothing"
+    )
+    return failures
+
+
+def test_a_vendored_job_that_lost_its_hook_annotation_reddens_the_hook_gate(
+    tmp_path: Path,
+) -> None:
+    """THE ANNOTATION HALF'S RED CASE, and it takes an edited chart rather than a flip.
+
+    WHY NO VALUES FILE CAN BUILD THIS. Every `helm.sh/hook` annotation in
+    `platform`'s four Job templates is written unconditionally, and
+    `platform/values.yaml` declares no `annotations` key to override. So the only
+    constructible form of "a release ships a Job that is not a hook" is an edited
+    chart, and the parent's chart is a VENDORED TARBALL.
+
+    THE COUNT MUST STAY SILENT ON THIS SAME INPUT, and that is asserted here. The
+    parent builds its Job set by `kind` alone, so deleting an annotation moves
+    neither the Job count nor the object total — measured 2026-09-24 on helm
+    3.18.4 and 4.3.0, 81 objects and 4 Jobs under the mutation. If the count fired
+    too, the mutation would have moved something else and this test would not be
+    isolating the assertion it claims to isolate.
+    """
+    documents = render(
+        str(chart_with_a_vendored_line_deleted(tmp_path, THE_PROBE_TEMPLATE, THE_HOOK_LINE)),
+        *API_VERSIONS,
+        "-f",
+        str(ADOPTER_VALUES),
+    )
+
+    message = "\n".join(assert_the_mutation_reddened_the_gate(documents))
+    assert THE_JOB_THE_MUTATION_UNHOOKS in message, message
+    assert THE_HOOK_KEY in message, message
+
+    assert len(names_of(documents, "Job")) == HOOK_JOBS_AT_R5, (
+        f"the deletion moved the Job count to "
+        f"{len(names_of(documents, 'Job'))}, so it perturbed more than the "
+        f"annotation and this case no longer isolates the annotation assert"
+    )
+    assert len(documents) == ADOPTER_OBJECTS, (
+        f"the deletion left {len(documents)} objects where {ADOPTER_OBJECTS} was "
+        f"expected; the count gate is supposed to stay silent on this input"
+    )
+
+
+def test_a_mutation_helm_never_reads_is_refused_rather_than_passing_silently(
+    tmp_path: Path,
+) -> None:
+    """THE VACUOUSNESS GUARD: the red case above rests on a premise, so break it.
+
+    THE PREMISE is that the vendored tarball can be unpacked, edited and repacked
+    so that helm reads the edit. A red case whose mutation stops reaching the
+    render does not fail — it passes, having proved nothing, which is the failure
+    mode `yadgarhq/platform`'s own suite needed this guard for.
+
+    TWO ARMS, AND THEY BREAK THE PREMISE IN DIFFERENT PLACES. The first names a
+    member the tarball does not hold: the helper refuses before writing anything.
+    The second edits a member helm genuinely never renders — the vendored NATS
+    chart's upgrade notes — so the mutation IS applied, the tarball IS repacked and
+    the render is unmoved. That is the silent form, and this arm shows
+    `assert_the_mutation_reddened_the_gate` refusing it by name.
+    """
+    with pytest.raises(AssertionError) as absent:
+        chart_with_a_vendored_line_deleted(
+            tmp_path / "no-such-member",
+            "platform/templates/there-is-no-such-template.yaml",
+            THE_HOOK_LINE,
+        )
+    assert "there-is-no-such-template.yaml" in str(absent.value)
+
+    documents = render(
+        str(
+            chart_with_a_vendored_line_deleted(
+                tmp_path / "unrendered",
+                AN_UNRENDERED_MEMBER,
+                A_LINE_IN_THE_UNRENDERED_MEMBER,
+            )
+        ),
+        *API_VERSIONS,
+        "-f",
+        str(ADOPTER_VALUES),
+    )
+    assert len(documents) == ADOPTER_OBJECTS, (
+        f"editing `{AN_UNRENDERED_MEMBER}` moved the render to {len(documents)} "
+        f"objects, so helm does read it and this arm is not the no-op it claims"
+    )
+
+    with pytest.raises(AssertionError) as unnoticed:
+        assert_the_mutation_reddened_the_gate(documents)
+    assert "reached nothing helm renders" in str(unnoticed.value)
 
 
 # ── the renewal ladder, lifted from `yadgarhq/platform` to the whole estate ──
