@@ -1282,6 +1282,22 @@ def test_every_job_the_platform_layer_renders_is_an_install_time_hook(
 
     Four hook Jobs: `bootstrap-secrets` and `admin-bootstrap-token` mint Secrets,
     `preflight` probes before the install and `envoy-gateway-probe` probes after it.
+
+    THE COUNT HAS A RED CASE. THE ANNOTATION LOOP DOES NOT. The split above gives
+    `len(jobs) == HOOK_JOBS_AT_R5` a values-flip red case — dropping
+    `platform.preflight.probes.envoyGateway` moves it, and the render check runs
+    that flip. `assert hook_annotations(job)` has no red case anywhere in this
+    suite: no values overlay can strip a `helm.sh/hook` annotation the chart
+    template writes unconditionally on a rendered Job, so nothing here can drive
+    that loop red. It stays a real assertion, not a decoration, but it is
+    unfalsified in this suite.
+
+    THE GAP THIS LEAVES OPEN: a future `platform` ships a probe Job without its
+    `helm.sh/hook` annotation while the Job count stays 4. The Job then runs as
+    an ordinary release resource in the wrong phase, its ServiceAccount does not
+    exist yet when it is admitted, and nothing in this suite reddens. Closing
+    that gap needs a chart-edit mechanism — a render against a mutated copy of
+    the vendored `platform` chart — that this suite has no idiom for yet.
     """
     jobs = [document for document in adopter if document.get("kind") == "Job"]
     assert len(jobs) == HOOK_JOBS_AT_R5, (
@@ -1352,6 +1368,18 @@ def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gat
     against `RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE` names the one list this
     flip really produces, which is what makes the case non-vacuous against a wrong
     constant rather than against one particular wrong constant.
+
+    THE `!=` IS NOT REDUNDANT BESIDE THAT `==` — MEASURED, NOT ASSUMED. Revert
+    `RBAC_TRIPLE_NAMES_AT_R5` to its pre-0.1.7 value, `["bootstrap-secrets",
+    "preflight"]`: that is the SAME list as
+    `RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE`, so the `==` above stays GREEN
+    over the reverted constant and only the `!=` fires, naming the Role/
+    RoleBinding names that did not move. The `==` guards the RENDER — it fails
+    when this flip stops producing the list it is supposed to produce. The `!=`
+    guards the CONSTANT — it fails when `RBAC_TRIPLE_NAMES_AT_R5` regresses to a
+    value the flip's own list happens to equal. A `!=` beside a `==` in a helm
+    red case is not automatically redundant; judge such a pair by perturbing the
+    constant, not by reading the two lines.
     """
     values = overlay(
         tmp_path / "no-second-probe.yaml",
@@ -1382,6 +1410,19 @@ def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gat
         f"the flip left {len(documents)} objects where "
         f"{ADOPTER_OBJECTS - OBJECTS_PER_PROBE_JOB} was expected. One probe Job "
         f"carries one Job, one Role, one RoleBinding and one ServiceAccount."
+    )
+    assert dict(kinds(documents)) == ADOPTER_EXPECTED | {
+        "Job": 3,
+        "Role": 2,
+        "RoleBinding": 2,
+        "ServiceAccount": 9,
+    }, (
+        f"the flip's kind-level census is {dict(kinds(documents))} and this test "
+        f"expects the decomposition its own docstring names: one Job, one Role, "
+        f"one RoleBinding and one ServiceAccount dropped from `ADOPTER_EXPECTED`. "
+        f"The total and the Role/RoleBinding names can each stay right while some "
+        f"other kind moves by the same net count; this is the assert that would "
+        f"catch that."
     )
     assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
