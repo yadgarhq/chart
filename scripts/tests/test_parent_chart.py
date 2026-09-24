@@ -819,10 +819,11 @@ def test_a_value_for_one_child_does_not_reach_another(packaged: Path, tmp_path: 
 # goes green over nothing.
 ENABLED_KEYS_IN_THE_PARENTS_VALUES = 2
 
-# PASS 2 flips every key named `create` in `example/values.yaml` — seven in
-# `platform` and one in each of the three `-db` charts. The number is asserted for
-# the same reason.
-CREATE_KEYS_IN_THE_ADOPTER_VALUES = 10
+# PASS 2 flips every key named `create` in `example/values.yaml` — eight in
+# `platform` (`bootstrap.iamKeys.create` joined the other seven at step 3c) and
+# one in each of the three `-db` charts. The number is asserted for the same
+# reason.
+CREATE_KEYS_IN_THE_ADOPTER_VALUES = 11
 
 
 def merged(base: dict, over: dict) -> dict:

@@ -150,6 +150,21 @@ platform:
       # the parent refuses the render naming both keys.
       secretName: admin-bootstrap-token
 
+    # `iam`'S ENCRYPTION KEYS, A FOURTH `create` IN THE SAME JOB. Off by default
+    # in `platform` itself: an adopter installing against an EMPTY database has no
+    # existing key pair and nothing to transcribe, which is the case this toggle
+    # is for. Set it true here for exactly that install.
+    #
+    # SAFE ONLY BECAUSE `iam` CAN REFUSE A WRONG KEY (ADR-0753). `iam` v0.8.43
+    # stores a fingerprint over both keys and refuses to boot when the key set it
+    # is given does not match the one its rows were written under. Pin `iam` at
+    # v0.8.43 or newer wherever this toggle is true — an older `iam` carries no
+    # marker check, and a regenerated key then starts healthy while unable to
+    # decrypt existing rows. Nothing in this chart ties the two together; this
+    # comment is the tie.
+    iamKeys:
+      create: true
+
   preflight:
     # THE TWO PROBES NOTHING CAN INFER FOR YOU. A probe's default is tied to the
     # toggle that renders what it probes, and `platform` renders neither a
