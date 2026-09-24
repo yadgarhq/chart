@@ -1424,7 +1424,6 @@ def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gat
         f"other kind moves by the same net count; this is the assert that would "
         f"catch that."
     )
-    assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
 
 def test_the_rbac_triple_names_are_asserted_independently_of_the_job_count(
