@@ -45,3 +45,29 @@
 gateway:
   gateway:
     enabled: true
+
+# A SECOND KEY, AND IT IS FORCED THE SAME WAY — BY A MECHANISM, NOT BY TASTE.
+#
+# `platform` is declared in `Chart.yaml` under `condition: platform.enabled`, and
+# a `condition` whose path resolves NOWHERE leaves the dependency ENABLED.
+# Measured 2026-09-24 on helm 3.18.4, with the condition present and this key
+# absent: `helm template chart --set platform.valkey.create=true` rendered the
+# Valkey Deployment, its Service and its NetworkPolicy. The dependency was live
+# and the condition was inert. This line is what makes `platform` off by default,
+# and deleting it does not restore a child's default — it turns the whole platform
+# layer ON for every adopter.
+#
+# AND THE `portability` JOB NEEDS IT HERE RATHER THAN ANYWHERE ELSE, for the same
+# reason the block above gives: `scripts/d80_portability.py` reads the keys named
+# `enabled` out of THIS FILE and nothing else, then renders with every one of them
+# false. `platform` behind a key that file cannot see would be a layer of
+# Certificates, Gateways and MariaDB CRs an adopter supposedly cannot switch off.
+#
+# THE `create` TOGGLES ARE NOT RESTATED HERE, and that is deliberate rather than
+# an omission. Every one of them is false in `platform`'s own `values.yaml`, so
+# restating them would be the two-writers-for-one-value fault this file spends the
+# block above justifying ONE exception to. `test_every_crd_bearing_resource_can_be_switched_off`
+# covers them in its second pass instead, over `example/values.yaml`, which is the
+# render where they are true.
+platform:
+  enabled: false
