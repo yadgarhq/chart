@@ -192,8 +192,10 @@ API_VERSIONS = tuple(
 # 3.18.4 and 4.3.0 against the nine pins in `chart/Chart.yaml` today, `platform`
 # at 0.1.6. A LITERAL for the same reason `EXPECTED` is one.
 #
-# THIS IS THE NUMBER A `platform` RELEASE MOVES, and `EXPECTED` is not. Update it
-# in the same commit as the pin and say in the pull request which chart changed it.
+# A `platform` RELEASE MOVES THIS ONE AND NOT `EXPECTED`, because `platform` is
+# absent from the default render. A MODULE release that adds or drops an object
+# moves BOTH, since every module renders in both. Update whichever moved in the
+# same commit as the pin, and say in the pull request which chart moved it.
 ADOPTER_EXPECTED = {
     "Certificate": 12,
     "ConfigMap": 4,
@@ -267,9 +269,13 @@ LADDER = {
 # `plans/the-platform-layer-in-the-charts.md` states four at this render: the
 # fourth is `probes.envoyGateway` against `gatewayListener.create`, and the key
 # does not exist in `platform` 0.1.6 — the post-install Envoy Gateway probe that
-# creates it is a later step of that plan. A pin that brings it must raise this
-# number, and the assertion below is what makes that arrive as a red test rather
-# than as a pair nobody paired.
+# creates it is a later step of that plan.
+#
+# THIS NUMBER IS A CROSS-CHECK ON `PAIR_OFF_END`, NOT THE DENOMINATOR. The
+# denominator is read off the RENDER by `unpaired_probes`, because a count of the
+# pairs this file iterates agrees with this file whatever the estate does. The pin
+# that brings the fourth probe reddens `unpaired_probes` naming the operator; this
+# constant is what reddens if somebody adds the pair and forgets the number.
 AGREEMENT_PAIRS_AT_R5 = 3
 
 # The operator each probe names in the rendered script, and the kind whose
@@ -1443,10 +1449,10 @@ def agreement_failures(tmp_path: Path) -> list[str]:
     be there, and with the toggle OFF, where neither may be.
     """
     failures: list[str] = []
-    pairs = 0
 
     on = adopter_render()
     declared_on = probes_declared(on)
+    failures += unpaired_probes(declared_on)
 
     for probe, body in sorted(PAIR_OFF_END.items()):
         kind = PROBE_KIND[probe]
@@ -1463,14 +1469,55 @@ def agreement_failures(tmp_path: Path) -> list[str]:
             len([document for document in off if document.get("kind") == kind]),
             expected=False,
         )
-        pairs += 1
 
-    if pairs != AGREEMENT_PAIRS_AT_R5:
-        failures.append(
-            f"expected {AGREEMENT_PAIRS_AT_R5} probe/toggle pairs at the adopter "
-            f"values, examined {pairs}"
-        )
     return failures
+
+
+def unpaired_probes(declared: list[str]) -> list[str]:
+    """The denominator, READ OFF THE RENDER rather than off this file's own table. PURE.
+
+    COUNTING `PAIR_OFF_END`'S ITERATIONS WOULD BE TAUTOLOGICAL, and the first draft
+    of this gate did exactly that. `pairs` was `len(PAIR_OFF_END)` by construction,
+    so the comparison could only disagree with a constant somebody edited in the
+    same file — it said nothing about the render. The number that matters is how
+    many probes the RENDER declares, and a probe the estate gained with no pair
+    here is the thing this has to catch.
+
+    THE FOURTH PROBE IS WHY IT HAS TO CATCH IT. `probes.envoyGateway` does not
+    exist in `platform` 0.1.6; the pin that brings it makes the render declare an
+    operator no entry in `PAIR_OFF_END` names, and this is what turns that into a
+    red test naming the probe rather than a pair nobody paired.
+    """
+    paired = {PROBE_OPERATOR[probe] for probe in PAIR_OFF_END}
+    if len(paired) != AGREEMENT_PAIRS_AT_R5:
+        return [
+            f"this file pairs {len(paired)} probe(s) — {sorted(paired)} — and "
+            f"`AGREEMENT_PAIRS_AT_R5` is {AGREEMENT_PAIRS_AT_R5}"
+        ]
+    return [
+        f"the rendered preflight script declares `{operator}` and no entry in "
+        f"`PAIR_OFF_END` pairs it with the toggle that renders what it probes. The "
+        f"render declares {sorted(declared)}; this file pairs {sorted(paired)}."
+        for operator in sorted(set(declared) - paired)
+    ]
+
+
+def test_a_probe_the_estate_gained_with_no_pair_reddens_the_denominator() -> None:
+    """THE DENOMINATOR'S RED CASE, and it is pure because nothing here can render one.
+
+    A fourth operator in the declared list is what a `platform` pin carrying the
+    post-install Envoy Gateway probe produces. No values file available today can
+    make the render declare it, which is exactly why the predicate takes the list
+    rather than the render.
+    """
+    paired = sorted(PROBE_OPERATOR[probe] for probe in PAIR_OFF_END)
+    assert unpaired_probes(paired) == [], (
+        "the denominator refuses the probes this file does pair, so it refuses "
+        "everything and discriminates nothing"
+    )
+    failures = unpaired_probes(paired + ["envoy-gateway"])
+    assert failures, "a probe with no pair was not caught"
+    assert "envoy-gateway" in failures[0], failures
 
 
 def test_every_probe_agrees_with_the_toggle_that_renders_what_it_probes(tmp_path: Path) -> None:
