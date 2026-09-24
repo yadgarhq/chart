@@ -1242,9 +1242,9 @@ def jobs_that_are_not_hooks(documents: list[dict]) -> list[str]:
     `helm.sh/hook-weight` and `helm.sh/hook-delete-policy` and lost only the phase
     line still returned a truthy map and the gate stayed green. Measured 2026-09-24
     on helm 3.18.4 and 4.3.0 by deleting that one line from the vendored
-    `platform` chart: the render put `envoy-gateway-probe` at the FRONT of the
-    document stream, out of helm's hook section and into the ordinary resources,
-    while the old assertion read `{'helm.sh/hook-weight': '-7',
+    `platform` chart: the render put `envoy-gateway-probe` into the
+    ordinary-resource block, at position 40 of 81 rather than the trailing hook
+    section, while the old assertion read `{'helm.sh/hook-weight': '-7',
     'helm.sh/hook-delete-policy': 'before-hook-creation'}` and passed. The gate was
     green over exactly the state its own message called the failure.
 
@@ -1555,8 +1555,10 @@ def chart_with_a_vendored_line_deleted(destination: Path, member: str, line: str
     IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
     whole chart, `charts/` included, and every edit lands inside `destination`.
 
-    THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE ANYTHING IS WRITTEN, and the
-    refusals name what was missing. A tarfile member list that does not hold the
+    THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE THE TARBALL IS WRITTEN,
+    and the refusals name what was missing. `shutil.copytree` runs first, so the
+    copy itself already exists by the time either assert fires — what the asserts
+    stop is the repack, not the copy. A tarfile member list that does not hold the
     named template, or a template whose line has moved, is a red case that has
     stopped testing anything — and an empty match read as a pass is the exact
     false green this whole family of gates exists to refuse.
@@ -1675,11 +1677,15 @@ def test_a_mutation_helm_never_reads_is_refused_rather_than_passing_silently(
     mode `yadgarhq/platform`'s own suite needed this guard for.
 
     TWO ARMS, AND THEY BREAK THE PREMISE IN DIFFERENT PLACES. The first names a
-    member the tarball does not hold: the helper refuses before writing anything.
+    member the tarball does not hold: the helper refuses before repacking it.
     The second edits a member helm genuinely never renders — the vendored NATS
     chart's upgrade notes — so the mutation IS applied, the tarball IS repacked and
     the render is unmoved. That is the silent form, and this arm shows
-    `assert_the_mutation_reddened_the_gate` refusing it by name.
+    `assert_the_mutation_reddened_the_gate` refusing it by name. It carries a
+    second property the first arm cannot: the render staying at exactly 81
+    objects after `platform/charts/nats/UPGRADING.md` is edited proves the
+    tarball this helper writes with Python's `w:gz` is one helm can read at all,
+    not only that the mutation inside it went unread.
     """
     with pytest.raises(AssertionError) as absent:
         chart_with_a_vendored_line_deleted(
