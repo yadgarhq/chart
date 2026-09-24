@@ -239,13 +239,35 @@ ADOPTER_OBJECTS = 81
 # it; its probe pairs two of `platform`'s own keys, so the parent's pair count does
 # not. The two numbers move at different pins, never together.
 #
-# THE RED CASE FOR BOTH IS A VALUES FLIP, NOT AN EDITED CHART.
-# `platform.preflight.probes.envoyGateway: false` is always honoured, and it drops
-# the second preflight Job: the render falls to three Jobs, two triples and 77
-# objects. So one flip reddens these two constants, `ADOPTER_OBJECTS` and
-# `ADOPTER_EXPECTED` together.
+# THE RED CASE FOR BOTH IS A VALUES FLIP, NOT AN EDITED CHART, AND IT IS RUN
+# RATHER THAN DESCRIBED — see
+# `test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gates`
+# below. `platform.preflight.probes.envoyGateway: false` is always honoured (an
+# explicit `false` on a probe always is, and `platform`'s own `values.yaml` says
+# so at length), and it drops the second preflight Job: the render falls to three
+# Jobs, two triples and 77 objects. So one flip reddens these two constants,
+# `ADOPTER_OBJECTS` and `ADOPTER_EXPECTED` together, and that test asserts all
+# three of those numbers rather than leaving this paragraph to carry them.
+#
+# UNTIL THAT TEST EXISTED THE ONLY HOME OF THESE TWO CONSTANTS WAS THE GATE THAT
+# READS THEM, which made the gate its own red case — the circularity that
+# `test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate` has
+# always closed for `ADOPTER_OBJECTS` and nothing closed for these.
 RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "envoy-gateway-probe", "preflight"]
 HOOK_JOBS_AT_R5 = 4
+
+# WHAT THE FLIP ABOVE LEAVES BEHIND, a literal for the same reason the two above
+# are literals. MEASURED 2026-09-24 on helm 3.18.4 and 4.3.0 at `platform` 0.1.7.
+#
+# THE POSITIVE FORM IS WHAT MAKES THE RED CASE NON-VACUOUS. `!=
+# RBAC_TRIPLE_NAMES_AT_R5` alone goes green for a great many wrong lists, so a
+# constant reverted to some OTHER wrong value would still satisfy it. The
+# equality below names the one list the flip really produces.
+RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE = ["bootstrap-secrets", "preflight"]
+
+# THE FOUR OBJECTS THE SECOND PREFLIGHT JOB BRINGS: its Job, its Role, its
+# RoleBinding and its ServiceAccount — one each, which is why 81 becomes 77.
+OBJECTS_PER_PROBE_JOB = 4
 
 # THE RENEWAL LADDER, lifted from `yadgarhq/platform`'s own `test_ladder.py` to the
 # whole-estate render. The invariant is that every leaf's `renewBefore` is
@@ -1244,20 +1266,22 @@ def test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate(tmp_p
     assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
 
-def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_its_own(
+def test_every_job_the_platform_layer_renders_is_an_install_time_hook(
     adopter: list[dict],
 ) -> None:
-    """THE TRIPLES ARE COUNTED, AND THE COUNT IS NOT ONE PER JOB.
+    """THE HOOK JOBS ARE COUNTED, AND EVERY ONE OF THEM IS A HOOK.
 
-    Four hook Jobs, three triples. `preflight` holds its own — `create`, `get` and
-    `delete` on the objects it submits — and so does `envoy-gateway-probe`, the
-    second preflight Job, which submits objects of its own. `bootstrap-secrets`
-    holds one that BOTH bootstrap Jobs use, because `bootstrap-secrets` and
-    `admin-bootstrap-token` mint Secrets with the same permission and a second
-    identity would be that permission held twice.
+    SPLIT FROM THE TRIPLE-NAME GATE BELOW, WHICH IT USED TO MASK. Both assertions
+    lived in one test with this count FIRST, so every perturbation that moved the
+    Jobs and the triples together — which is every one a values file can build,
+    since a probe Job and its identity render behind the same key — failed here and
+    never reached the names. The name equality was falsifiable in principle and
+    dead in fact. Two tests report both, and
+    `test_the_rbac_triple_names_are_asserted_independently_of_the_job_count` is the
+    constructed proof that the names are now reachable.
 
-    ASSERTED AS THE NAMES AND NOT ONLY THE NUMBER. Two Roles named for one Job and
-    none for the other is the same count and a different estate.
+    Four hook Jobs: `bootstrap-secrets` and `admin-bootstrap-token` mint Secrets,
+    `preflight` probes before the install and `envoy-gateway-probe` probes after it.
     """
     jobs = [document for document in adopter if document.get("kind") == "Job"]
     assert len(jobs) == HOOK_JOBS_AT_R5, (
@@ -1271,6 +1295,24 @@ def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_
             f"rather than an install-time step"
         )
 
+
+def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_its_own(
+    adopter: list[dict],
+) -> None:
+    """THE TRIPLES ARE COUNTED, AND THE COUNT IS NOT ONE PER JOB.
+
+    Four hook Jobs, three triples. `preflight` holds its own — `create`, `get` and
+    `delete` on the objects it submits — and so does `envoy-gateway-probe`, the
+    second preflight Job, which submits objects of its own. `bootstrap-secrets`
+    holds one that BOTH bootstrap Jobs use, because `bootstrap-secrets` and
+    `admin-bootstrap-token` mint Secrets with the same permission and a second
+    identity would be that permission held twice.
+
+    ASSERTED AS THE NAMES AND NOT ONLY THE NUMBER. Two Roles named for one Job and
+    none for the other is the same count and a different estate — and THAT is the
+    case this test now reaches, because the Job count that used to stand in front
+    of it is a test of its own above.
+    """
     for kind in ("Role", "RoleBinding"):
         assert names_of(adopter, kind) == RBAC_TRIPLE_NAMES_AT_R5, (
             f"the {kind}s in the adopter-values render are "
@@ -1283,6 +1325,113 @@ def test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight_holds_
             f"`{name}` holds a Role and a RoleBinding and no ServiceAccount, so the "
             f"binding names an identity nothing renders"
         )
+
+
+def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gates(
+    tmp_path: Path,
+) -> None:
+    """THE RED CASE FOR `HOOK_JOBS_AT_R5` AND `RBAC_TRIPLE_NAMES_AT_R5`.
+
+    UNTIL THIS EXISTED THOSE TWO CONSTANTS HAD NO RED CASE AT ALL, so their only
+    home was the gate that reads them and the gate was its own falsifier.
+    `ADOPTER_OBJECTS` has had one since it was written —
+    `test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate` — and
+    this is its counterpart for the hook Jobs and the RBAC triples.
+
+    A VALUES FLIP, NOT AN EDITED CHART, and the same idiom as the object-set red
+    case above. `platform.preflight.probes.envoyGateway: false` is honoured
+    unconditionally — `platform`'s own `values.yaml` states that an explicit `false`
+    on a probe always is, because losing a diagnostic is a choice an adopter is
+    entitled to make. It drops the post-install probe Job and the whole identity
+    that Job runs as, so the render loses exactly four objects: a Job, a Role, a
+    RoleBinding and a ServiceAccount.
+
+    THE POSITIVE FORM IS ASSERTED BEFORE THE NEGATIVE ONE. `!=
+    RBAC_TRIPLE_NAMES_AT_R5` on its own is satisfied by any wrong list, so it would
+    still pass over a constant reverted to some other wrong value. The equality
+    against `RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE` names the one list this
+    flip really produces, which is what makes the case non-vacuous against a wrong
+    constant rather than against one particular wrong constant.
+    """
+    values = overlay(
+        tmp_path / "no-second-probe.yaml",
+        "platform:\n  preflight:\n    probes:\n      envoyGateway: false\n",
+    )
+    documents = adopter_render("-f", str(values))
+
+    jobs = names_of(documents, "Job")
+    assert len(jobs) == HOOK_JOBS_AT_R5 - 1, (
+        f"turning off `platform.preflight.probes.envoyGateway` left "
+        f"{len(jobs)} Job(s) — {jobs} — where {HOOK_JOBS_AT_R5 - 1} was expected. "
+        f"The flip did not drop the second preflight Job, so this red case is "
+        f"testing nothing and `HOOK_JOBS_AT_R5` is back to having no falsifier."
+    )
+
+    for kind in ("Role", "RoleBinding"):
+        assert names_of(documents, kind) == RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE, (
+            f"the {kind}s under the flip are {names_of(documents, kind)} and this "
+            f"red case expects {RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE}"
+        )
+        assert names_of(documents, kind) != RBAC_TRIPLE_NAMES_AT_R5, (
+            f"the {kind} names did not move, so "
+            f"`test_each_bootstrap_job_pair_shares_one_rbac_triple_and_the_preflight"
+            f"_holds_its_own` would stay green over a render missing a whole identity"
+        )
+
+    assert len(documents) == ADOPTER_OBJECTS - OBJECTS_PER_PROBE_JOB, (
+        f"the flip left {len(documents)} objects where "
+        f"{ADOPTER_OBJECTS - OBJECTS_PER_PROBE_JOB} was expected. One probe Job "
+        f"carries one Job, one Role, one RoleBinding and one ServiceAccount."
+    )
+    assert dict(kinds(documents)) != ADOPTER_EXPECTED
+
+
+def test_the_rbac_triple_names_are_asserted_independently_of_the_job_count(
+    tmp_path: Path,
+) -> None:
+    """THE PROOF THAT THE SPLIT ABOVE WAS NOT COSMETIC: names wrong, count right.
+
+    A REORDER WOULD HAVE MOVED THE MASK RATHER THAN REMOVED IT — with the names
+    first, the flip in the red case above would be caught by the names and the Job
+    count would become the dead assertion instead. What settles it is an input on
+    which the two gates disagree, and there is one: the triples are NAMED from
+    `platform.preflight.serviceAccountName`, so renaming that identity moves every
+    Role, RoleBinding and ServiceAccount name and renders exactly as many objects
+    of exactly as many kinds.
+
+    MEASURED 2026-09-24 on helm 3.18.4 and 4.3.0: 81 objects, `ADOPTER_EXPECTED`
+    unchanged, four Jobs — and the triples become
+    `['bootstrap-secrets', 'envoy-gateway-probe', 'renamed-preflight']`. So the
+    object-set gate, the census and the Job-count gate are ALL green over a render
+    in which a hook Job's identity is not the one the estate reviewed, and the name
+    equality is the only assertion in this suite that can see it. That is what the
+    name equality is FOR, and while it sat behind the Job count nothing could
+    reach it.
+    """
+    values = overlay(
+        tmp_path / "a-renamed-preflight-identity.yaml",
+        "platform:\n  preflight:\n    serviceAccountName: renamed-preflight\n",
+    )
+    documents = adopter_render("-f", str(values))
+
+    # Everything the other gates read is UNMOVED, which is the whole point.
+    assert dict(kinds(documents)) == ADOPTER_EXPECTED, (
+        "the rename moved a kind count, so this input no longer isolates the names"
+    )
+    assert len(documents) == ADOPTER_OBJECTS
+    assert len(names_of(documents, "Job")) == HOOK_JOBS_AT_R5, (
+        "the rename moved the Job count, so the count gate would fire on it and "
+        "this proof shows nothing about the names being reachable"
+    )
+
+    # ...and the names are what moved.
+    for kind in ("Role", "RoleBinding"):
+        assert names_of(documents, kind) != RBAC_TRIPLE_NAMES_AT_R5, (
+            f"`platform.preflight.serviceAccountName` was overridden and the {kind} "
+            f"names did not follow it, so the triples are not named from that key "
+            f"and this proof is testing nothing"
+        )
+        assert "renamed-preflight" in names_of(documents, kind)
 
 
 # ── the renewal ladder, lifted from `yadgarhq/platform` to the whole estate ──
