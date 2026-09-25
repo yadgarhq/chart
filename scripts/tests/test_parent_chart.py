@@ -2468,6 +2468,44 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
     )
 
 
+# THE EIGHT SHAPES AN ADOPTER CAN WRITE UNDER `platform.operators`, EACH WITH THE
+# TYPE NAME THE MESSAGE MUST CARRY. Two `true`-ish rows do not cover this key, and
+# the gap was measured rather than imagined: at 883a7a8 the guard read
+# `kindIs "map"` on `default dict $platform.operators`, and sprig's `default`
+# substitutes on an EMPTY value, so `false`, `null`, `0`, `""` and `[]` every one
+# collapsed to `dict` and read as the key being ABSENT. Measured on helm 4.3.0
+# with `platform.enabled` true and the admin token set: those five rendered exit 0
+# while `true`, `yes` and `[a]` refused. `[]` permitting while `[a]` refuses is the
+# incoherence that found it, and `false` is the load-bearing one — it is what
+# somebody writes who read "default false" and wanted to be explicit, and helm
+# leaves a dependency ENABLED when no path of a multi-path `condition:` resolves.
+#
+# THE TYPE NAME IS ASSERTED PER ROW, not just the phrase. `"rather than a mapping"
+# in message` is satisfied by an implementation that calls every shape a bool, and
+# the whole point of `kindOf` here is that the adopter is told what they wrote.
+#
+# `yes` IS A BOOL AND NOT A STRING, which is YAML 1.1 and what helm parses. The row
+# is kept because it is a real adopter spelling; the name says so now, and the type
+# it asserts is measured rather than assumed.
+#
+# `null` IS A PRESENT KEY AND ONLY `hasKey` SEES IT. `kindOf` reports `invalid` for
+# an explicit null and for an absent key alike, so a guard reading the VALUE cannot
+# tell `operators: null` from no `operators` key at all. Measured on helm 4.3.0:
+# `hasKey $platform "operators"` is true for `operators: null` and false when the
+# key is absent. `_validate.tpl` maps `invalid` to `null` so the message names a
+# type an adopter recognises rather than "is a invalid".
+THE_NON_MAPPING_OPERATORS = (
+    ("operators-is-a-bool", "true", "bool"),
+    ("operators-is-the-yaml-yes", "yes", "bool"),
+    ("operators-is-false", "false", "bool"),
+    ("operators-is-null", "null", "null"),
+    ("operators-is-zero", "0", "float64"),
+    ("operators-is-an-empty-string", '""', "string"),
+    ("operators-is-an-empty-list", "[]", "slice"),
+    ("operators-is-a-list", "[a]", "slice"),
+)
+
+
 def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
     tmp_path: Path,
 ) -> None:
@@ -2480,11 +2518,17 @@ def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
     arm existed: `--set platform.operators=true` aborted with `can't evaluate field
     create in type bool`.
 
+    EVERY ROW OF `THE_NON_MAPPING_OPERATORS` IS RUN, and the five EMPTY ones are
+    what this test was missing. The same `default` that makes the `true` case raise
+    makes `false`, `null`, `0`, `""` and `[]` read as ABSENT, so a guard built on
+    `default dict` covers only the non-empty half of the shapes it claims. The
+    RAW value is what has to be typed, which is what the template does now.
+
     ASSERTED ON THE ABSENCE OF A RAISE, not only on the exit code. A refusal and a
     raise both exit 1, so an implementation that went back to raising would satisfy
     `returncode != 0` while giving the adopter a stack trace instead of a key name.
     """
-    for name, scalar in [("operators-is-a-bool", "true"), ("operators-is-a-string", "yes")]:
+    for name, scalar, kind in THE_NON_MAPPING_OPERATORS:
         message = refusal(
             tmp_path,
             name,
@@ -2492,7 +2536,65 @@ def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
             "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
         )
         assert THE_OPERATORS_SHAPE_REFUSAL in message, message
-        assert "platform.operators is a" in message, message
+        assert f"platform.operators is a {kind} rather than a mapping" in message, (
+            f"`{name}` refused without naming the type the adopter wrote: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
+
+
+# THE FOUR NON-BOOLEAN `create` SPELLINGS, AND THE TWO KEY PATHS THEY SIT ON. A
+# quoted `"true"` and a bare `1` are what an adopter writes who is copying a shell
+# export or a JSON fragment, and `eq (default false $block.create) true` cannot
+# compare either against a bool: helm aborts with `error calling eq: incompatible
+# types for comparison`. Measured on helm 4.3.0 at 883a7a8 — a stack trace naming
+# `_validate.tpl:189` and `:194` where the adopter needs a key name.
+#
+# THE SUB-KEY PATH IS THE ONE THIS PULL REQUEST OPENED. Measured on `main`:
+# `platform.operators.certManager.create: "true"` rendered exit 0 and 32 objects —
+# silently permitted, because `main` has no operators clause at all — and at
+# 883a7a8 it RAISES. The top-level `platform.operators.create` raised on `main`
+# too, at the pre-existing `$creating` range, so that half is a defect this file
+# inherited rather than one the clause introduced. Both are refusals now.
+THE_NON_BOOLEAN_CREATES = (
+    ("create-is-a-quoted-true", "certManager", '"true"', "platform.operators.certManager.create", "string"),
+    ("create-is-an-integer", "certManager", "1", "platform.operators.certManager.create", "float64"),
+    ("create-is-a-quoted-true-at-the-top", None, '"true"', "platform.operators.create", "string"),
+    ("create-is-an-integer-at-the-top", None, "1", "platform.operators.create", "float64"),
+)
+THE_CREATE_SHAPE_REFUSAL = "rather than a boolean"
+
+
+def test_the_parent_refuses_a_create_toggle_that_is_not_a_boolean(tmp_path: Path) -> None:
+    """A `create` helm cannot compare is refused by name, never raised on.
+
+    THE RULE IS THE SAME ONE `platform.operators` OBEYS: refuse a value in a shape
+    the chart cannot read, never coerce it and read it anyway. `default false` is
+    nil-safe and never type-safe — it substitutes on an EMPTY value, so it turns a
+    missing key into `false` and hands a present `"true"` straight to `eq`.
+
+    ASSERTED ON THE ABSENCE OF A RAISE, and that assertion is the whole test. Both
+    spellings already exit 1 at 883a7a8 — BY RAISING — so a red case reading
+    `returncode != 0` is green against the defect it is supposed to catch.
+
+    A NIL `create` IS LEFT ALONE, DELIBERATELY. `create: null` never raised:
+    `default false nil` is `false` and `eq false true` is a legal comparison. Only
+    the values that ABORT the render are refused here, so this clause changes the
+    raising class and nothing else.
+    """
+    for name, operator, scalar, key, kind in THE_NON_BOOLEAN_CREATES:
+        block = (
+            f"    {operator}:\n      create: {scalar}\n"
+            if operator
+            else f"    create: {scalar}\n"
+        )
+        message = refusal(tmp_path, name, operators_overlay(block))
+        assert THE_CREATE_SHAPE_REFUSAL in message, message
+        assert f"{key} is a {kind} rather than a boolean" in message, (
+            f"`{name}` refused without naming the key and the type: {message}"
+        )
         for raise_text in THE_TEXTS_A_RAISE_LEAVES:
             assert raise_text not in message, (
                 f"`{name}` RAISED instead of refusing: {message}"

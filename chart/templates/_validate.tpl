@@ -159,13 +159,36 @@ reads the minted Secret name. A gate that tried would be red today. The names ar
 carried by the TEST rather than by this template, which ranges: the assertion
 therefore reads `platform`'s list and not a copy of this file's.
 
-A NON-MAP `platform.operators` IS REFUSED RATHER THAN READ, and the `kindIs` arm
-is there because leaving it out RAISES rather than refuses. `default` substitutes
-only on an EMPTY value, so `default dict true` is `true`, and both the `create`
-read and the range below would then run against a bool. Measured on helm 4.3.0
-before this arm existed: `--set platform.operators=true` aborted with
-`can't evaluate field create in type bool` — a stack trace where the adopter needs
-a key name. `--set platform.operators=yes` does the same.
+A PRESENT NON-MAP `platform.operators` IS REFUSED RATHER THAN READ, and the type
+is tested on the RAW value because testing it after a `default` covers only half
+the shapes. `default` substitutes on an EMPTY value, so `default dict true` is
+`true` and `default dict false` is `dict` — an arm reading `kindIs "map"` off the
+COERCED value therefore sees `false`, `null`, `0`, `""` and `[]` as the key being
+ABSENT and permits every one of them. Measured on helm 4.3.0, with
+`platform.enabled` true and the admin token set so no other refusal fires: at the
+commit that first carried this clause, `true`, `yes` and `[a]` refused while
+`false`, `null`, `0`, `""` and `[]` rendered exit 0. `[]` permitting while `[a]`
+refused is the incoherence that found it.
+
+`false` IS THE LOAD-BEARING ROW, not `true`. It is what an adopter writes who read
+"default false" and wanted to be explicit, and helm leaves a dependency ENABLED
+when NO path of a multi-path `condition:` resolves — so a permitted
+`platform.operators: false` turns the whole operator set on one layer down. It did
+not ship a mixed release only because `platform`'s own guard then aborted with
+`can't evaluate field create in type bool`, which is the stack trace this clause
+exists to replace with a key name. Measured before the raw-value arm: that same
+trace for `--set platform.operators=true`, and `--set platform.operators=yes` too.
+
+THE PRESENCE TEST IS `hasKey` AND IT HAS TO BE. `kindOf` reports `invalid` for an
+explicit `operators: null` and for no `operators` key at all, so nothing reading
+the value alone can tell them apart — measured on helm 4.3.0: `hasKey` is true for
+the first and false for the second. An explicit null is a key the adopter wrote,
+so it is refused, and `invalid` is reported to them as `null`.
+
+DO NOT MAKE THIS "NIL-SAFE" BY WIDENING THE `default`. Applying `default dict` to
+`platform`'s sibling guard was measured to convert a crash into a SILENT mixed
+release — exit 0 and no refusal from either guard. Refuse a present non-map; never
+coerce it and read it.
 
 IT IS A REAL TYPO RATHER THAN A HYPOTHETICAL, and refusing it is not the same
 choice the `$creating` block below makes. That block SKIPS a non-map, which is
@@ -176,23 +199,45 @@ what `platform` would do with a bool where it expects a mapping is NOT measurabl
 from here, because `platform` 0.1.8 has no `operators` key at all. The refusal
 says what is wrong and claims nothing about that.
 */}}
-{{- $operators := default dict $platform.operators -}}
 {{- $operatorKeys := list -}}
-{{- if not (kindIs "map" $operators) -}}
+{{- $operatorsShape := "" -}}
+{{- if kindIs "map" $platform -}}
+{{- if hasKey $platform "operators" -}}
+{{- if not (kindIs "map" $platform.operators) -}}
+{{- $operatorsShape = kindOf $platform.operators -}}
+{{- if eq $operatorsShape "invalid" -}}
+{{- $operatorsShape = "null" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $operatorsShape -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.operators is a %s rather than a mapping, so no operators key can be read out of it. "
       "This parent chart offers no operators path at all: ADR-0787 rules that `platform` installs "
       "cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD behind operators.create, "
       "default false, in a release of its own. Remove platform.operators from this values file."))
-      (kindOf $operators)) -}}
+      $operatorsShape) -}}
 {{- else -}}
-{{- if eq (default false $operators.create) true -}}
+{{- $operators := default dict $platform.operators -}}
+{{- if kindIs "bool" $operators.create -}}
+{{- if $operators.create -}}
 {{- $operatorKeys = append $operatorKeys "platform.operators.create" -}}
+{{- end -}}
 {{- end -}}
 {{- range $name, $block := $operators -}}
 {{- if kindIs "map" $block -}}
-{{- if eq (default false $block.create) true -}}
+{{- if kindIs "bool" $block.create -}}
+{{- if $block.create -}}
 {{- $operatorKeys = append $operatorKeys (printf "platform.operators.%s.create" $name) -}}
+{{- end -}}
+{{- else if not (kindIs "invalid" $block.create) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.operators.%s.create is a %s rather than a boolean, so this chart cannot read it as a "
+      "toggle. helm compares a toggle against a bool, and a value of any other type aborts the whole "
+      "render on an incompatible-types comparison where a key name is what you need. Write true or "
+      "false unquoted, or remove the key."))
+      $name (kindOf $block.create)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -210,13 +255,40 @@ says what is wrong and claims nothing about that.
       $operatorsAsked $operatorsAsked) -}}
 {{- end -}}
 
-{{/* Every `platform.<name>.create` that is true, by name, in key order. */}}
+{{/*
+Every `platform.<name>.create` that is true, by name, in key order.
+
+THE TYPE ARM IS HERE AND NOT ONLY IN THE OPERATORS CLAUSE ABOVE, because the
+refusals are ACCUMULATED and the one `fail` runs last: a `platform.operators.create`
+the clause above declined to read still reaches this range, and
+`eq (default false $block.create) true` aborts the render on it before that `fail`
+is ever reached. Measured on helm 4.3.0 — `platform.operators.create: 1` raised
+`incompatible types for comparison: float64 and bool` at this line, both on `main`
+and at the commit that first carried the operators clause. Refusing here names the
+key for every `platform.<name>.create`, the operators one included, and names it
+exactly once.
+
+`default false` IS NIL-SAFE AND NEVER TYPE-SAFE. It substitutes on an EMPTY value,
+so it turns an absent key into `false` and hands a present `"true"` or `1` straight
+to `eq`. Only the values that ABORT are refused: a nil `create` never raised —
+`default false nil` is `false` and that comparison is legal — so it is left reading
+as false, exactly as before.
+*/}}
 {{- $creating := list -}}
 {{- if kindIs "map" $platform -}}
 {{- range $name, $block := $platform -}}
 {{- if kindIs "map" $block -}}
-{{- if eq (default false $block.create) true -}}
+{{- if kindIs "bool" $block.create -}}
+{{- if $block.create -}}
 {{- $creating = append $creating (printf "platform.%s.create" $name) -}}
+{{- end -}}
+{{- else if not (kindIs "invalid" $block.create) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.%s.create is a %s rather than a boolean, so this chart cannot read it as a toggle. "
+      "helm compares a toggle against a bool, and a value of any other type aborts the whole render "
+      "on an incompatible-types comparison where a key name is what you need. Write true or false "
+      "unquoted, or remove the key."))
+      $name (kindOf $block.create)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
