@@ -158,9 +158,34 @@ vendored tarball the way `test_the_minted_iam_keys_name_is_the_literal_this_refu
 reads the minted Secret name. A gate that tried would be red today. The names are
 carried by the TEST rather than by this template, which ranges: the assertion
 therefore reads `platform`'s list and not a copy of this file's.
+
+A NON-MAP `platform.operators` IS REFUSED RATHER THAN READ, and the `kindIs` arm
+is there because leaving it out RAISES rather than refuses. `default` substitutes
+only on an EMPTY value, so `default dict true` is `true`, and both the `create`
+read and the range below would then run against a bool. Measured on helm 4.3.0
+before this arm existed: `--set platform.operators=true` aborted with
+`can't evaluate field create in type bool` — a stack trace where the adopter needs
+a key name. `--set platform.operators=yes` does the same.
+
+IT IS A REAL TYPO RATHER THAN A HYPOTHETICAL, and refusing it is not the same
+choice the `$creating` block below makes. That block SKIPS a non-map, which is
+right there: it is looking for blocks and a scalar is simply not one. Here the key
+itself is the thing the parent does not offer, so a scalar under that name is an
+adopter asking for the operators path in a shape no key can be read out of — and
+what `platform` would do with a bool where it expects a mapping is NOT measurable
+from here, because `platform` 0.1.8 has no `operators` key at all. The refusal
+says what is wrong and claims nothing about that.
 */}}
 {{- $operators := default dict $platform.operators -}}
 {{- $operatorKeys := list -}}
+{{- if not (kindIs "map" $operators) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.operators is a %s rather than a mapping, so no operators key can be read out of it. "
+      "This parent chart offers no operators path at all: ADR-0787 rules that `platform` installs "
+      "cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD behind operators.create, "
+      "default false, in a release of its own. Remove platform.operators from this values file."))
+      (kindOf $operators)) -}}
+{{- else -}}
 {{- if eq (default false $operators.create) true -}}
 {{- $operatorKeys = append $operatorKeys "platform.operators.create" -}}
 {{- end -}}
@@ -168,6 +193,7 @@ therefore reads `platform`'s list and not a copy of this file's.
 {{- if kindIs "map" $block -}}
 {{- if eq (default false $block.create) true -}}
 {{- $operatorKeys = append $operatorKeys (printf "platform.operators.%s.create" $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -2387,6 +2387,13 @@ TOP_LEVEL_BLOCK = "    create: true\n"
 THE_OPERATORS_REFUSAL = "asks this parent chart to install third-party operators"
 THE_ADMIN_TOKEN_REFUSAL = "gateway.adminBootstrap.tokenSecret is empty"
 THE_DEPENDENCY_REFUSAL = "platform.enabled is not true"
+THE_OPERATORS_SHAPE_REFUSAL = "rather than a mapping"
+
+# THE THREE TEXTS A RAISE LEAVES IN STDERR, shared with
+# `test_the_refusals_are_nil_safe_with_every_subchart_removed`. A refusal and a
+# raise both exit 1, so the exit code alone cannot tell a named key from a stack
+# trace.
+THE_TEXTS_A_RAISE_LEAVES = ("nil pointer", "can't evaluate field", "error calling")
 
 
 def operators_overlay(block: str) -> str:
@@ -2459,6 +2466,37 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
         f"{ADOPTER_OBJECTS} was expected; a refusal keyed on the key being present "
         f"rather than true would refuse this file"
     )
+
+
+def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
+    tmp_path: Path,
+) -> None:
+    """The adopter typo that used to abort the render with a stack trace.
+
+    `platform.operators: true` is what somebody writes who thinks the toggle IS
+    the block rather than a key inside it. Sprig's `default` substitutes only on an
+    EMPTY value, so `default dict true` is `true`, and both the `create` read and
+    the range then run against a bool. Measured on helm 4.3.0 before the `kindIs`
+    arm existed: `--set platform.operators=true` aborted with `can't evaluate field
+    create in type bool`.
+
+    ASSERTED ON THE ABSENCE OF A RAISE, not only on the exit code. A refusal and a
+    raise both exit 1, so an implementation that went back to raising would satisfy
+    `returncode != 0` while giving the adopter a stack trace instead of a key name.
+    """
+    for name, scalar in [("operators-is-a-bool", "true"), ("operators-is-a-string", "yes")]:
+        message = refusal(
+            tmp_path,
+            name,
+            f"platform:\n  enabled: true\n  operators: {scalar}\n"
+            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+        )
+        assert THE_OPERATORS_SHAPE_REFUSAL in message, message
+        assert "platform.operators is a" in message, message
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
 
 
 # THE TWO LINES THE RED CASES BELOW REWRITE, each isolating one half of the clause.
