@@ -96,6 +96,93 @@ the point: the install does not half-happen.
 */}}
 {{- define "yadgar.validate" -}}
 {{- $platform := default dict .Values.platform -}}
+{{- $refusals := list -}}
+
+{{/*
+ADR-0787, AND THE ONE REFUSAL IN THIS FILE THAT SITS OUTSIDE THE `$creating`
+GUARD. ADR-0787 rules that `platform` MAY install the five third-party operators
+— cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD — cluster-wide
+behind `operators.create`, DEFAULT FALSE, in a release of its own. It is not a
+path this parent chart offers, and this clause is what says so at render time
+instead of letting an adopter find out half-way through an apply.
+
+WHY A SINGLE RELEASE CANNOT DO BOTH. An operator's CRDs and the objects that need
+them land in one apply, so a release that installs cert-manager and renders a
+Certificate applies the Certificate against a CRD that does not exist yet. That is
+the same failure `yadgarhq/platform`'s own mixed-release refusal names one level
+down; this is the parent's half of it.
+
+IT IS OUTSIDE THE `$creating` GUARD, AND THAT IS THE WHOLE POINT. The guard opens
+only when some `platform.<name>.create` is true. `platform.operators.certManager.create`
+true with `operators.create` absent leaves `$creating` EMPTY — `platform.operators`
+is a map whose own `create` key is missing — so a refusal written inside the guard
+would never run for the values file that most needs it. Measured on `main` before
+this clause existed, helm 4.3.0:
+`helm template yadgar chart/ --set platform.operators.certManager.create=true`
+rendered exit 0 and 32 objects.
+
+THE SUB-KEYS ARE SUFFICIENT ON THEIR OWN, WHICH IS WHY EACH ONE IS NAMED. Every
+operator dependency in `platform` is declared
+`condition: operators.<op>.create,operators.create`, and helm evaluates the FIRST
+valid path and stops. So `operators.certManager.create: true` installs cert-manager
+while `operators.create` is false. A refusal reading the top-level key alone is
+therefore FALSE in that shape, and the hole is the one this comment opens with.
+
+THE TOP-LEVEL KEY ALREADY REACHED A REFUSAL BEFORE THIS CLAUSE, BY ACCIDENT, and
+that is recorded so nobody reads the top-level case as this clause's proof.
+`platform.operators` is a map carrying `create: true`, so the `$creating` range
+below picks it up and the admin-token and `platform.enabled` refusals fire on a
+bare `--set platform.operators.create=true` — measured exit 1 on `main`. With
+`platform.enabled` true and `gateway.adminBootstrap.tokenSecret` set, the same key
+rendered exit 0 and 32 objects. THAT is the case this clause closes, and the test
+sets both so the message it reads is unambiguously this clause's.
+
+THE OVERLAP WITH `$creating` IS LEFT ALONE, DELIBERATELY. `platform.operators.create`
+is not a toggle that renders a platform-layer object, so the admin-token refusal's
+"this install renders the platform layer (platform.operators.create)" reads a little
+wide when both fire. Excluding `operators` by name would be an enumeration in the
+one block this file keeps free of them, and it would change a shipped refusal for a
+render that aborts either way. The refusals are accumulated, so this one is in the
+same message.
+
+THE OPERATOR BLOCKS ARE RANGED OVER, NEVER ENUMERATED, for the reason the
+`$creating` block below gives: a literal list goes stale in silence the day a sixth
+operator arrives. Ranging also means the message names the key the ADOPTER wrote,
+so it cannot name a key that does not exist.
+
+THE FIVE NAMES ARE `certManager`, `keda`, `mariadbOperator`, `envoyGateway` and
+`argoCd`, VERIFIED AGAINST `yadgarhq/platform` AT `origin/feat/operators-toggle-step1`
+AND NOT AGAINST THE PIN. `platform` 0.1.8 — the version `Chart.yaml` pins today —
+carries no `operators` key at all, so no gate here can read those names off the
+vendored tarball the way `test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes`
+reads the minted Secret name. A gate that tried would be red today. The names are
+carried by the TEST rather than by this template, which ranges: the assertion
+therefore reads `platform`'s list and not a copy of this file's.
+*/}}
+{{- $operators := default dict $platform.operators -}}
+{{- $operatorKeys := list -}}
+{{- if eq (default false $operators.create) true -}}
+{{- $operatorKeys = append $operatorKeys "platform.operators.create" -}}
+{{- end -}}
+{{- range $name, $block := $operators -}}
+{{- if kindIs "map" $block -}}
+{{- if eq (default false $block.create) true -}}
+{{- $operatorKeys = append $operatorKeys (printf "platform.operators.%s.create" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $operatorKeys -}}
+{{- $operatorsAsked := join ", " $operatorKeys -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s asks this parent chart to install third-party operators, and the parent offers no such "
+      "path. ADR-0787 rules that `platform` MAY install cert-manager, KEDA, mariadb-operator, Envoy "
+      "Gateway and Argo CD cluster-wide behind operators.create, default false, in a RELEASE OF ITS "
+      "OWN installed before this one. One release cannot do both: an operator's CRDs and the objects "
+      "that need them land in a single apply, so the objects are applied against definitions that do "
+      "not exist yet and the install fails half-way. Set %s false here, and install the operators "
+      "from `platform` on its own."))
+      $operatorsAsked $operatorsAsked) -}}
+{{- end -}}
 
 {{/* Every `platform.<name>.create` that is true, by name, in key order. */}}
 {{- $creating := list -}}
@@ -111,7 +198,6 @@ the point: the install does not half-happen.
 
 {{- if $creating -}}
 {{- $asked := join ", " $creating -}}
-{{- $refusals := list -}}
 
 {{/*
 RULING 5. `gateway.adminBootstrap.tokenSecret` defaults EMPTY, which renders no
@@ -219,9 +305,19 @@ that trips it names only one.
       "Set platform.enabled true, or set those create toggles false."))
       $asked) -}}
 {{- end -}}
+{{- end -}}
 
+{{/*
+THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
+CAN REACH IT. Every refusal above `{{- if $creating -}}` is guarded on an adopter
+setting a `platform.<name>.create`; the operators clause is not, because the values
+file it exists for sets none. Raising here rather than inside the guard is what
+makes both reachable from one `fail`, which is the accumulation rule this file
+opens with. The guard itself is unmoved and still decides which refusals are
+COLLECTED — `test_breaking_the_guard_makes_the_default_render_refuse` replaces it
+with `{{- if true -}}` and still reddens the bare default render.
+*/}}
 {{- if $refusals -}}
 {{- fail (printf "\n\nyadgar: this parent chart refuses to render.\n\n%s\n" (join "\n\n" $refusals)) -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
