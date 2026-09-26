@@ -172,18 +172,35 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 #   cert-manager.io/v1              required — `platform`'s cert-manager check
 #   gateway.envoyproxy.io/v1alpha1  required — `platform`'s Envoy Gateway check
 #   k8s.mariadb.com/v1alpha1        required — the three `-db` charts' checks
-#   keda.sh/v1alpha1                NOT required today, and deliberately absent:
-#                                   no module chart declares a KEDA render check
-#                                   yet, so ScaledObjects render unguarded. The
-#                                   module-chart sweep in
-#                                   `plans/the-platform-layer-in-the-charts.md`
-#                                   adds those checks, and this tuple gains the
-#                                   group in the same change that makes it
-#                                   required.
+#   keda.sh/v1alpha1                required since 2026-09-26 — see below
+#
+# `keda.sh/v1alpha1` JOINED THE TUPLE ON 2026-09-26, AND THE LINE IT REPLACED
+# FORECAST EXACTLY THIS. That line said the group was "NOT required today" because
+# "no module chart declares a KEDA render check yet", and that "this tuple gains
+# the group in the same change that makes it required". The module-chart sweep it
+# named has now landed: ALL SEVEN module charts that render a `ScaledObject`
+# declare the check today — `gateway` 0.9.52, `iam` 0.8.44, `iam-db` 0.7.45,
+# `project` 0.1.19, `project-db` 0.3.9, `task` 0.5.30 and `task-db` 0.6.33, each in
+# its own `templates/render-checks.yaml`, each naming this exact group.
+#
+# MEASURED 2026-09-26 on helm 4.3.0 against the nine pins in `chart/Chart.yaml`
+# today. Without the flag, `helm template yadgar chart -f example/values.yaml`
+# exits 1 at `yadgar/charts/task/templates/render-checks.yaml:36:4` — "task: this
+# render needs the API keda.sh/v1alpha1, which KEDA provides, and the target does
+# not have it. autoscaling.enabled is true, and that is what asked for it." With
+# the flag the same render exits 0. `example/values.yaml` sets
+# `autoscaling.enabled` true in all seven modules, which is what reaches the check.
+#
+# THIS MOVES NO OBJECT COUNT, AND THAT IS MEASURED RATHER THAN ASSUMED. A render
+# check only ever calls `fail`; it emits nothing. No chart in the package gates an
+# object on `.Capabilities.APIVersions` — `grep -n Capabilities` over every
+# subchart's templates returns the four `require-api` partials and their prose and
+# nothing else — so handing helm one more group cannot add or drop a document.
 DECLARED_API_VERSIONS = (
     "cert-manager.io/v1",
     "gateway.envoyproxy.io/v1alpha1",
     "k8s.mariadb.com/v1alpha1",
+    "keda.sh/v1alpha1",
 )
 API_VERSIONS = tuple(
     part for group in DECLARED_API_VERSIONS for part in ("--api-versions", group)
@@ -609,17 +626,52 @@ def test_the_directory_and_the_package_render_the_same_objects(packaged: Path) -
     assert identity(render(str(CHART))) == identity(render(str(packaged)))
 
 
-# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. One first-level member per
-# declared dependency, plus the one a level down: `platform` declares the upstream
-# NATS chart under `condition: nats.create`, so the published parent carries
-# `yadgar/charts/platform/charts/nats/Chart.yaml`. Measured 2026-09-24 on helm
-# 3.18.4 over `helm package chart -u`.
+# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Nine first-level members,
+# one per dependency `chart/Chart.yaml` declares, plus the NINE below that sit
+# BENEATH `platform` — six of them one level down and three of them two.
 #
-# THE NESTED ONE IS WHY THIS COUNTS RATHER THAN ONLY CHECKING NAMES. A loop over
-# the parent's own `dependencies:` cannot see one level down, so a subchart of a
-# subchart could go missing with every named assertion still green — and
-# `helm install` resolves nothing, so the adopter meets it and nobody else does.
-NESTED_SUBCHART_MEMBERS = ["yadgar/charts/platform/charts/nats/Chart.yaml"]
+# MEASURED 2026-09-26 on helm 4.3.0 over `helm package chart -u` against the nine
+# pins in `chart/Chart.yaml` today, `platform` at 0.1.11:
+#
+#   tar tzf yadgar-0.1.0.tgz | grep -cE '^yadgar/charts/.*/Chart\.yaml$'   → 18
+#
+# EIGHT OF THESE NINE ARRIVED WITH `platform` 0.1.9, AND THE GATE WENT RED BECAUSE
+# IT WAS DOING ITS JOB. 0.1.9 declares the five operators ADR-0787 rules on —
+# cert-manager, KEDA, mariadb-operator, Envoy Gateway (`gateway-helm`) and Argo CD
+# — as dependencies of its own, and three of those five carry a subchart apiece:
+# `argo-cd` pulls `redis-ha`, `gateway-helm` pulls `crds`, and `mariadb-operator`
+# pulls `mariadb-operator-crds`. Five plus three is the eight.
+#
+# HELM PACKAGES A DECLARED DEPENDENCY WHATEVER ITS `condition:` SAYS, and that one
+# fact is the whole of why the number moved. Each operator is declared
+# `condition: operators.<op>.create,operators.create`, and every one of those keys
+# is FALSE by default — but a `condition:` governs what RENDERS, never what is
+# PACKAGED. So the tarball an adopter downloads grew by eight charts while the
+# objects an adopter installs did not move at all: `ADOPTER_EXPECTED` and
+# `ADOPTER_OBJECTS` are unchanged at 0.1.11, and the operators are off.
+#
+# SO THIS IS DOWNLOAD WEIGHT RATHER THAN INSTALLED OBJECTS, AND THE OPERATOR TOOK
+# THE TRADE ON 2026-09-26. Asked whether to accept the larger adopter download or
+# stop vendoring the operators, he answered: "bigger download is fine". The list
+# moved from ten to eighteen for that reason and for no other — it is NOT a gate
+# loosened to get a suite green. A subchart that arrives or leaves without this
+# list moving is still refused, which is the property the gate exists for.
+#
+# THE NESTED ONES ARE WHY THIS COUNTS RATHER THAN ONLY CHECKING NAMES. A loop over
+# the parent's own `dependencies:` cannot see one level down, let alone two, so a
+# subchart of a subchart could go missing with every named assertion still green —
+# and `helm install` resolves nothing, so the adopter meets it and nobody else does.
+NESTED_SUBCHART_MEMBERS = [
+    "yadgar/charts/platform/charts/nats/Chart.yaml",
+    "yadgar/charts/platform/charts/argo-cd/Chart.yaml",
+    "yadgar/charts/platform/charts/argo-cd/charts/redis-ha/Chart.yaml",
+    "yadgar/charts/platform/charts/cert-manager/Chart.yaml",
+    "yadgar/charts/platform/charts/gateway-helm/Chart.yaml",
+    "yadgar/charts/platform/charts/gateway-helm/charts/crds/Chart.yaml",
+    "yadgar/charts/platform/charts/keda/Chart.yaml",
+    "yadgar/charts/platform/charts/mariadb-operator/Chart.yaml",
+    "yadgar/charts/platform/charts/mariadb-operator/charts/mariadb-operator-crds/Chart.yaml",
+]
 
 
 def test_the_package_carries_every_subchart_so_an_adopter_needs_no_registry(packaged: Path) -> None:
@@ -1550,6 +1602,19 @@ A_LINE_IN_THE_UNRENDERED_MEMBER = "# Upgrading from 0.x to 1.x\n"
 def chart_with_a_vendored_line_deleted(destination: Path, member: str, line: str) -> Path:
     """A copy of the parent whose vendored `platform` tarball had one line deleted.
 
+    DELETION IS THE REWRITE BELOW WITH AN EMPTY REPLACEMENT, and the two names are
+    kept apart because the red cases read differently: deleting a line is the
+    faithful model of a release that dropped something, and rewriting one is the
+    only way to switch a guard off without leaving the template unparseable.
+    """
+    return chart_with_a_vendored_line_rewritten(destination, member, line, "")
+
+
+def chart_with_a_vendored_line_rewritten(
+    destination: Path, member: str, was: str, now: str
+) -> Path:
+    """A copy of the parent whose vendored `platform` tarball had one line rewritten.
+
     THE PARENT RENDERS FROM A TARBALL, NOT FROM A CHART DIRECTORY, which is why
     this cannot be `platform`'s own helper copied across. Per ADR-0725 nothing
     under `chart/charts/` is committed, so `helm dependency update chart` puts a
@@ -1567,6 +1632,11 @@ def chart_with_a_vendored_line_deleted(destination: Path, member: str, line: str
     named template, or a template whose line has moved, is a red case that has
     stopped testing anything — and an empty match read as a pass is the exact
     false green this whole family of gates exists to refuse.
+
+    THE NEEDLE IS COUNTED AND NOT ONLY FOUND, the way
+    `chart_with_the_validate_line_rewritten` counts its own: a line that occurs
+    twice would be half-rewritten and the render would show a mutation nobody
+    designed.
     """
     import io
     import tarfile
@@ -1601,12 +1671,13 @@ def chart_with_a_vendored_line_deleted(destination: Path, member: str, line: str
         for entry, body in entries:
             if entry.name == member:
                 text = body.decode()
-                assert line in text, (
-                    f"`{line.strip()}` is not in `{member}`, so this red case is "
-                    f"now testing nothing — the line moved and the deletion would "
-                    f"be a no-op the render could not show"
+                assert text.count(was) == 1, (
+                    f"`{was.strip()}` occurs {text.count(was)} times in `{member}` "
+                    f"and exactly one was expected, so this red case is now testing "
+                    f"something else — the line moved and the edit would be a no-op "
+                    f"the render could not show"
                 )
-                body = text.replace(line, "", 1).encode()
+                body = text.replace(was, now, 1).encode()
                 entry.size = len(body)
             archive.addfile(entry, io.BytesIO(body) if body is not None else None)
 
@@ -2494,16 +2565,69 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
 # `hasKey $platform "operators"` is true for `operators: null` and false when the
 # key is absent. `_validate.tpl` maps `invalid` to `null` so the message names a
 # type an adopter recognises rather than "is a invalid".
-THE_NON_MAPPING_OPERATORS = (
-    ("operators-is-a-bool", "true", "bool"),
-    ("operators-is-the-yaml-yes", "yes", "bool"),
-    ("operators-is-false", "false", "bool"),
-    ("operators-is-null", "null", "null"),
-    ("operators-is-zero", "0", "float64"),
-    ("operators-is-an-empty-string", '""', "string"),
-    ("operators-is-an-empty-list", "[]", "slice"),
-    ("operators-is-a-list", "[a]", "slice"),
+#
+# ── AND THE `null` ROW IS THE ONE THE PARENT CANNOT ANSWER (2026-09-26) ─────────
+#
+# EVERY ROW CARRIES THE CHART THAT REFUSES IT, because they are no longer all the
+# same chart. Seven are refused HERE, by `chart/templates/_validate.tpl`, naming the
+# type the adopter wrote. `null` is refused one level down, by `platform`'s own arm
+# one, and no change in this repository can move it back.
+#
+# WHY. HELM DELETES A KEY WHOSE VALUE IS NULL, and it does NOT put the child's
+# default back in its place — so by the time any template runs there is no
+# `platform.operators` key for `hasKey` to find, and the parent's guard reads FALSE.
+# That is indistinguishable from an adopter who never wrote the key, which is every
+# other adopter, so the parent going quiet here is correct rather than a hole. Helm
+# deletes the key only if the chart DECLARES it, and `platform` began declaring
+# `operators.create: false` at 0.1.9 — a child chart shipping a default therefore
+# blinded its parent's guard. `platform` 0.1.11 refuses the case itself for exactly
+# that reason, from the one place the information still exists.
+#
+# THE PARENT'S OWN `null` BRANCH IS STILL LIVE, MEASURED RATHER THAN ASSUMED. With
+# no subchart declaring the key, nothing triggers the deletion: over
+# `chart_without_its_dependencies` the same overlay is refused by the PARENT naming
+# `platform.operators is a null rather than a mapping`, on helm 3.20.2 and 4.3.0
+# alike, 2026-09-26. So `_validate.tpl`'s `invalid` → `null` mapping is not dead
+# code; it is code a pinned `platform` stands in front of.
+#
+# THE WHOLE TABLE WAS RE-MEASURED AT `platform` 0.1.11 ON BOTH HELM LINES, 3.20.2
+# and 4.3.0, 2026-09-26, and the two agree row for row. Only `null` moved: the other
+# seven are still refused by the parent, still naming `bool`, `float64`, `string`
+# and `slice`. The four empty scalars were re-run individually rather than inferred
+# from a suite run, because the loop below stops at its first failing row.
+THE_PARENT = "chart"
+THE_SUBCHART = "platform"
+
+# THE PHRASE `platform` 0.1.11 WRITES AND THIS PARENT CANNOT, read off the published
+# artifact (`templates/render-checks.yaml`, arm one) rather than retyped from a
+# summary of it. It is the discriminator for the `null` row the way the type name is
+# for the other seven: `"rather than a mapping"` alone appears in `platform`'s own
+# text too — its arm one ends by telling the adopter to write `operators:` AS a
+# mapping — so the row needs the sentence that only the deleted-key arm carries.
+THE_DELETED_OPERATORS_KEY_REFUSAL = (
+    "the operators key has been deleted from this release's values"
 )
+
+
+def the_parent_names_the_type(kind: str) -> str:
+    return f"platform.operators is a {kind} {THE_OPERATORS_SHAPE_REFUSAL}"
+
+
+THE_NON_MAPPING_OPERATORS = (
+    ("operators-is-a-bool", "true", THE_PARENT, the_parent_names_the_type("bool")),
+    ("operators-is-the-yaml-yes", "yes", THE_PARENT, the_parent_names_the_type("bool")),
+    ("operators-is-false", "false", THE_PARENT, the_parent_names_the_type("bool")),
+    ("operators-is-null", "null", THE_SUBCHART, THE_DELETED_OPERATORS_KEY_REFUSAL),
+    ("operators-is-zero", "0", THE_PARENT, the_parent_names_the_type("float64")),
+    ("operators-is-an-empty-string", '""', THE_PARENT, the_parent_names_the_type("string")),
+    ("operators-is-an-empty-list", "[]", THE_PARENT, the_parent_names_the_type("slice")),
+    ("operators-is-a-list", "[a]", THE_PARENT, the_parent_names_the_type("slice")),
+)
+
+# WHAT THE WALK ABOVE MUST EXAMINE, COUNTED AND SPLIT BY REFUSER. A row deleted from
+# the tuple, or a row that quietly changed which chart answered it, reddens here
+# rather than leaving the loop exercising one fewer shape and reporting a pass.
+THE_SHAPES_AN_ADOPTER_CAN_WRITE = {THE_PARENT: 7, THE_SUBCHART: 1}
 
 
 def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
@@ -2527,22 +2651,141 @@ def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
     ASSERTED ON THE ABSENCE OF A RAISE, not only on the exit code. A refusal and a
     raise both exit 1, so an implementation that went back to raising would satisfy
     `returncode != 0` while giving the adopter a stack trace instead of a key name.
+
+    SEVEN ROWS ARE THIS PARENT'S REFUSAL AND ONE IS `platform`'s, which is a
+    structural fact rather than an inconsistency — the tuple's comment carries the
+    measurement. `platform.operators: null` makes helm DELETE the key, so the
+    parent's `hasKey` reads false and the only chart that still knows the key was
+    written is the one whose own defaults guarantee it.
+    `test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render` is the
+    red case, and it shows the shape rendering exit 0 with the operators in.
     """
-    for name, scalar, kind in THE_NON_MAPPING_OPERATORS:
+    refused_by: collections.Counter = collections.Counter()
+    for name, scalar, chart, phrase in THE_NON_MAPPING_OPERATORS:
         message = refusal(
             tmp_path,
             name,
             f"platform:\n  enabled: true\n  operators: {scalar}\n"
             "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
         )
-        assert THE_OPERATORS_SHAPE_REFUSAL in message, message
-        assert f"platform.operators is a {kind} rather than a mapping" in message, (
-            f"`{name}` refused without naming the type the adopter wrote: {message}"
+        assert phrase in message, (
+            f"`{name}` refused without the phrase `{chart}` alone writes: {message}"
         )
         for raise_text in THE_TEXTS_A_RAISE_LEAVES:
             assert raise_text not in message, (
                 f"`{name}` RAISED instead of refusing: {message}"
             )
+        refused_by[chart] += 1
+    assert dict(refused_by) == THE_SHAPES_AN_ADOPTER_CAN_WRITE, (
+        f"this walk examined {dict(refused_by)} and the table says "
+        f"{THE_SHAPES_AN_ADOPTER_CAN_WRITE}"
+    )
+
+
+# THE ONE LINE THE RED CASE BELOW REWRITES, AND IT IS IN THE SUBCHART. The `null`
+# row's refusal is `platform`'s, so the mutation that has to show it load-bearing is
+# `platform`'s too — the parent has no line to switch off for this row, which is the
+# whole claim the row makes. Rewritten rather than deleted: removing the `if` leaves
+# the `else if` beneath it with no opening branch and helm refuses to parse the
+# template at all, which would be a red case that fails for the wrong reason.
+THE_OPERATORS_RENDER_CHECKS = "platform/templates/render-checks.yaml"
+THE_DELETED_KEY_ARM = '{{- if not (hasKey .Values "operators") }}\n'
+THE_DELETED_KEY_ARM_OFF = "{{- if false }}\n"
+
+# WHERE AN OPERATOR SUBCHART'S OBJECTS ANNOUNCE THEMSELVES. `helm template` writes a
+# `# Source:` comment above every document, so the operators going in is read off the
+# raw stdout rather than inferred from a count that also moves for other reasons.
+#
+# THE FIVE ARE NAMED RATHER THAN GLOBBED, because `platform/charts/` also holds the
+# upstream NATS chart, which is not an operator and renders here at the defaults for
+# reasons that have nothing to do with this arm.
+THE_OPERATOR_SOURCES = tuple(
+    f"# Source: yadgar/charts/platform/charts/{chart}/"
+    for chart in ("argo-cd", "cert-manager", "gateway-helm", "keda", "mariadb-operator")
+)
+
+
+def test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render(
+    tmp_path: Path,
+) -> None:
+    """THE `null` ROW'S RED CASE, and it renders exit 0 with five operators in.
+
+    WHAT IT CONSTRUCTS. The vendored `platform` tarball is unpacked, arm one's
+    `hasKey` test is rewritten to `false`, and the tarball is repacked under the same
+    name. Arm two then stands down on its own — it refuses only when `platform` is
+    the ROOT chart and here it is a subchart — so the release has no refusal for a
+    deleted `operators` key anywhere, which is exactly the estate as it stood before
+    `platform` 0.1.11.
+
+    WHAT IT MEASURES. `platform.operators: null` renders EXIT 0 and the five operator
+    subcharts come with it. That is the fail-open ADR-0794 names rather than a
+    cosmetic gap: helm resolves each operator's `condition:` against the RAW values
+    where the key is still null, and it leaves a dependency ENABLED when no path of a
+    multi-path condition resolves — so the shape does not turn the operators off, it
+    turns all five on. Measured 2026-09-26 on helm 3.20.2 and 4.3.0 alike: 197
+    objects against the 81 of R5, 165 of them from the operator subcharts.
+
+    THE COUNTS ARE ASSERTED AS INEQUALITIES, deliberately. Pinning 197 and 165 would
+    redden this red case at every operator version bump for a reason that has nothing
+    to do with the arm it exercises, and the property being shown is that the
+    operators ARRIVED, not how many objects they happen to carry this month.
+
+    AND THE PARENT IS SHOWN SILENT ON THE SAME INPUT, which is the other half. If the
+    parent could refuse this shape the row would not need `platform`'s wording at
+    all; asserting that neither the parent's phrase nor a raise appears is what
+    distinguishes "the parent is blind here" from "the mutation broke something".
+    """
+    copy = chart_with_a_vendored_line_rewritten(
+        tmp_path / "arm-one-off",
+        THE_OPERATORS_RENDER_CHECKS,
+        THE_DELETED_KEY_ARM,
+        THE_DELETED_KEY_ARM_OFF,
+    )
+    result = helm(
+        "template",
+        "yadgar",
+        str(copy),
+        *API_VERSIONS,
+        "-f",
+        str(
+            overlay(
+                tmp_path / "arm-one-off.yaml",
+                "platform:\n  enabled: true\n  operators: null\n"
+                "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+            )
+        ),
+    )
+    assert result.returncode == 0, (
+        "`platform.operators: null` was still refused with arm one switched off, so "
+        f"this red case is not isolating the arm the `null` row reads: {result.stderr}"
+    )
+    assert THE_DELETED_OPERATORS_KEY_REFUSAL not in result.stderr, result.stderr
+    assert THE_OPERATORS_SHAPE_REFUSAL not in result.stderr, (
+        "the parent refused this shape after all, which would make the `null` row's "
+        f"dependence on `platform`'s wording untrue: {result.stderr}"
+    )
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in result.stderr, (
+            f"the mutated release RAISED rather than rendering, so this red case "
+            f"shows a broken template and not a fail-open: {result.stderr}"
+        )
+
+    documents = [
+        document
+        for document in yaml.safe_load_all(result.stdout)
+        if isinstance(document, dict) and document.get("apiVersion")
+    ]
+    assert len(documents) > ADOPTER_OBJECTS, (
+        f"the mutated release rendered {len(documents)} objects, no more than the "
+        f"{ADOPTER_OBJECTS} of R5, so the operators did not go in and this red case "
+        f"is showing nothing"
+    )
+    arrived = [source for source in THE_OPERATOR_SOURCES if source in result.stdout]
+    assert len(arrived) == len(THE_OPERATOR_SOURCES), (
+        f"the mutated release rendered objects from {len(arrived)} of the "
+        f"{len(THE_OPERATOR_SOURCES)} operator subcharts — {arrived} — so the "
+        f"fail-open this red case exists to show did not happen in full"
+    )
 
 
 # THE FOUR NON-BOOLEAN `create` SPELLINGS, AND THE TWO KEY PATHS THEY SIT ON. A
