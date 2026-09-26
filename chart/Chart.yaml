@@ -84,7 +84,7 @@ dependencies:
     version: 0.5.30
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.6.32
+    version: 0.6.33
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.
