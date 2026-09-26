@@ -121,3 +121,27 @@ spec:
   syncPolicy:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true]
+
+  # KEEP THIS BLOCK IF YOU SET ANY `*-db.database.create` TRUE. It is not
+  # decoration and it is not about drift you can ignore.
+  #
+  # mariadb-operator writes the GENERATED CREDENTIAL'S NAME back onto the spec it
+  # reconciles. Argo then sees its own manifest differ from the live object and
+  # reports OutOfSync forever; `selfHeal: true` above reverts the operator's
+  # writeback, the operator writes it again, and the two loop. It looks like
+  # drift and it is the operator doing its job.
+  #
+  # ONE ENTRY COVERS EVERY MariaDB THIS CHART RENDERS. Argo selects
+  # `ignoreDifferences` by group and kind with `name` optional, so this entry
+  # names none of the three databases and holds for all of them.
+  #
+  # NO VALUES FILE CAN EXPRESS THIS. It is Argo-level state, so an adopter who
+  # copies `example/values.yaml` and writes their own Application meets the loop
+  # with nothing anywhere to warn them. That is why it lives in the file you
+  # copy.
+  ignoreDifferences:
+    - group: k8s.mariadb.com
+      kind: MariaDB
+      jsonPointers:
+        - /spec/rootPasswordSecretKeyRef/generate
+        - /spec/passwordSecretKeyRef/generate
