@@ -2408,6 +2408,155 @@ def test_the_parent_refuses_a_create_toggle_with_the_dependency_left_off(tmp_pat
     assert "platform.internalCA.create" in message, message
 
 
+# ── `platform.enabled` THAT IS NOT A BOOL, WHICH IS THE OPPOSITE STATE ───────
+# THE REFUSAL ABOVE SAYS "this render contains NONE of the objects those toggles
+# name", AND THAT SENTENCE IS FALSE IN THIS STATE. It is true when
+# `platform.enabled` is false or absent, because the condition resolves and the
+# dependency is off. It is false when the key is present and not a bool: helm
+# leaves a dependency ENABLED when the path its condition names does not resolve,
+# so the platform layer GOES IN. The adopter was told the opposite of what
+# happened, loudly, with a remedy that happened to be right for the wrong reason.
+#
+# AND THE STRING SHAPES REACHED NO MESSAGE AT ALL. `ne (default false
+# $platform.enabled) true` compares a string to a bool by RAISING: measured on
+# helm 4.3.0, `platform.enabled: "yes"` aborted with `error calling ne:
+# incompatible types for comparison: string and bool` — a stack trace where
+# ADR-0794 requires a key name.
+#
+# EACH ROW: (name, what is written after `enabled:`, the kind reported).
+THE_UNREADABLE_ENABLED_SHAPES = (
+    ("enabled-is-null", "", "null"),
+    ("enabled-is-the-yaml-yes-string", '"yes"', "string"),
+    ("enabled-is-the-yaml-true-string", '"true"', "string"),
+    ("enabled-is-zero", "0", "float64"),
+    ("enabled-is-an-empty-string", '""', "string"),
+    ("enabled-is-an-empty-list", "[]", "slice"),
+)
+THE_UNREADABLE_ENABLED_REFUSAL = "rather than true or false"
+
+# The line the red case below rewrites, so the render it aborts can be counted.
+THE_PARENT_FAIL = '{{- fail (printf "\\n\\nyadgar: this parent chart refuses to render.'
+THE_PARENT_FAIL_OFF = '{{- $ignored := (printf "\\n\\nyadgar: NOT REFUSING.'
+
+
+def test_the_parent_names_a_platform_enabled_it_cannot_read(tmp_path: Path) -> None:
+    """Six unreadable `platform.enabled` values, six refusals that say what is true.
+
+    THE TYPE NAME IS ASSERTED PER ROW, and `invalid` is reported as `null` the way
+    every other shape refusal in this file reports it — "is a invalid" names
+    nothing an adopter wrote.
+
+    THE OLD MESSAGE MUST BE ABSENT, not merely the new one present. Both arms are
+    reachable from the same values file shape, and an implementation that emitted
+    both would satisfy a positive-only assertion while still telling the adopter
+    the render contains none of the objects it is about to contain.
+    """
+    for name, scalar, kind in THE_UNREADABLE_ENABLED_SHAPES:
+        message = refusal(
+            tmp_path,
+            name,
+            f"platform:\n  enabled: {scalar}\n  valkey:\n    create: true\n"
+            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+        )
+        assert f"platform.enabled is a {kind} rather than true or false" in message, (
+            f"`{name}` refused without naming what the adopter wrote: {message}"
+        )
+        assert "platform.valkey.create" in message, (
+            f"`{name}` refused without naming the toggle that asked: {message}"
+        )
+        assert THE_DEPENDENCY_REFUSAL not in message, (
+            f"`{name}` also emitted the message for a RESOLVED false condition, "
+            f"which says this render contains none of the objects it is in fact "
+            f"about to contain: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
+
+
+def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
+    tmp_path: Path,
+) -> None:
+    """THE MEASUREMENT THAT MAKES THE NEW MESSAGE TRUE AND THE OLD ONE FALSE.
+
+    Both refusals abort with zero objects, so no render under the shipped chart
+    can show the difference between them — which is exactly how a message this
+    wrong survived. The parent's one `fail` is rewritten to a no-op and the two
+    states are then rendered and counted:
+
+        platform.enabled: false,  platform.valkey.create: true  -> the bare set
+        platform.enabled: <null>, the same toggle               -> MORE, with Valkey
+
+    Measured 2026-09-26 on helm 3.20.2 and 4.3.0: 32 objects and 0 Valkey
+    documents against 35 and 2.
+
+    AN INEQUALITY AND A NAMED OBJECT, not two literals: what must stay true is
+    that the layer ARRIVES out of a key that says nothing, and the object count of
+    a `platform` release is not this test's business.
+    """
+    copy = tmp_path / "not-refusing" / "chart"
+    copy.parent.mkdir(parents=True)
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "_validate.tpl"
+    original = template.read_text()
+    assert original.count(THE_PARENT_FAIL) == 1, (
+        f"the parent's single `fail` is no longer exactly one {THE_PARENT_FAIL!r}, "
+        f"so this mutation would cut at the wrong place"
+    )
+    template.write_text(original.replace(THE_PARENT_FAIL, THE_PARENT_FAIL_OFF))
+    assert template.read_text() != original
+
+    def render_it(name: str, enabled: str) -> list[dict]:
+        result = helm(
+            "template",
+            "yadgar",
+            str(copy),
+            *API_VERSIONS,
+            "-f",
+            str(
+                overlay(
+                    tmp_path / f"{name}.yaml",
+                    f"platform:\n  enabled: {enabled}\n  valkey:\n    create: true\n"
+                    "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+                )
+            ),
+        )
+        assert result.returncode == 0, (
+            f"`{name}` did not render with the parent's `fail` switched off, so "
+            f"this case measures nothing: {result.stderr}"
+        )
+        return [
+            document
+            for document in yaml.safe_load_all(result.stdout)
+            if isinstance(document, dict) and document.get("apiVersion")
+        ]
+
+    resolved_false = render_it("enabled-false", "false")
+    unreadable = render_it("enabled-nulled", "")
+
+    def valkey(documents: list[dict]) -> list[str]:
+        return sorted(
+            str((document.get("metadata") or {}).get("name"))
+            for document in documents
+            if "valkey" in str((document.get("metadata") or {}).get("name", ""))
+        )
+
+    assert valkey(resolved_false) == [], (
+        f"`platform.enabled: false` rendered Valkey objects, so the condition did "
+        f"not resolve false and this case has no baseline: {valkey(resolved_false)}"
+    )
+    assert valkey(unreadable), (
+        "an unreadable `platform.enabled` rendered no Valkey object, so the "
+        "dependency was NOT left enabled and the refusal's new wording is the "
+        "false one"
+    )
+    assert len(unreadable) > len(resolved_false), (
+        f"an unreadable `platform.enabled` rendered {len(unreadable)} objects and a "
+        f"resolved-false one rendered {len(resolved_false)}"
+    )
+
+
 # ── ADR-0787: the parent offers no operators path, and refuses six keys ───────
 #
 # THE FIVE SUB-KEY SPELLINGS, READ OFF `yadgarhq/platform` AND NOT OFF THE PARENT'S
@@ -2629,6 +2778,46 @@ THE_NON_MAPPING_OPERATORS = (
 # rather than leaving the loop exercising one fewer shape and reporting a pass.
 THE_SHAPES_AN_ADOPTER_CAN_WRITE = {THE_PARENT: 7, THE_SUBCHART: 1}
 
+# ── WHICH CHART ANSWERED, OBSERVED RATHER THAN ASSUMED ───────────────────────
+# THE COUNTER USED TO TALLY THE TUPLE'S OWN LABEL. It read `refused_by[chart] += 1`
+# with `chart` taken from the row it had just read, so the comment above — "a row
+# that quietly changed which chart answered it reddens here" — asserted a property
+# the loop could not see. The per-row `phrase in message` assertion did discriminate,
+# so no coverage was lost; what was lost was the sentence being true, and this estate
+# treats a comment claiming a property its assertion cannot see as a defect in its own
+# right.
+#
+# THE DISCRIMINATOR IS THE TEMPLATE PATH helm PRINTS, not the wording. Every refusal
+# arrives as `Error: execution error at (<template path>:line:col)`, and the path names
+# the chart that called `fail` — `yadgar/templates/validate.yaml` for this one,
+# `yadgar/charts/platform/templates/render-checks.yaml` for the subchart. Identical on
+# helm 3.20.2 and 4.3.0, measured 2026-09-26. It is stronger than matching the message:
+# a reworded refusal still comes from the same file, and two charts cannot share a path.
+THE_REFUSERS_TEMPLATE = {
+    THE_PARENT: "yadgar/templates/validate.yaml",
+    THE_SUBCHART: "yadgar/charts/platform/templates/render-checks.yaml",
+}
+
+
+def the_chart_that_refused(name: str, message: str) -> str:
+    """Which chart called `fail`, read off helm's own error location.
+
+    EXACTLY ONE MUST MATCH, and that is asserted rather than left to a counter.
+    A message matching NEITHER path would leave a `Counter` simply not
+    incrementing, and the walk would then report a total that is wrong in a way
+    that reads like a changed table — the diagnosis pointing at the tuple when
+    the fault is that nothing recognisable refused at all.
+    """
+    found = sorted(
+        chart for chart, path in THE_REFUSERS_TEMPLATE.items() if path in message
+    )
+    assert len(found) == 1, (
+        f"`{name}`: {len(found)} of the known refusers' template paths appear in "
+        f"this message ({found}), and exactly one must. helm names the file that "
+        f"called `fail`, so either an unknown chart refused or two did.\n{message}"
+    )
+    return found[0]
+
 
 def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
     tmp_path: Path,
@@ -2675,11 +2864,295 @@ def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
             assert raise_text not in message, (
                 f"`{name}` RAISED instead of refusing: {message}"
             )
-        refused_by[chart] += 1
+        observed = the_chart_that_refused(name, message)
+        assert observed == chart, (
+            f"`{name}` is tabled as refused by `{chart}` and `{observed}` refused "
+            f"it. Which chart answers which shape is the structural claim this "
+            f"table makes, and it has moved.\n{message}"
+        )
+        refused_by[observed] += 1
     assert dict(refused_by) == THE_SHAPES_AN_ADOPTER_CAN_WRITE, (
         f"this walk examined {dict(refused_by)} and the table says "
         f"{THE_SHAPES_AN_ADOPTER_CAN_WRITE}"
     )
+
+
+# ── THE REGISTER KEYS, ONE LEVEL DOWN FROM THE EIGHT SHAPES ABOVE ────────────
+# THE EIGHT SHAPES ABOVE ARE SHAPES OF THE BLOCK. None of them is a shape of the
+# key helm's `condition:` actually reads, and until `platform` 0.1.12 a mapping
+# with an unusable `create` inside it walked through every refusal in both charts.
+# Measured at `platform` 0.1.11, on helm 3.20.2 and 4.3.0 alike:
+# `platform.operators.create:` with no value rendered EXIT 0, 197 objects, 165 of
+# them from the five operator subcharts, against the 32 of the bare default — a
+# cluster-wide cert-manager, KEDA, argo-cd, Envoy Gateway and mariadb-operator out
+# of a key nobody could read.
+#
+# WHICH CHART ANSWERS WHICH SHAPE IS THE POINT OF THE TABLE, and the split here is
+# the opposite way round from the eight above. There, seven are this parent's and
+# one is the subchart's. Here, the parent takes every PRESENT non-bool and the
+# subchart takes the two DELETIONS, and the reason is mechanical rather than
+# stylistic:
+#
+#   - `platform.operators.create: null` DELETES the key, because `platform`
+#     declares it. This parent then reads `hasKey` FALSE and cannot tell it from
+#     the adopter who never wrote it, so `platform` 0.1.12 refuses it from the one
+#     chart whose own defaults guarantee the key.
+#   - `platform.nats: null` deletes the whole block the same way, and `platform`
+#     refuses it for the same reason, naming `nats.create`.
+#   - `platform.nats.create: null` does NOT delete: the `nats` SUBCHART's own
+#     values are coalesced into `platform.nats`, so the key comes back PRESENT and
+#     nil. `platform`'s arm for a present non-bool stands down under a parent, so
+#     THIS chart is the only one that refuses it — which it did not do until the
+#     `hasKey` arm in `_validate.tpl` replaced the `invalid` exclusion.
+#
+# ALL TWELVE ROWS RE-MEASURED AT `platform` 0.1.12 ON BOTH HELM LINES, 2026-09-26,
+# and the two agree row for row.
+#
+# EACH ROW: (name, the YAML under `platform:`, the chart that refuses, the phrase).
+THE_REGISTER_KEY_SHAPES = (
+    ("operators-create-is-null", "operators:\n    create:\n", THE_SUBCHART,
+     "operators.create has been deleted"),
+    ("operators-create-is-a-quoted-true", 'operators:\n    create: "true"\n', THE_PARENT,
+     "platform.operators.create is a string rather than a boolean"),
+    ("operators-create-is-the-yaml-yes-string", 'operators:\n    create: "yes"\n', THE_PARENT,
+     "platform.operators.create is a string rather than a boolean"),
+    ("operators-create-is-the-yaml-no-string", 'operators:\n    create: "no"\n', THE_PARENT,
+     "platform.operators.create is a string rather than a boolean"),
+    ("operators-create-is-an-empty-string", 'operators:\n    create: ""\n', THE_PARENT,
+     "platform.operators.create is a string rather than a boolean"),
+    ("operators-create-is-zero", "operators:\n    create: 0\n", THE_PARENT,
+     "platform.operators.create is a float64 rather than a boolean"),
+    ("operators-create-is-one", "operators:\n    create: 1\n", THE_PARENT,
+     "platform.operators.create is a float64 rather than a boolean"),
+    ("operators-create-is-an-empty-list", "operators:\n    create: []\n", THE_PARENT,
+     "platform.operators.create is a slice rather than a boolean"),
+    ("operators-create-is-an-empty-map", "operators:\n    create: {}\n", THE_PARENT,
+     "platform.operators.create is a map rather than a boolean"),
+    ("nats-create-is-null", "nats:\n    create:\n", THE_PARENT,
+     "platform.nats.create is a null rather than a boolean"),
+    ("nats-create-is-the-yaml-yes-string", 'nats:\n    create: "yes"\n', THE_PARENT,
+     "platform.nats.create is a string rather than a boolean"),
+    ("nats-create-is-an-empty-map", "nats:\n    create: {}\n", THE_PARENT,
+     "platform.nats.create is a map rather than a boolean"),
+    ("nats-block-is-null", "nats:\n", THE_SUBCHART,
+     "nats.create has been deleted"),
+)
+
+# THE SAME SPLIT, COUNTED. Written out rather than derived from the tuple, for the
+# reason every expected count in this estate is a literal: a total computed from
+# the thing under test agrees with whatever that thing happens to be.
+THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE = {THE_PARENT: 11, THE_SUBCHART: 2}
+
+
+def test_the_register_key_shapes_are_refused_and_the_table_says_by_whom(
+    tmp_path: Path,
+) -> None:
+    """Thirteen shapes of the key helm's `condition:` reads, and who answers each.
+
+    THE PHRASE AND THE REFUSER ARE ASSERTED SEPARATELY, because they fail for
+    different reasons. A wrong phrase is a reworded or wrongly-typed refusal; a
+    wrong refuser is the division of labour between the two charts moving, which
+    is the structural claim this table exists to hold and the one a pin can break
+    without anybody editing either file.
+
+    ASSERTED ON THE ABSENCE OF A RAISE TOO. A refusal and a raise both exit 1, and
+    `platform.operators.create: 1` RAISED here at one point in this file's history
+    — `incompatible types for comparison: float64 and bool` — which is exactly the
+    outcome ADR-0794 forbids.
+    """
+    refused_by: collections.Counter = collections.Counter()
+    for name, body, chart, phrase in THE_REGISTER_KEY_SHAPES:
+        message = refusal(
+            tmp_path,
+            f"register-{name}",
+            f"platform:\n  enabled: true\n  {body}"
+            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+        )
+        assert phrase in message, (
+            f"`{name}` refused without the phrase `{chart}` alone writes: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
+        observed = the_chart_that_refused(name, message)
+        assert observed == chart, (
+            f"`{name}` is tabled as refused by `{chart}` and `{observed}` refused "
+            f"it.\n{message}"
+        )
+        refused_by[observed] += 1
+    assert dict(refused_by) == THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE, (
+        f"this walk examined {dict(refused_by)} and the table says "
+        f"{THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE}"
+    )
+
+
+# THE LINE THE `nats.create: null` RED CASE REWRITES, AND IT IS IN THIS CHART.
+# Rewritten back to the `invalid` exclusion the clause carried before, which is the
+# change a contributor would really make — "a nil never raised, leave it alone" is
+# the reasoning the old comment gave.
+THE_PRESENT_NIL_ARM = '{{- else if hasKey $block "create" -}}'
+THE_PRESENT_NIL_ARM_OFF = '{{- else if not (kindIs "invalid" $block.create) -}}'
+
+
+def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
+    """THE `nats.create: null` ROW'S RED CASE, and it renders exit 0 with a broker.
+
+    Put the `invalid` exclusion back and `platform.nats.create:` with no value
+    renders at exit 0: helm resolved `condition: nats.create` against a value it
+    could not read and left the dependency ENABLED, while this clause read the same
+    value as false. The broker goes in and `platform`'s own `nats-ingress`
+    NetworkPolicy — which reads the value the same way this clause did — does not.
+
+    THE COUNT IS AN INEQUALITY against the render that asks for nothing, for the
+    reason every count in this file is: the property is that the broker ARRIVED,
+    not how many documents the upstream chart ships this month.
+    """
+    copy = tmp_path / "nil-permitted" / "chart"
+    copy.parent.mkdir(parents=True)
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "_validate.tpl"
+    original = template.read_text()
+    assert original.count(THE_PRESENT_NIL_ARM) == 1, (
+        f"the present-nil arm is no longer exactly one {THE_PRESENT_NIL_ARM!r}, so "
+        f"this mutation would cut at the wrong place"
+    )
+    template.write_text(original.replace(THE_PRESENT_NIL_ARM, THE_PRESENT_NIL_ARM_OFF))
+    assert template.read_text() != original
+
+    def render_it(name: str, body: str) -> subprocess.CompletedProcess[str]:
+        return helm(
+            "template",
+            "yadgar",
+            str(copy),
+            *API_VERSIONS,
+            "-f",
+            str(overlay(tmp_path / f"{name}.yaml", body)),
+        )
+
+    head = (
+        "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n"
+        "platform:\n  enabled: true\n"
+    )
+    asked_nothing = render_it("nil-baseline", head)
+    assert asked_nothing.returncode == 0, asked_nothing.stderr
+    nulled = render_it("nil-nats-create", head + "  nats:\n    create:\n")
+    assert nulled.returncode == 0, (
+        f"`platform.nats.create:` was still refused with the nil exclusion back, so "
+        f"this red case is not isolating the arm the row reads: {nulled.stderr}"
+    )
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in nulled.stderr, nulled.stderr
+
+    def count(result: subprocess.CompletedProcess[str]) -> int:
+        return len(
+            [
+                document
+                for document in yaml.safe_load_all(result.stdout)
+                if isinstance(document, dict) and document.get("apiVersion")
+            ]
+        )
+
+    assert count(nulled) > count(asked_nothing), (
+        f"a nulled `platform.nats.create` rendered {count(nulled)} objects and a "
+        f"render that asks for nothing rendered {count(asked_nothing)}, so the "
+        f"broker did not go in and this red case shows nothing"
+    )
+    assert "# Source: yadgar/charts/platform/charts/nats/" in nulled.stdout, (
+        "no document came from the `nats` subchart, so the fail-open this red case "
+        "records did not happen"
+    )
+    policies = [
+        (document.get("metadata") or {}).get("name")
+        for document in yaml.safe_load_all(nulled.stdout)
+        if isinstance(document, dict) and document.get("kind") == "NetworkPolicy"
+    ]
+    assert "nats-ingress" not in policies, (
+        f"the nats-ingress NetworkPolicy rendered, so the harm is not the one "
+        f"described: {sorted(name for name in policies if name)}"
+    )
+
+
+def test_the_null_operators_arm_is_reachable_only_without_the_pinned_subchart(
+    tmp_path: Path,
+) -> None:
+    """THE `invalid` → `null` MAPPING, EXERCISED — and the honest reach stated.
+
+    `_validate.tpl` maps `kindOf`'s `invalid` to `null` so the message names a
+    type an adopter recognises rather than "is a invalid". Nothing exercised that
+    mapping: the `null` row of `THE_NON_MAPPING_OPERATORS` is refused by
+    `platform` one level down, so the arm could be DELETED and the whole suite
+    would stay green on both helm lines. An arm with no case that reaches it is
+    not code with light coverage, it is code nobody has shown to work.
+
+    WHAT IT TAKES TO REACH IT, AND WHY NO ADOPTER EVER WILL. Helm deletes a key
+    whose value is null only when a chart in the tree DECLARES that key, and
+    `platform` has declared `operators.create` since 0.1.9. `chart/Chart.yaml`
+    ALWAYS pins `platform`, so for every shipping adopter the key is deleted
+    before any template runs and this arm is unreachable — `platform` answers
+    instead. The honest claim is REACHABLE IN A FIXTURE, not "not dead": this test
+    strips the dependencies, which is a tree no adopter installs.
+
+    IT IS STILL WORTH HOLDING. The arm is one line from being wrong, the mapping
+    it performs is the estate's own convention for `invalid`, and the day
+    `platform` stops declaring `operators.create` — or a second parent pins a
+    version that never did — it is load-bearing again with no warning.
+    """
+    copy = chart_without_its_dependencies(tmp_path)
+    result = helm(
+        "template",
+        "yadgar",
+        str(copy),
+        *API_VERSIONS,
+        "-f",
+        str(
+            overlay(
+                tmp_path / "stripped-operators-null.yaml",
+                "platform:\n  enabled: true\n  operators: null\n"
+                "  internalCA:\n    create: true\n"
+                "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+            )
+        ),
+    )
+    assert result.returncode != 0, (
+        "the dependency-stripped parent rendered exit 0, so nothing reached the "
+        f"arm this case exists to exercise\n{result.stdout[:2000]}"
+    )
+    assert "platform.operators is a null rather than a mapping" in result.stderr, (
+        "the arm did not report `invalid` as `null`, which is the whole of what it "
+        f"does: {result.stderr}"
+    )
+    assert THE_DELETED_OPERATORS_KEY_REFUSAL not in result.stderr, (
+        "`platform`'s own arm answered, which cannot happen with the subcharts "
+        f"stripped — this case is not measuring the parent: {result.stderr}"
+    )
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in result.stderr, (
+            f"the stripped parent RAISED instead of refusing: {result.stderr}"
+        )
+
+
+def test_the_pinned_subchart_is_what_makes_that_arm_unreachable(tmp_path: Path) -> None:
+    """THE OTHER HALF, so the paragraph above is measured rather than asserted.
+
+    The SAME overlay against the chart as it ships is refused by `platform`, not
+    by the arm above. Without this, the test above would read as "the parent
+    refuses a null `platform.operators`" full stop, which is the claim this file
+    carried before 2026-09-26 and which a pinned `platform` had already made
+    false.
+    """
+    message = refusal(
+        tmp_path,
+        "pinned-operators-null",
+        "platform:\n  enabled: true\n  operators: null\n"
+        "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+    )
+    assert THE_DELETED_OPERATORS_KEY_REFUSAL in message, message
+    assert "platform.operators is a null rather than a mapping" not in message, (
+        "the parent's `invalid` arm answered with `platform` pinned, so it is not "
+        f"fixture-only after all and the paragraph above needs rewriting: {message}"
+    )
+    assert the_chart_that_refused("pinned-operators-null", message) == THE_SUBCHART
 
 
 # THE ONE LINE THE RED CASE BELOW REWRITES, AND IT IS IN THE SUBCHART. The `null`

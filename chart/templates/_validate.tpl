@@ -285,9 +285,50 @@ exactly once.
 
 `default false` IS NIL-SAFE AND NEVER TYPE-SAFE. It substitutes on an EMPTY value,
 so it turns an absent key into `false` and hands a present `"true"` or `1` straight
-to `eq`. Only the values that ABORT are refused: a nil `create` never raised —
-`default false nil` is `false` and that comparison is legal — so it is left reading
-as false, exactly as before.
+to `eq`.
+
+A PRESENT NIL `create` USED TO BE LEFT ALONE HERE, ON A REASON THAT IS FALSE FOR
+THE TWO BLOCKS THAT MATTER. The argument was that a nil never raised — `default
+false nil` is `false`, that comparison is legal — so it could be read as false
+"exactly as before". It is read as false HERE. Helm's dependency resolver does not
+read it as false at all: `platform` declares `nats` under `condition: nats.create`,
+and helm leaves a dependency ENABLED when the path its condition names does not
+resolve. MEASURED 2026-09-26 against `platform` 0.1.12 on helm 3.20.2 and 4.3.0
+alike: `platform.nats.create:` with nothing after it rendered EXIT 0 with 37
+objects against the 32 of the bare default, the broker's five documents among them
+and its `nats-ingress` NetworkPolicy NOT among them — the broker installed, with
+nothing in front of it, out of a key this clause had just read as false.
+
+SO ANY PRESENT `create` THAT IS NOT A BOOL IS REFUSED, AND `invalid` IS REPORTED AS
+`null`. `hasKey` is what separates a present nil from an ABSENT key, because
+`kindOf` answers `invalid` to both and cannot tell them apart (ADR-0794) — and an
+absent `create` is what `cert-manager`, `keda`, `mariadb-operator`, `global` and
+`preflight` all have in a default render, so refusing on the kind alone would
+refuse every render in the estate.
+
+IT IS REFUSED FOR EVERY BLOCK RATHER THAN FOR THE TWO DEPENDENCIES BY NAME, and
+that is the ranging discipline this file already states rather than a widening
+nobody asked for. Nothing in the VALUES says which `platform.<name>` blocks are
+chart dependencies; `platform`'s own `Chart.yaml` does, and this chart does not
+read it. An enumeration here would be a list to keep in step by attention, and the
+day `platform` puts a sixth block behind a `condition:` the list would be wrong and
+silent. For a block that is NOT a dependency the refusal costs an adopter a values
+file that rendered nothing from a toggle they did write, which is not a
+configuration anyone wants either.
+
+`platform.operators.create` IS NOT REACHED BY THIS ARM AND DOES NOT NEED TO BE.
+Helm DELETES that key when it is nulled, because `platform` declares it, so the
+parent sees `hasKey` FALSE and cannot tell it from the adopter who never wrote it.
+`platform` 0.1.12 refuses that one itself, from the one place the information
+survives. `nats.create` nulls differently — the `nats` SUBCHART's own values are
+coalesced into `platform.nats`, so the key comes back PRESENT and nil rather than
+deleted — which is why this arm sees it and that one it does not.
+
+A NIL OPERATOR SUB-KEY IS OUT OF SCOPE AND MEASURED SO. `platform.operators.
+certManager.create:` with nothing after it rendered 32 objects at exit 0 on both
+helm lines: the condition's FIRST path is unreadable, so helm falls through to
+`operators.create` and the dependency is correctly off. The sub-key range below
+therefore keeps its `invalid` exclusion, and the two ranges differ on purpose.
 */}}
 {{- $creating := list -}}
 {{- if kindIs "map" $platform -}}
@@ -297,13 +338,18 @@ as false, exactly as before.
 {{- if $block.create -}}
 {{- $creating = append $creating (printf "platform.%s.create" $name) -}}
 {{- end -}}
-{{- else if not (kindIs "invalid" $block.create) -}}
+{{- else if hasKey $block "create" -}}
+{{- $wrote := kindOf $block.create -}}
+{{- if eq $wrote "invalid" -}}{{- $wrote = "null" -}}{{- end -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.%s.create is a %s rather than a boolean, so this chart cannot read it as a toggle. "
       "helm compares a toggle against a bool, and a value of any other type aborts the whole render "
-      "on an incompatible-types comparison where a key name is what you need. Write true or false "
-      "unquoted, or remove the key."))
-      $name (kindOf $block.create)) -}}
+      "on an incompatible-types comparison where a key name is what you need. A null is worse than "
+      "an abort: `platform` declares nats under `condition: nats.create`, and helm leaves a "
+      "dependency ENABLED when the path its condition names does not resolve — so a nulled toggle "
+      "on a block that is a chart dependency installs it rather than leaving it out. Write true or "
+      "false unquoted, or remove the key."))
+      $name $wrote) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -409,14 +455,59 @@ leaving `platform.enabled` alone reads as a fully configured platform layer and
 renders NOTHING of it — measured 2026-09-24 on helm 3.18.4: the same 32 objects as
 the bare default, exit 0, no warning. The refusal names both keys because the file
 that trips it names only one.
+
+TWO STATES, TWO MESSAGES, BECAUSE ONE MESSAGE WAS FALSE IN THE SECOND OF THEM.
+This clause used to be one arm, `ne (default false $platform.enabled) true`, and
+it told every adopter that "this render contains NONE of the objects those toggles
+name". That sentence is TRUE when `platform.enabled` is false or absent, and FALSE
+when it is present and not a bool. Measured 2026-09-26 on helm 3.20.2 and 4.3.0
+alike, with this clause's own `fail` neutered so the render could be counted:
+
+  platform.enabled: false, platform.valkey.create: true  -> 32 objects, 0 valkey documents
+  platform.enabled: <null>, the same toggle              -> 35 objects, 2 valkey documents
+
+Helm leaves a dependency ENABLED when the path its condition names does not
+resolve, so the second row is the platform layer GOING IN out of a key the values
+file never said to install. The only thing helm says about it is `Condition path
+'platform.enabled' for chart platform returned non-bool value`, on stderr, beside
+whatever else is being printed.
+
+AND THE STRING SHAPES DID NOT REACH A MESSAGE AT ALL. `ne` compares a string to a
+bool by raising: measured at the same time, `platform.enabled: "yes"` aborted with
+`error calling ne: incompatible types for comparison: string and bool` at this
+line — a stack trace where ADR-0794 requires a key name. Testing the KIND before
+comparing is what removes that, and it is the same `kindIs "bool"` discipline the
+`create` toggles above now use.
+
+`enabled: yes` UNQUOTED IS A YAML 1.1 BOOL AND STAYS GREEN, measured: 35 objects,
+exit 0, no refusal. Only the quoted form is a string.
+
+NO `hasKey` IS NEEDED HERE, unlike the `create` arm above, and the difference is
+worth stating because the two look like they should match. An ABSENT
+`platform.enabled` and a present non-bool one both leave helm unable to resolve
+the condition, so both belong in the same message — there is nothing for `hasKey`
+to separate. Above, an absent `create` is the DEFAULT STATE of five blocks and had
+to be told apart from a nulled one.
 */}}
-{{- if ne (default false $platform.enabled) true -}}
+{{- if kindIs "bool" $platform.enabled -}}
+{{- if not $platform.enabled -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.enabled is not true and %s asks for the platform layer. `platform` is declared under "
       "`condition: platform.enabled`, so this render contains NONE of the objects those toggles name — "
       "no Issuer, no Certificate, no Gateway, no bootstrap Job — while reading as fully configured. "
       "Set platform.enabled true, or set those create toggles false."))
       $asked) -}}
+{{- end -}}
+{{- else -}}
+{{- $enabledShape := kindOf $platform.enabled -}}
+{{- if eq $enabledShape "invalid" -}}{{- $enabledShape = "null" -}}{{- end -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.enabled is a %s rather than true or false, and %s asks for the platform layer. "
+      "`platform` is declared under `condition: platform.enabled`, and helm leaves a dependency "
+      "ENABLED when the path its condition names does not resolve — so this does NOT leave the "
+      "platform layer out, it installs it out of a key that says nothing, and the only warning is a "
+      "`returned non-bool value` line on stderr. Write platform.enabled true or false unquoted."))
+      $enabledShape $asked) -}}
 {{- end -}}
 {{- end -}}
 
