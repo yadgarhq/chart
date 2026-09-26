@@ -185,6 +185,21 @@ the value alone can tell them apart — measured on helm 4.3.0: `hasKey` is true
 the first and false for the second. An explicit null is a key the adopter wrote,
 so it is refused, and `invalid` is reported to them as `null`.
 
+AND THAT NULL ARM REACHES LESS THAN IT READS, WHICH IS A PIN'S DOING RATHER THAN
+THIS CLAUSE'S. Helm DELETES a key whose value is null when a chart in the tree
+DECLARES that key, and it does not put the declared default back — so once
+`platform` began shipping `operators.create: false` at 0.1.9, an adopter's
+`platform.operators: null` is gone before any template runs and the `hasKey` above
+reads FALSE. That is indistinguishable here from an adopter who never wrote the
+key, which is every other adopter, so this clause going quiet on that one shape is
+correct. `platform` 0.1.11 refuses it from the one place the information survives —
+arm one of its own `templates/render-checks.yaml`, naming the key as DELETED — and
+`test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping` records
+which chart answers which shape. The arm below is NOT dead: with no subchart
+declaring the key nothing triggers the deletion, and over
+`chart_without_its_dependencies` this clause refuses `operators: null` by name on
+helm 3.20.2 and 4.3.0 alike, measured 2026-09-26.
+
 DO NOT MAKE THIS "NIL-SAFE" BY WIDENING THE `default`. Applying `default dict` to
 `platform`'s sibling guard was measured to convert a crash into a SILENT mixed
 release — exit 0 and no refusal from either guard. Refuse a present non-map; never
