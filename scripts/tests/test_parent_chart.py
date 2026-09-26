@@ -2337,6 +2337,425 @@ def test_the_parent_refuses_a_create_toggle_with_the_dependency_left_off(tmp_pat
     assert "platform.internalCA.create" in message, message
 
 
+# ── ADR-0787: the parent offers no operators path, and refuses six keys ───────
+#
+# THE FIVE SUB-KEY SPELLINGS, READ OFF `yadgarhq/platform` AND NOT OFF THE PARENT'S
+# TEMPLATE. They are the second path of each operator dependency's
+# `condition: operators.<op>.create,operators.create` in `platform`'s own
+# `chart/Chart.yaml`, verified on `origin/feat/operators-toggle-step1`. The
+# template in `_validate.tpl` RANGES over whatever blocks the values carry rather
+# than enumerating these, so this tuple is an independent statement of what
+# `platform` accepts — not a copy of the implementation it tests. A test that built
+# its inputs out of the template's own list would pass whatever that list said.
+#
+# THEY CANNOT BE READ OFF THE VENDORED TARBALL, which is the usual way this suite
+# checks an assumption about `platform` (see
+# `test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes`). `platform`
+# 0.1.8 is the pin `chart/Chart.yaml` carries and it has no `operators` key at all:
+# steps 1 to 6 of the operators-toggle plan are unmerged. A drift gate against the
+# tarball would therefore be red today rather than green, so none is built. When a
+# `platform` version carrying `operators` is pinned here, that gate becomes
+# constructible and this comment is its trigger.
+THE_FIVE_OPERATOR_SUB_KEYS = ("certManager", "keda", "mariadbOperator", "envoyGateway", "argoCd")
+
+# THE OVERLAY SETS `platform.enabled` AND THE ADMIN TOKEN, AND BOTH ARE
+# LOAD-BEARING RATHER THAN TIDY. Without them the top-level case proves nothing:
+# `platform.operators` is a map carrying `create: true`, so the `$creating` range
+# in `_validate.tpl` picks it up and the admin-token and `platform.enabled`
+# refusals fire on their own. Measured on `main` BEFORE this clause existed, helm
+# 4.3.0: `helm template yadgar chart/ --set platform.operators.create=true` exited
+# 1 already, naming `platform.operators.create` inside the admin-token message. The
+# same key with these two fields set rendered exit 0 and 32 objects. THAT is the
+# render this clause closes, and it is the only form of the top-level case that can
+# tell the clause landing apart from the clause being absent.
+OPERATORS_OVERLAY = (
+    "platform:\n"
+    "  enabled: true\n"
+    "  operators:\n"
+    "{block}"
+    "gateway:\n"
+    "  adminBootstrap:\n"
+    "    tokenSecret: admin-bootstrap-token\n"
+)
+TOP_LEVEL_BLOCK = "    create: true\n"
+
+# THE PHRASE THIS CLAUSE ALONE WRITES. `"platform.operators.create" in message` is
+# NOT a discriminator: the admin-token refusal interpolates the same key through
+# its `%s`, and the `platform.enabled` refusal does too, so that assertion passes
+# against a chart carrying none of this clause. Every assertion below reads this
+# phrase, and every case also asserts the other two refusals stayed silent.
+THE_OPERATORS_REFUSAL = "asks this parent chart to install third-party operators"
+THE_ADMIN_TOKEN_REFUSAL = "gateway.adminBootstrap.tokenSecret is empty"
+THE_DEPENDENCY_REFUSAL = "platform.enabled is not true"
+THE_OPERATORS_SHAPE_REFUSAL = "rather than a mapping"
+
+# THE THREE TEXTS A RAISE LEAVES IN STDERR, shared with
+# `test_the_refusals_are_nil_safe_with_every_subchart_removed`. A refusal and a
+# raise both exit 1, so the exit code alone cannot tell a named key from a stack
+# trace.
+THE_TEXTS_A_RAISE_LEAVES = ("nil pointer", "can't evaluate field", "error calling")
+
+
+def operators_overlay(block: str) -> str:
+    return OPERATORS_OVERLAY.format(block=block)
+
+
+def sub_key_block(operator: str) -> str:
+    return f"    {operator}:\n      create: true\n"
+
+
+def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
+    tmp_path: Path,
+) -> None:
+    """ADR-0787: `operators.create` is a `platform` path, and never the parent's.
+
+    SIX RENDERS, NOT ONE, and the five sub-key renders are the part a top-level
+    refusal would miss. Each operator dependency in `platform` is declared
+    `condition: operators.<op>.create,operators.create`, and helm evaluates the
+    FIRST valid path and stops — so `operators.certManager.create: true` installs
+    cert-manager while `operators.create` is false. Measured in `platform` at step
+    3 of the operators-toggle plan: `--set operators.create=false --set
+    operators.certManager.create=true` rendered 50 objects with 6 CRDs. A parent
+    refusal reading the top-level key alone is FALSE in that shape, and
+    `test_a_refusal_that_read_the_top_level_key_alone_would_let_a_sub_key_through`
+    below constructs that narrowing and shows it passing the sub-key.
+
+    MEASURED ON `main` BEFORE THIS CLAUSE EXISTED, helm 4.3.0:
+    `--set platform.operators.certManager.create=true` rendered exit 0 and 32
+    objects — `platform.operators` is a map whose own `create` key is absent, so
+    the `$creating` guard never opened and no refusal ran.
+
+    THE GREEN CASE IS PART OF THE TEST. An adopter who writes an operator key
+    FALSE is doing the supported thing, and a refusal keyed on the key being
+    PRESENT rather than on it being TRUE would break every one of them.
+    """
+    message = refusal(tmp_path, "operators-create", operators_overlay(TOP_LEVEL_BLOCK))
+    assert THE_OPERATORS_REFUSAL in message, message
+    assert "platform.operators.create" in message, message
+    assert THE_ADMIN_TOKEN_REFUSAL not in message, message
+    assert THE_DEPENDENCY_REFUSAL not in message, message
+
+    for operator in THE_FIVE_OPERATOR_SUB_KEYS:
+        message = refusal(
+            tmp_path, f"operators-{operator}", operators_overlay(sub_key_block(operator))
+        )
+        assert THE_OPERATORS_REFUSAL in message, message
+        assert f"platform.operators.{operator}.create" in message, message
+        # The sub-key opens no `platform.<name>.create`, so the guarded refusals
+        # stay shut and the assertions above read this clause's message alone.
+        assert THE_ADMIN_TOKEN_REFUSAL not in message, message
+        assert THE_DEPENDENCY_REFUSAL not in message, message
+
+    # THE GREEN CASE: every operator key stated FALSE, which is a values file the
+    # parent supports, and the whole estate still renders.
+    documents = adopter_render(
+        "-f",
+        str(
+            overlay(
+                tmp_path / "operators-all-false.yaml",
+                "platform:\n  operators:\n    create: false\n"
+                + "".join(
+                    f"    {operator}:\n      create: false\n"
+                    for operator in THE_FIVE_OPERATOR_SUB_KEYS
+                ),
+            )
+        ),
+    )
+    assert len(documents) == ADOPTER_OBJECTS, (
+        f"the operator keys stated false left {len(documents)} objects where "
+        f"{ADOPTER_OBJECTS} was expected; a refusal keyed on the key being present "
+        f"rather than true would refuse this file"
+    )
+
+
+# THE EIGHT SHAPES AN ADOPTER CAN WRITE UNDER `platform.operators`, EACH WITH THE
+# TYPE NAME THE MESSAGE MUST CARRY. Two `true`-ish rows do not cover this key, and
+# the gap was measured rather than imagined: at 883a7a8 the guard read
+# `kindIs "map"` on `default dict $platform.operators`, and sprig's `default`
+# substitutes on an EMPTY value, so `false`, `null`, `0`, `""` and `[]` every one
+# collapsed to `dict` and read as the key being ABSENT. Measured on helm 4.3.0
+# with `platform.enabled` true and the admin token set: those five rendered exit 0
+# while `true`, `yes` and `[a]` refused. `[]` permitting while `[a]` refuses is the
+# incoherence that found it, and `false` is the load-bearing one — it is what
+# somebody writes who read "default false" and wanted to be explicit, and helm
+# leaves a dependency ENABLED when no path of a multi-path `condition:` resolves.
+#
+# THE TYPE NAME IS ASSERTED PER ROW, not just the phrase. `"rather than a mapping"
+# in message` is satisfied by an implementation that calls every shape a bool, and
+# the whole point of `kindOf` here is that the adopter is told what they wrote.
+#
+# `yes` IS A BOOL AND NOT A STRING, which is YAML 1.1 and what helm parses. The row
+# is kept because it is a real adopter spelling; the name says so now, and the type
+# it asserts is measured rather than assumed.
+#
+# `null` IS A PRESENT KEY AND ONLY `hasKey` SEES IT. `kindOf` reports `invalid` for
+# an explicit null and for an absent key alike, so a guard reading the VALUE cannot
+# tell `operators: null` from no `operators` key at all. Measured on helm 4.3.0:
+# `hasKey $platform "operators"` is true for `operators: null` and false when the
+# key is absent. `_validate.tpl` maps `invalid` to `null` so the message names a
+# type an adopter recognises rather than "is a invalid".
+THE_NON_MAPPING_OPERATORS = (
+    ("operators-is-a-bool", "true", "bool"),
+    ("operators-is-the-yaml-yes", "yes", "bool"),
+    ("operators-is-false", "false", "bool"),
+    ("operators-is-null", "null", "null"),
+    ("operators-is-zero", "0", "float64"),
+    ("operators-is-an-empty-string", '""', "string"),
+    ("operators-is-an-empty-list", "[]", "slice"),
+    ("operators-is-a-list", "[a]", "slice"),
+)
+
+
+def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
+    tmp_path: Path,
+) -> None:
+    """The adopter typo that used to abort the render with a stack trace.
+
+    `platform.operators: true` is what somebody writes who thinks the toggle IS
+    the block rather than a key inside it. Sprig's `default` substitutes only on an
+    EMPTY value, so `default dict true` is `true`, and both the `create` read and
+    the range then run against a bool. Measured on helm 4.3.0 before the `kindIs`
+    arm existed: `--set platform.operators=true` aborted with `can't evaluate field
+    create in type bool`.
+
+    EVERY ROW OF `THE_NON_MAPPING_OPERATORS` IS RUN, and the five EMPTY ones are
+    what this test was missing. The same `default` that makes the `true` case raise
+    makes `false`, `null`, `0`, `""` and `[]` read as ABSENT, so a guard built on
+    `default dict` covers only the non-empty half of the shapes it claims. The
+    RAW value is what has to be typed, which is what the template does now.
+
+    ASSERTED ON THE ABSENCE OF A RAISE, not only on the exit code. A refusal and a
+    raise both exit 1, so an implementation that went back to raising would satisfy
+    `returncode != 0` while giving the adopter a stack trace instead of a key name.
+    """
+    for name, scalar, kind in THE_NON_MAPPING_OPERATORS:
+        message = refusal(
+            tmp_path,
+            name,
+            f"platform:\n  enabled: true\n  operators: {scalar}\n"
+            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+        )
+        assert THE_OPERATORS_SHAPE_REFUSAL in message, message
+        assert f"platform.operators is a {kind} rather than a mapping" in message, (
+            f"`{name}` refused without naming the type the adopter wrote: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
+
+
+# THE FOUR NON-BOOLEAN `create` SPELLINGS, AND THE TWO KEY PATHS THEY SIT ON. A
+# quoted `"true"` and a bare `1` are what an adopter writes who is copying a shell
+# export or a JSON fragment, and `eq (default false $block.create) true` cannot
+# compare either against a bool: helm aborts with `error calling eq: incompatible
+# types for comparison`. Measured on helm 4.3.0 at 883a7a8 — a stack trace naming
+# `_validate.tpl:189` and `:194` where the adopter needs a key name.
+#
+# THE SUB-KEY PATH IS THE ONE THIS PULL REQUEST OPENED. Measured on `main`:
+# `platform.operators.certManager.create: "true"` rendered exit 0 and 32 objects —
+# silently permitted, because `main` has no operators clause at all — and at
+# 883a7a8 it RAISES. The top-level `platform.operators.create` raised on `main`
+# too, at the pre-existing `$creating` range, so that half is a defect this file
+# inherited rather than one the clause introduced. Both are refusals now.
+THE_NON_BOOLEAN_CREATES = (
+    ("create-is-a-quoted-true", "certManager", '"true"', "platform.operators.certManager.create", "string"),
+    ("create-is-an-integer", "certManager", "1", "platform.operators.certManager.create", "float64"),
+    ("create-is-a-quoted-true-at-the-top", None, '"true"', "platform.operators.create", "string"),
+    ("create-is-an-integer-at-the-top", None, "1", "platform.operators.create", "float64"),
+)
+THE_CREATE_SHAPE_REFUSAL = "rather than a boolean"
+
+
+def test_the_parent_refuses_a_create_toggle_that_is_not_a_boolean(tmp_path: Path) -> None:
+    """A `create` helm cannot compare is refused by name, never raised on.
+
+    THE RULE IS THE SAME ONE `platform.operators` OBEYS: refuse a value in a shape
+    the chart cannot read, never coerce it and read it anyway. `default false` is
+    nil-safe and never type-safe — it substitutes on an EMPTY value, so it turns a
+    missing key into `false` and hands a present `"true"` straight to `eq`.
+
+    ASSERTED ON THE ABSENCE OF A RAISE, and that assertion is the whole test. Both
+    spellings already exit 1 at 883a7a8 — BY RAISING — so a red case reading
+    `returncode != 0` is green against the defect it is supposed to catch.
+
+    A NIL `create` IS LEFT ALONE, DELIBERATELY. `create: null` never raised:
+    `default false nil` is `false` and `eq false true` is a legal comparison. Only
+    the values that ABORT the render are refused here, so this clause changes the
+    raising class and nothing else.
+    """
+    for name, operator, scalar, key, kind in THE_NON_BOOLEAN_CREATES:
+        block = (
+            f"    {operator}:\n      create: {scalar}\n"
+            if operator
+            else f"    create: {scalar}\n"
+        )
+        message = refusal(tmp_path, name, operators_overlay(block))
+        assert THE_CREATE_SHAPE_REFUSAL in message, message
+        assert f"{key} is a {kind} rather than a boolean" in message, (
+            f"`{name}` refused without naming the key and the type: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, (
+                f"`{name}` RAISED instead of refusing: {message}"
+            )
+
+
+# THE TWO LINES THE RED CASES BELOW REWRITE, each isolating one half of the clause.
+# The first is the range over the operator blocks: replacing its subject with an
+# empty `dict` leaves the top-level read intact and narrows the refusal to
+# `platform.operators.create` alone, which is the plausible implementation this
+# step exists to rule out. The second is the guard the whole refusal sits behind.
+THE_SUB_KEY_RANGE = "{{- range $name, $block := $operators -}}"
+THE_SUB_KEY_RANGE_NARROWED = "{{- range $name, $block := dict -}}"
+THE_OPERATORS_GUARD = "{{- if $operatorKeys -}}"
+THE_OPERATORS_GUARD_OFF = "{{- if false -}}"
+
+
+def chart_with_the_validate_line_rewritten(destination: Path, was: str, now: str) -> Path:
+    """A copy of this chart with one line of `_validate.tpl` rewritten.
+
+    THE NEEDLE IS ASSERTED BEFORE IT IS REPLACED, the way
+    `test_breaking_the_guard_makes_the_default_render_refuse` does it: a red case
+    whose mutation silently matched nothing would report a pass nobody earned.
+    """
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    partial = copy / "templates" / "_validate.tpl"
+    text = partial.read_text()
+    assert text.count(was) == 1, (
+        f"`{was}` occurs {text.count(was)} times in `_validate.tpl` and exactly one "
+        f"was expected; this red case is now testing something else"
+    )
+    partial.write_text(text.replace(was, now, 1))
+    return copy
+
+
+def rendered(copy: Path, tmp_path: Path, name: str, body: str) -> subprocess.CompletedProcess[str]:
+    return helm("template", "yadgar", str(copy), "-f", str(overlay(tmp_path / name, body)))
+
+
+def test_a_refusal_that_read_the_top_level_key_alone_would_let_a_sub_key_through(
+    tmp_path: Path,
+) -> None:
+    """THE NARROWING RED CASE, which is the one this step is really about.
+
+    A refusal on `platform.operators.create` alone reads correct and is not: the
+    `condition:` in `platform` accepts each sub-key on its own. This constructs
+    exactly that narrowing — the range over the operator blocks is pointed at an
+    empty `dict`, leaving the top-level read untouched — and shows the sub-key
+    walking straight through it.
+
+    BOTH ARMS ARE ASSERTED. If only the sub-key arm were, a mutation that broke the
+    clause outright would satisfy this test while proving nothing about the
+    narrowing; the top-level arm still refusing is what shows the mutation isolated
+    the sub-key half rather than deleting the refusal.
+    """
+    copy = chart_with_the_validate_line_rewritten(
+        tmp_path / "narrowed", THE_SUB_KEY_RANGE, THE_SUB_KEY_RANGE_NARROWED
+    )
+
+    through = rendered(
+        copy,
+        tmp_path,
+        "narrowed-sub-key.yaml",
+        operators_overlay(sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+    )
+    assert through.returncode == 0, (
+        "the narrowed refusal still refused a sub-key, so this red case is not "
+        f"constructing the hole it claims to: {through.stderr}"
+    )
+    assert THE_OPERATORS_REFUSAL not in through.stderr, through.stderr
+
+    still = rendered(copy, tmp_path, "narrowed-top-level.yaml", operators_overlay(TOP_LEVEL_BLOCK))
+    assert still.returncode != 0, (
+        "the narrowing deleted the refusal instead of narrowing it, so the arm "
+        "above proves nothing about reading the top-level key alone"
+    )
+    assert THE_OPERATORS_REFUSAL in still.stderr, still.stderr
+
+
+def test_removing_the_operators_refusal_lets_both_shapes_render(tmp_path: Path) -> None:
+    """THE CLAUSE'S OTHER RED CASE: switch its guard off and both shapes render.
+
+    This is what tells the six green assertions above apart from six renders that
+    happened to fail for some other reason. With the guard off the overlays reach
+    no refusal at all — the admin token is set and `platform.enabled` is true — so
+    the parent renders the estate and admits a values file that fails mid-apply.
+    """
+    copy = chart_with_the_validate_line_rewritten(
+        tmp_path / "removed", THE_OPERATORS_GUARD, THE_OPERATORS_GUARD_OFF
+    )
+    for name, block in [
+        ("removed-top-level.yaml", TOP_LEVEL_BLOCK),
+        ("removed-sub-key.yaml", sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+    ]:
+        result = rendered(copy, tmp_path, name, operators_overlay(block))
+        assert result.returncode == 0, (
+            f"`{name}` still failed with the operators refusal switched off, so the "
+            f"green cases above are not this clause's doing: {result.stderr}"
+        )
+        assert THE_OPERATORS_REFUSAL not in result.stderr, result.stderr
+
+
+def test_the_operators_refusal_is_nil_safe_with_every_subchart_removed(tmp_path: Path) -> None:
+    """The ADR-0787 clause over a tree with no subchart values, run rather than cited.
+
+    IT NEEDS ITS OWN TEST RATHER THAN A FIFTH OVERLAY IN
+    `test_the_refusals_are_nil_safe_with_every_subchart_removed`. That test asserts
+    the admin-token phrase for every overlay it runs, and an operators-only overlay
+    reaches no `platform.<name>.create` at all — the `$creating` guard stays shut,
+    so the admin-token clause never runs and that assertion would fail on a
+    correct chart.
+
+    WHAT IS BEING PROVED IS THAT IT REFUSES RATHER THAN RAISES. `$platform.operators`
+    is absent on this tree until the overlay supplies it, and a direct
+    `.Values.platform.operators.certManager.create` would abort the render with a
+    `nil pointer` instead of naming the key.
+    """
+    copy = chart_without_its_dependencies(tmp_path / "stripped")
+    result = rendered(
+        copy,
+        tmp_path,
+        "stripped-sub-key.yaml",
+        operators_overlay(sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+    )
+    assert result.returncode != 0, (
+        "the operators clause refused nothing over a tree with no subchart values"
+    )
+    for raise_text in ("nil pointer", "can't evaluate field", "error calling"):
+        assert raise_text not in result.stderr, (
+            f"the operators clause RAISED instead of refusing: {result.stderr}"
+        )
+    assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
+    assert (
+        f"platform.operators.{THE_FIVE_OPERATOR_SUB_KEYS[0]}.create" in result.stderr
+    ), result.stderr
+
+
+def test_the_adopter_values_ask_for_no_operator() -> None:
+    """ADR-0784 excludes `operators.create` from `example/values.yaml` BY NAME.
+
+    R5 stays 81 and the register key is excluded, so the adopter file must carry no
+    operators key of any kind. Asserted on the parsed file rather than on a grep,
+    because a commented-out key is not a key and a nested one under another block
+    is.
+
+    THE REFUSAL IS WHAT WOULD ENFORCE IT ANYWAY, and that is the point of asserting
+    it here rather than trusting it: an operators key added to this file makes
+    every render of it refuse, which would redden
+    `test_the_adopter_values_render_the_whole_platform_layer` with a message about
+    a key nobody meant to add. This says so first, and by name.
+    """
+    values = yaml.safe_load(ADOPTER_VALUES.read_text())
+    assert "operators" not in (values.get("platform") or {}), (
+        f"`example/values.yaml` states a platform.operators block: "
+        f"{(values.get('platform') or {}).get('operators')}. ADR-0784 excludes the "
+        f"key by name and ADR-0787 makes it a `platform` release's key, never this "
+        f"chart's."
+    )
+
+
 def test_the_refusals_are_unreachable_at_the_defaults(tmp_path: Path) -> None:
     """THE GUARD'S OWN GREEN CASE, and it is the property the three refusals rest on.
 
