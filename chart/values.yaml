@@ -89,7 +89,8 @@ gateway:
 #
 # TO RUN YOUR OWN PLATFORM LAYER, set `platform.enabled` false AND clear
 # `gateway.adminBootstrap.tokenSecret` (ADR-0807). `platform.enabled` false turns
-# the whole layer off whatever the `create` toggles below say. The token key is
+# the whole layer off whatever the `create` toggles below say, except
+# `platform.operators.create`, which is refused on every path (ADR-0787). The token key is
 # the one the parent cannot clear for you: with the layer off nothing mints that
 # Secret, and the gateway exits at boot on a named Secret it cannot read — unless
 # you mint it yourself.

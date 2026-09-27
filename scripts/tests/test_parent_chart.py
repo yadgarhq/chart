@@ -2626,6 +2626,21 @@ def test_platform_enabled_false_wins_over_every_create_left_true(tmp_path: Path)
     assert platform_free_identities(both[0].stdout)[1] == 0
 
 
+def test_platform_enabled_false_still_refuses_the_operators_toggle(tmp_path: Path) -> None:
+    """ADR-0807 does not reach `platform.operators.create`; ADR-0787's refusal stands on the opt-out path.
+
+    That refusal sits outside the `create` guard by design: operators are never a
+    path this parent offers, whatever `platform.enabled` says.
+    """
+    values = overlay(
+        tmp_path / "opt-out-with-operators.yaml",
+        OPT_OUT_VALUES.replace("  enabled: false\n", "  enabled: false\n  operators:\n    create: true\n", 1),
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "the opt-out with operators.create true rendered"
+    assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
+
+
 def test_platform_enabled_false_needs_no_iam_keys_agreement(tmp_path: Path) -> None:
     """With the platform layer off nothing mints `iam-keys`, so a renamed mount is the adopter's own."""
     values = overlay(
@@ -2729,6 +2744,27 @@ def test_the_parent_names_a_platform_enabled_it_cannot_read(tmp_path: Path) -> N
             assert raise_text not in message, (
                 f"`{name}` RAISED instead of refusing: {message}"
             )
+
+
+def test_an_unreadable_platform_enabled_is_refused_with_every_create_false(tmp_path: Path) -> None:
+    """The shape refusal does not wait for a `create` toggle to open the guard.
+
+    `platform.enabled: null` with every `create` false used to render exit 0 WITH
+    `platform` objects and no refusal: helm leaves the dependency enabled, and the
+    refusal sat inside the `create` guard, which nothing opened. Measured on
+    751e64b and on this branch before the fix: 4 objects from `platform`, exit 0.
+    """
+    for name, scalar, kind in THE_UNREADABLE_ENABLED_SHAPES:
+        message = refusal(
+            tmp_path,
+            f"{name}-nothing-created",
+            f"platform:\n  enabled: {scalar}\n",
+        )
+        assert f"platform.enabled is a {kind} rather than true or false" in message, (
+            f"`{name}` with every create false refused without naming the key: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, f"`{name}` RAISED instead of refusing: {message}"
 
 
 def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(

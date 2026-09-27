@@ -382,7 +382,8 @@ failed `d80_portability.py`'s all-off pass, and this suite's copy of it, on
 2026-09-27. ADR-0807 records the requirement in the README and the example.
 
 ONLY A BOOL `false` IS "OFF". An absent or non-bool `platform.enabled` leaves the
-dependency ENABLED in helm, and the shape refusal further down names it.
+dependency ENABLED in helm, and the shape refusal further down names it whatever
+the `create` toggles say — it sits outside the guard for that reason.
 */}}
 {{- $tokenSecret := default "" (default dict (default dict .Values.gateway).adminBootstrap).tokenSecret -}}
 {{- if and (kindIs "bool" $platform.enabled) (not $platform.enabled) -}}
@@ -516,22 +517,37 @@ the condition, so both belong in the same message — there is nothing for `hasK
 to separate. Above, an absent `create` is the DEFAULT STATE of five blocks and had
 to be told apart from a nulled one.
 */}}
+{{- end -}}
+
+{{/*
+THE SHAPE REFUSAL SITS OUTSIDE THE `$creating` GUARD, AND IT USED TO SIT INSIDE IT.
+Inside, it waited for a `create` toggle to open the guard, and a `platform.enabled`
+helm cannot read needs none: helm leaves the dependency enabled whatever the
+toggles say, and `platform`'s preflight Job renders on its own. Measured
+2026-09-27 on helm 3.18.4 and 4.3.0: `platform.enabled:` null with all seven
+`create` false rendered exit 0, no refusal, and four `platform` objects — the
+preflight Job, its ServiceAccount, Role and RoleBinding. The toggles that asked,
+if any, are still named.
+
+D80's all-off pass is unaffected: it writes `platform.enabled` as a bool false.
+*/}}
 {{- if not (kindIs "bool" $platform.enabled) -}}
 {{- $enabledShape := kindOf $platform.enabled -}}
 {{- if eq $enabledShape "invalid" -}}{{- $enabledShape = "null" -}}{{- end -}}
+{{- $askedBy := "" -}}
+{{- if $creating -}}{{- $askedBy = printf ", and %s asks for the platform layer" (join ", " $creating) -}}{{- end -}}
 {{- $refusals = append $refusals (printf (join "" (list
-      "platform.enabled is a %s rather than true or false, and %s asks for the platform layer. "
+      "platform.enabled is a %s rather than true or false%s. "
       "`platform` is declared under `condition: platform.enabled`, and helm leaves a dependency "
       "ENABLED when the path its condition names does not resolve — so this does NOT leave the "
       "platform layer out, it installs it out of a key that says nothing, and the only warning is a "
       "`returned non-bool value` line on stderr. Write platform.enabled true or false unquoted."))
-      $enabledShape $asked) -}}
-{{- end -}}
+      $enabledShape $askedBy) -}}
 {{- end -}}
 
 {{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
-CAN REACH IT. Every refusal above `{{- if $creating -}}` is guarded on an adopter
+AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Every refusal above `{{- if $creating -}}` is guarded on an adopter
 setting a `platform.<name>.create`; the operators clause is not, because the values
 file it exists for sets none. Raising here rather than inside the guard is what
 makes both reachable from one `fail`, which is the accumulation rule this file

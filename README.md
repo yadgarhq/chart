@@ -101,7 +101,8 @@ gateway:
 ```
 
 `platform.enabled` false turns the whole layer off, whatever the `create` toggles
-say. Clear the token unless you mint that Secret yourself: with the layer off
+say — except `platform.operators.create`, which this chart refuses on every path
+(ADR-0787), the opt-out included. It must stay unset or false. Clear the token unless you mint that Secret yourself: with the layer off
 nothing mints it, and the gateway exits at boot on a named Secret it cannot read.
 The chart does not refuse a forgotten clear — the render succeeds. Turn off
 `autoscaling.enabled` and `database.create` in the modules whose KEDA or

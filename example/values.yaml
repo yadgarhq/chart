@@ -97,7 +97,8 @@
 # IF YOU RUN YOUR OWN PLATFORM LAYER, set `enabled` false and clear
 # `gateway.adminBootstrap.tokenSecret` below (ADR-0807) — deleting this block
 # keeps the defaults, which are on. `enabled` false turns every object of the
-# layer off, whatever the `create` toggles say, and the eight modules install
+# layer off, whatever the `create` toggles say (`operators.create` excepted: it
+# is refused on every path, ADR-0787), and the eight modules install
 # against your layer. Clear the token unless you mint that Secret yourself: with
 # the layer off nothing mints it, and the gateway exits at boot without it. The
 # chart does not refuse a forgotten clear.
