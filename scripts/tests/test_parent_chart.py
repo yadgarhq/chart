@@ -4208,8 +4208,8 @@ HOSTNAME_KEYS = (
     "iam.enrolment.gateway",
 )
 
-# THE PIN THE RED CASE SUBSTITUTES: the parent this organisation's `deploy` still
-# pins, where `platform.enabled` defaulted false. Measured: 32 objects there with
+# THE PIN THE RED CASE SUBSTITUTES: a pre-B6 parent, where `platform.enabled`
+# defaulted false. Measured: 32 objects there with
 # the same `valuesObject`, because its platform keys reach a disabled dependency.
 A_PRE_B6_PIN = "0.2.38"
 A_PRE_B6_PIN_OBJECTS = 32
@@ -4329,7 +4329,12 @@ def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
 
 def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> None:
     values_object = yaml.safe_load(yaml.safe_dump(example_source()["helm"]["valuesObject"]))
-    values_object["gateway"]["gateway"]["hostnme"] = values_object["gateway"]["gateway"].pop("hostname")
+    gateway = (values_object.get("gateway") or {}).get("gateway") or {}
+    assert "hostname" in gateway, (
+        f"the example's valuesObject no longer states gateway.gateway.hostname, so this red "
+        f"case has nothing to misspell; move it to another key: {values_object}"
+    )
+    gateway["hostnme"] = gateway.pop("hostname")
     failures = unrecognised_keys(values_object, pinned)
     assert len(failures) == 1 and "`gateway.gateway.hostnme`" in failures[0], failures
 

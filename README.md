@@ -192,7 +192,7 @@ changing the shared release workflow.
   here, because ADR-0584 forbids adopting a gate in a repository it hard-fails and
   this chart has no pod spec to check.
 - **The reference installation.** `yadgarhq/deploy` is how our own cluster runs,
-  and it pins this chart at `0.2.38` with a values file of its own. Moving it to
+  and it pins this chart with its own values file. Moving it to
   this example's shape is phase E of `plans/the-one-application-install.md`.
 - **The development ApplicationSet.** D54's per-module discovery in
   `yadgarhq/argocd` stays as a development mechanism and is NOT shipped to an

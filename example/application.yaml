@@ -109,6 +109,10 @@ spec:
             dnsNames:
               - yadgar.example.com
             # YOUR ISSUER. The chart creates none. Both halves are required.
+            # The edge Gateway is HTTPS-only (one listener, 443, no port 80), so an
+            # ACME issuer must solve DNS-01; HTTP-01 cannot complete. These two
+            # sub-keys are checked by `platform`'s required guard, not by the
+            # suite's key walk (`issuerRef` defaults to an open `{}`).
             issuerRef:
               name: letsencrypt-production
               kind: ClusterIssuer
