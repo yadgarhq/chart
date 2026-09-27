@@ -87,10 +87,13 @@ gateway:
 # its Service and its NetworkPolicy. With the key true, that is also what this
 # file asks for; the key stays stated so the `portability` job can flip it.
 #
-# TO RUN YOUR OWN PLATFORM LAYER, set `platform.enabled` false AND every
-# `platform.*.create` below false. `platform.enabled` false alone is refused:
-# `templates/_validate.tpl` refuses any `create` left true with the dependency
-# off, because that file would read as configured and render none of it.
+# TO RUN YOUR OWN PLATFORM LAYER, set `platform.enabled` false AND clear
+# `gateway.adminBootstrap.tokenSecret` (ADR-0807). `platform.enabled` false turns
+# the whole layer off whatever the `create` toggles below say, except
+# `platform.operators.create`, which is refused on every path (ADR-0787). The token key is
+# the one the parent cannot clear for you: with the layer off nothing mints that
+# Secret, and the gateway exits at boot on a named Secret it cannot read — unless
+# you mint it yourself.
 #
 # `platform.operators.create` IS NOT STATED, AND STAYS FALSE. ADR-0784 and
 # ADR-0787 make it `platform`'s own key; this parent refuses it.

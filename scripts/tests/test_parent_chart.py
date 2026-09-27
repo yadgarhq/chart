@@ -515,9 +515,10 @@ def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 # THE MODULES ALONE: what an adopter who runs their own platform layer writes, and
 # what this chart's defaults WERE before ADR-0803 step B6 made them the whole
-# estate. `platform.enabled` false is not enough on its own: the parent refuses a
-# `create` left true with the dependency off, so every `create` the defaults set
-# true is set false here too, and so is every toggle that needs an operator.
+# estate. Since ADR-0807 `platform.enabled` false alone turns the platform layer
+# off (`OPT_OUT_VALUES`); every `create` the defaults set true is ALSO set false
+# here so this file stays byte-for-byte the pre-B6 defaults, and so is every
+# toggle that needs an operator.
 # `gateway.gateway.enabled` stays true — Gateway API is a specification, and D80
 # permits it on (`EXPECTED` counts its HTTPRoute).
 #
@@ -2528,26 +2529,154 @@ def test_a_vendored_job_that_renamed_the_minted_secret_reddens_the_drift_guard(
     )
 
 
-def test_the_parent_refuses_a_create_toggle_with_the_dependency_left_off(tmp_path: Path) -> None:
-    """THE TRAP THE DEPENDENCY `condition` OPENS, refused by name.
+# ── ADR-0807: `platform.enabled` false turns the whole platform layer off ──────
+# ADR-0777's refusal 3 — "a `create` is on while `platform.enabled` is off" — is
+# RETIRED. With the defaults at the whole estate it fired almost only on a
+# deliberate opt-out, which then took about ten keys. The opt-out is now two:
+OPT_OUT_VALUES = (
+    "platform:\n"
+    "  enabled: false\n"
+    "gateway:\n"
+    "  adminBootstrap:\n"
+    '    tokenSecret: ""\n'
+)
 
-    A values file stating `internalCA.create: true` and leaving `platform.enabled`
-    alone reads as a fully configured platform layer and renders NONE of it —
-    measured, the same object set as the bare default, exit 0, no warning. The
-    refusal names both keys because the file that trips it names only one.
+# THE SECOND KEY IS DOCUMENTED, NOT REFUSED. `platform.enabled: false` alone leaves
+# `gateway.adminBootstrap.tokenSecret` at `admin-bootstrap-token`, a Secret nothing
+# then mints, and the gateway exits at boot. A render refusal naming it cannot be
+# told apart from D80's all-off render — every `enabled` false, that string left
+# alone — and it reddened `test_every_crd_bearing_resource_can_be_switched_off`
+# when it was tried (2026-09-27). So the README and the example state it, and the
+# test below pins the render that makes the statement true.
+THE_ADMIN_TOKEN_SECRET = "admin-bootstrap-token"
+
+# Every document of a render that came from the `platform` subchart or below it.
+THE_PLATFORM_SOURCE = "# Source: yadgar/charts/platform/"
+
+
+def platform_free_identities(documents_text: str) -> tuple[set[tuple[str, str, str]], int]:
+    """The identities of a raw `helm template` stdout, and how many came from `platform`. PURE."""
+    chunks = documents_text.split("\n---\n")
+    from_platform = sum(1 for chunk in chunks if THE_PLATFORM_SOURCE in chunk)
+    documents = [
+        document
+        for document in yaml.safe_load_all(documents_text)
+        if isinstance(document, dict) and document.get("apiVersion")
+    ]
+    return identities(documents), from_platform
+
+
+def test_platform_enabled_false_alone_turns_the_whole_platform_layer_off(tmp_path: Path) -> None:
+    """ADR-0807 (a): the two-key opt-out renders, and renders no `platform` object.
+
+    The render equals the default render minus every object `platform` rendered:
+    the modules keep their autoscaling and databases, which are the modules' own
+    toggles and not the platform layer's.
     """
-    message = refusal(
-        tmp_path,
-        "create-without-enabled",
-        "platform:\n"
-        "  internalCA:\n"
-        "    create: true\n"
-        "gateway:\n"
-        "  adminBootstrap:\n"
-        "    tokenSecret: admin-bootstrap-token\n",
+    defaults = helm("template", "yadgar", str(CHART), *API_VERSIONS)
+    assert defaults.returncode == 0, defaults.stderr
+    everything, platform_count = platform_free_identities(defaults.stdout)
+    platform_objects = {
+        identity
+        for chunk in defaults.stdout.split("\n---\n")
+        if THE_PLATFORM_SOURCE in chunk
+        for identity in identities(
+            [d for d in yaml.safe_load_all(chunk) if isinstance(d, dict) and d.get("apiVersion")]
+        )
+    }
+
+    values = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode == 0, result.stderr
+    found, from_platform = platform_free_identities(result.stdout)
+    print(
+        f"\nADR-0807: the opt-out renders {len(found)} objects; the defaults render "
+        f"{len(everything)}, {platform_count} of them from `platform`"
     )
-    assert "platform.enabled is not true" in message, message
-    assert "platform.internalCA.create" in message, message
+    assert from_platform == 0, result.stdout
+    assert platform_objects and found == everything - platform_objects, (
+        sorted(found ^ (everything - platform_objects))
+    )
+
+
+def test_platform_enabled_false_wins_over_every_create_left_true(tmp_path: Path) -> None:
+    """ADR-0807 (b): contradictory input renders no platform object, and is not refused.
+
+    Every `create` stated true explicitly, `platform.enabled` false. Under ADR-0777
+    this was refusal 3; now it is the same render as the opt-out.
+    """
+    creates = "".join(
+        f"  {block}:\n    create: true\n"
+        for block in (
+            "internalCA", "certificates", "edgeTLS", "gatewayListener", "valkey", "nats", "bootstrap"
+        )
+    )
+    contradictory = overlay(tmp_path / "contradictory.yaml", OPT_OUT_VALUES.replace(
+        "  enabled: false\n", "  enabled: false\n" + creates, 1
+    ))
+    opt_out = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
+    both = [
+        helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(path))
+        for path in (contradictory, opt_out)
+    ]
+    for result in both:
+        assert result.returncode == 0, result.stderr
+    assert "platform.enabled is not true" not in both[0].stderr, both[0].stderr
+    assert platform_free_identities(both[0].stdout) == platform_free_identities(both[1].stdout)
+    assert platform_free_identities(both[0].stdout)[1] == 0
+
+
+def test_platform_enabled_false_still_refuses_the_operators_toggle(tmp_path: Path) -> None:
+    """ADR-0807 does not reach `platform.operators.create`; ADR-0787's refusal stands on the opt-out path.
+
+    That refusal sits outside the `create` guard by design: operators are never a
+    path this parent offers, whatever `platform.enabled` says.
+    """
+    values = overlay(
+        tmp_path / "opt-out-with-operators.yaml",
+        OPT_OUT_VALUES.replace("  enabled: false\n", "  enabled: false\n  operators:\n    create: true\n", 1),
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode != 0, "the opt-out with operators.create true rendered"
+    assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
+
+
+def test_platform_enabled_false_needs_no_iam_keys_agreement(tmp_path: Path) -> None:
+    """With the platform layer off nothing mints `iam-keys`, so a renamed mount is the adopter's own."""
+    values = overlay(
+        tmp_path / "opt-out-own-keys.yaml",
+        OPT_OUT_VALUES + "iam:\n  keysSecret: my-own-iam-keys\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode == 0, result.stderr
+
+
+def test_platform_enabled_false_alone_renders_and_still_mounts_the_admin_token(tmp_path: Path) -> None:
+    """ADR-0807: `platform.enabled: false` alone renders, and the gateway still names the token.
+
+    This is the hazard the README's opt-out names: the render succeeds with no
+    `platform` object, and the gateway Deployment still mounts
+    `admin-bootstrap-token`, which nothing now mints. Clearing
+    `gateway.adminBootstrap.tokenSecret` is the second key of the opt-out.
+    """
+    values = overlay(tmp_path / "enabled-false-alone.yaml", "platform:\n  enabled: false\n")
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    assert result.returncode == 0, result.stderr
+    found, from_platform = platform_free_identities(result.stdout)
+    print(f"\nADR-0807: `platform.enabled: false` alone renders {len(found)} objects")
+    assert from_platform == 0
+    gateway = [
+        document
+        for document in yaml.safe_load_all(result.stdout)
+        if isinstance(document, dict)
+        and document.get("kind") == "Deployment"
+        and (document.get("metadata") or {}).get("name") == "gateway"
+    ]
+    assert len(gateway) == 1
+    assert f"secretName: {THE_ADMIN_TOKEN_SECRET}" in yaml.safe_dump(gateway[0]), (
+        "the gateway no longer mounts the admin token when `platform.enabled` is false "
+        "alone, so the README's second opt-out key is stale"
+    )
 
 
 # ── `platform.enabled` THAT IS NOT A BOOL, WHICH IS THE OPPOSITE STATE ───────
@@ -2615,6 +2744,27 @@ def test_the_parent_names_a_platform_enabled_it_cannot_read(tmp_path: Path) -> N
             assert raise_text not in message, (
                 f"`{name}` RAISED instead of refusing: {message}"
             )
+
+
+def test_an_unreadable_platform_enabled_is_refused_with_every_create_false(tmp_path: Path) -> None:
+    """The shape refusal does not wait for a `create` toggle to open the guard.
+
+    `platform.enabled: null` with every `create` false used to render exit 0 WITH
+    `platform` objects and no refusal: helm leaves the dependency enabled, and the
+    refusal sat inside the `create` guard, which nothing opened. Measured on
+    751e64b and on this branch before the fix: 4 objects from `platform`, exit 0.
+    """
+    for name, scalar, kind in THE_UNREADABLE_ENABLED_SHAPES:
+        message = refusal(
+            tmp_path,
+            f"{name}-nothing-created",
+            f"platform:\n  enabled: {scalar}\n",
+        )
+        assert f"platform.enabled is a {kind} rather than true or false" in message, (
+            f"`{name}` with every create false refused without naming the key: {message}"
+        )
+        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+            assert raise_text not in message, f"`{name}` RAISED instead of refusing: {message}"
 
 
 def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(

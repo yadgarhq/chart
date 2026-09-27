@@ -94,18 +94,19 @@
 # mariadb-operator, KEDA, Envoy Gateway and Argo CD. Everything above those is
 # rendered from here.
 #
-# IF YOU RUN YOUR OWN PLATFORM LAYER, set `enabled` false AND every `create` below
-# false — deleting this block now keeps the defaults, which are on. The eight
-# modules then install against your layer and the parent asks nothing of you —
-# including, and this is stated rather than buried, no refusal for an empty admin
-# token. ADR-0777 records that narrowing and the operator accepted it. Clear
-# `gateway.adminBootstrap.tokenSecret` too unless you mint that Secret yourself.
+# IF YOU RUN YOUR OWN PLATFORM LAYER, set `enabled` false and clear
+# `gateway.adminBootstrap.tokenSecret` below (ADR-0807) — deleting this block
+# keeps the defaults, which are on. `enabled` false turns every object of the
+# layer off, whatever the `create` toggles say (`operators.create` excepted: it
+# is refused on every path, ADR-0787), and the eight modules install
+# against your layer. Clear the token unless you mint that Secret yourself: with
+# the layer off nothing mints it, and the gateway exits at boot without it. The
+# chart does not refuse a forgotten clear.
 platform:
-  # WITH THIS FALSE EVERY `create` BELOW RENDERS NOTHING, and the parent refuses
-  # rather than letting you find that out after the sync. `platform` sits behind
-  # `condition: platform.enabled`: a file that sets a `create` true and this false
-  # reads as configured and renders NONE of it. That is the third refusal in
-  # `chart/templates/_validate.tpl`, and it names both keys.
+  # WITH THIS FALSE EVERY `create` BELOW RENDERS NOTHING, by design (ADR-0807):
+  # `platform` sits behind `condition: platform.enabled`, so false is the one key
+  # that turns the whole layer off. ADR-0777's old refusal of a `create` left true
+  # beside it is retired.
   enabled: true
 
   # THE INTERNAL CERTIFICATE AUTHORITY: a self-signed Issuer, the CA Certificate it
@@ -191,8 +192,9 @@ gateway:
     # above. EMPTY IS THE GATEWAY CHART'S DEFAULT (this parent's default names it)
     # and empty means the administrative
     # bootstrap route is disabled: the estate serves everything else and answers
-    # 503 to the one request that creates the first administrator. With any
-    # `platform.*.create` true the parent refuses an empty value outright.
+    # 503 to the one request that creates the first administrator. With
+    # `platform.enabled` true and any `platform.*.create` true the parent refuses
+    # an empty value outright; with `platform.enabled` false, clear it.
     tokenSecret: admin-bootstrap-token
   autoscaling:
     enabled: true
