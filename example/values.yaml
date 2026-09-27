@@ -30,7 +30,7 @@
 # prints the parent's own file, which is almost empty by design — render the
 # version you pinned instead, and read the children's values from it:
 #
-#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.1
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.5
 #
 # ─── what happens if you set something no child declares ─────────────────────
 #
@@ -48,7 +48,7 @@
 # read the object you meant to change.
 #
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
-#     --version 0.3.1 -f values.yaml | less
+#     --version 0.3.5 -f values.yaml | less
 #
 # ─── rendering this file OFFLINE needs four flags ────────────────────────────
 #
@@ -81,6 +81,16 @@
 # the chart:
 #
 #   python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' values.yaml
+
+# ─── your hostname, once (ADR-0808) ──────────────────────────────────────────
+#
+# THE HOST YOUR EDGE ANSWERS ON. Set it here and nowhere else: the platform
+# listener and edge certificate, gateway's HTTPRoute and iam's enrolment URL
+# (`https://<hostname>`, port 443) all derive from it. Empty — the chart's
+# default, restated — renders `gateway.yadgar.internal`, which resolves for
+# nobody.
+global:
+  hostname: ""
 
 # ═══ THE PLATFORM LAYER ═══════════════════════════════════════════════════════
 #

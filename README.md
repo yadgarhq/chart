@@ -11,16 +11,21 @@ ADR-0706; this repository is authorised by ADR-0723).
 source:
   repoURL: ghcr.io/yadgarhq/charts
   chart: yadgar
-  targetRevision: 0.3.1
+  targetRevision: 0.3.5
   helm:
-    valuesObject: {} # your hostname and edge issuer; see example/application.yaml
+    valuesObject:
+      global:
+        hostname: yadgar.example.com # your hostname, once
+      platform:
+        edgeTLS:
+          issuerRef: { name: letsencrypt-production, kind: ClusterIssuer } # your issuer
 ```
 
+**The adopter minimum is two things: your hostname and your edge issuer.**
 `example/application.yaml` is that file in full, with every line you may need to
 edit marked: the pinned version, and an inline `valuesObject` holding only what the
-chart cannot default — your hostname in its five keys, and your edge issuer. The
-suite pulls that pinned version from the registry and renders it with that
-`valuesObject` on every commit. `example/values.yaml` restates every default with
+chart cannot default. The suite pulls that pinned version from the registry and
+renders it with that `valuesObject` on every commit. `example/values.yaml` restates every default with
 a comment on each, for when you change more.
 
 ## What it contains, and what it deliberately does not
@@ -80,6 +85,21 @@ helm template yadgar chart $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -
 ```
 
 The shared gates in `yadgarhq/actions` read the same file (ADR-0806).
+
+**State your hostname once, in `global.hostname` (ADR-0808).** The five places
+that carry it — `platform`'s listener hostname, the edge certificate's common name
+and DNS names, `gateway`'s HTTPRoute and `iam`'s enrolment URL — derive from it,
+so they cannot disagree. Left empty, all five render `gateway.yadgar.internal`,
+which resolves for nobody. A per-chart key you set still wins over the global.
+
+- `iam`'s enrolment URL is derived as `https://<hostname>` with **no port**: it
+  assumes the edge listener on 443. `iam` copies it into every enrolment token and
+  the client dials it, so an edge on another port sets `iam.enrolment.gateway`
+  itself.
+- **To turn IssueEnrolment off, set `iam.enrolment.enabled: false`.** That renders
+  `ENROLMENT_GATEWAY` empty whatever the other keys say; iam logs a warning at boot
+  and only IssueEnrolment refuses. An empty `iam.enrolment.gateway` no longer does
+  this — it now means "derive from `global.hostname`".
 
 **Name your edge issuer.** `platform.edgeTLS.issuerRef` is empty by default, and
 `platform` then issues the edge certificate from the internal CA — it goes Ready,

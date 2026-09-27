@@ -26,10 +26,16 @@
 # layer, autoscaling, databases, the admin token — is already on. Two things are
 # yours:
 #
-#   1. YOUR HOSTNAME, in the five keys that carry it. The chart ships
-#      `gateway.yadgar.internal`, which resolves for nobody. All five must agree.
-#      `iam.enrolment.gateway` is the one that bites later: `iam` copies it into
-#      every enrolment token, and the client dials the address in the token.
+#   1. YOUR HOSTNAME, once, in `global.hostname` (ADR-0808). The five keys that
+#      carry it — the platform listener, the edge certificate's common name and
+#      DNS names, gateway's HTTPRoute and iam's enrolment URL — derive from it,
+#      so they cannot disagree. Left empty, all five render
+#      `gateway.yadgar.internal`, which resolves for nobody. The enrolment URL
+#      is `https://<hostname>` with NO PORT: `iam` copies it into every
+#      enrolment token and the client dials it, so an edge on a port other than
+#      443 sets `iam.enrolment.gateway` itself. A per-chart key you set still
+#      wins over `global.hostname`. To turn IssueEnrolment off, set
+#      `iam.enrolment.enabled: false`.
 #   2. YOUR EDGE ISSUER, in `platform.edgeTLS.issuerRef`. Left empty, the edge
 #      certificate is issued by the installation's own internal CA: it goes Ready,
 #      and no client outside the cluster trusts it. The chart creates no issuer
@@ -50,7 +56,7 @@
 # is accepted and silently ignored — `config` is the one child that refuses a
 # typo by name. Render before you sync:
 #
-#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.1 \
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.5 \
 #     -f values.yaml | less
 #
 # TO RUN YOUR OWN PLATFORM LAYER, add `platform.enabled: false` and
@@ -95,19 +101,17 @@ spec:
     repoURL: ghcr.io/yadgarhq/charts
     chart: yadgar
     # EDIT THIS, and bump it deliberately. This is the line an upgrade moves.
-    # BARE SEMVER, no leading `v`: the git tag is `v0.3.1`, the chart version
-    # `0.3.1`. 0.3.1 is the first release with ADR-0807's two-key opt-out.
-    targetRevision: 0.3.1
+    # BARE SEMVER, no leading `v`: the git tag is `v0.3.5`, the chart version
+    # `0.3.5`. 0.3.5 is the first release whose platform, gateway and iam read
+    # `global.hostname` (ADR-0808).
+    targetRevision: 0.3.5
     helm:
       valuesObject:
-        # YOUR HOSTNAME, five times. Replace `yadgar.example.com` everywhere.
+        # YOUR HOSTNAME, once. Replace `yadgar.example.com`.
+        global:
+          hostname: yadgar.example.com
         platform:
-          gatewayListener:
-            hostname: yadgar.example.com
           edgeTLS:
-            commonName: yadgar.example.com
-            dnsNames:
-              - yadgar.example.com
             # YOUR ISSUER. The chart creates none. Both halves are required.
             # The edge Gateway is HTTPS-only (one listener, 443, no port 80), so an
             # ACME issuer must solve DNS-01; HTTP-01 cannot complete. These two
@@ -116,13 +120,6 @@ spec:
             issuerRef:
               name: letsencrypt-production
               kind: ClusterIssuer
-        gateway:
-          gateway:
-            hostname: yadgar.example.com
-        iam:
-          enrolment:
-            # No port: the edge listener is on 443.
-            gateway: https://yadgar.example.com
   destination:
     server: https://kubernetes.default.svc
     # WHERE EVERY OBJECT LANDS, and it has to be one namespace: a pod can only
