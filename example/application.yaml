@@ -1,59 +1,66 @@
 # WHAT AN ORGANISATION COMMITS TO ITS OWN GitOps REPOSITORY TO RUN YADGAR. Copy
-# this file into your repository, pin the version you want, and you have an
-# installation. You clone nothing and you never fork the chart (ADR-0705, D60 as
-# amended by ADR-0706).
+# this file into your repository, change the hostname and the issuer below, and
+# you have an installation. You clone nothing and you never fork the chart
+# (ADR-0705, D60 as amended by ADR-0706).
 #
 # ONE APPLICATION, EIGHT MODULES AND THE PLATFORM LAYER. The chart this points at
-# declares every module as a dependency pinned to a released version, so a bump of
-# the single number below moves the whole estate to a set of versions that were
-# released together. Standing up eight Applications and keeping their versions in
-# step by hand is what this replaces. The ninth dependency, `platform`, is behind
-# `condition: platform.enabled` and is OFF unless your values file turns it on.
+# declares every module and the platform layer as dependencies pinned to released
+# versions, and its DEFAULTS install all of it (ADR-0803 step B6): every module,
+# the platform layer, autoscaling and the three databases. A bump of the single
+# `targetRevision` below moves the whole estate to a set of versions that were
+# released together.
+#
+# FOUR OPERATORS MUST ALREADY RUN IN THE CLUSTER: cert-manager, Envoy Gateway,
+# mariadb-operator and KEDA. The chart installs none of them. Without one, the
+# sync fails at a render check that names the missing operator, before any object
+# is applied.
 #
 # THIS FILE IS A REFERENCE, NOT A LIVE MANIFEST. Nothing in this repository syncs
-# it. The `yadgarhq` reference installation does not use it either yet — converting
-# our own cluster to the parent is a later phase and needs a published parent
-# version to pin first — so treat the shape as documented rather than as
-# exercised. Render it yourself before you rely on it.
+# it. `scripts/tests/test_parent_chart.py` pulls the pinned version from the
+# registry and renders it with the `valuesObject` below on every commit: 81
+# objects, no refusal.
 #
-# WHAT YOU MAY OVERRIDE: every knob any of the nine charts defines, stated under
-# that chart's own name. `example/values.yaml` beside this file is the shape.
-# There is NO parent schema, so a key no child declares is accepted and silently
-# ignored rather than refused by name — see that file for what that costs you and
-# which child is the exception.
+# ─── what `valuesObject` holds, and why it is this short ─────────────────────
 #
-# TO PASS A VALUES FILE you need Argo's MULTI-SOURCE form, because the chart comes
-# from a registry and the values file from your git repository. THE BLOCK BELOW IS
-# COMMENTED OUT ON PURPOSE and `spec.source` further down is live instead — a WRONG
-# `$values` PATH FAILS THE SYNC HARD, so it stays inert until you have a file to
-# point it at. Uncomment it, delete `spec.source`, and fill in your own repository
-# the day you set your first knob.
+# ONLY WHAT THE CHART CANNOT DEFAULT FOR YOU. Everything else — the platform
+# layer, autoscaling, databases, the admin token — is already on. Two things are
+# yours:
 #
-# AND `example/values.yaml` IS NOW A FILE WITH CONTENT, which changed on
-# 2026-09-24. It used to be `{}`, so copying both files and leaving the block below
-# commented out cost nothing. It turns the whole platform layer on today, so an
-# adopter who copies both and leaves this inert gets the eight modules and NONE of
-# the platform layer — fully configured on paper, absent in fact. If you want what
-# that file states, you need the multi-source form below.
+#   1. YOUR HOSTNAME, in the five keys that carry it. The chart ships
+#      `gateway.yadgar.internal`, which resolves for nobody. All five must agree.
+#      `iam.enrolment.gateway` is the one that bites later: `iam` copies it into
+#      every enrolment token, and the client dials the address in the token.
+#   2. YOUR EDGE ISSUER, in `platform.edgeTLS.issuerRef`. Left empty, the edge
+#      certificate is issued by the installation's own internal CA: it goes Ready,
+#      and no client outside the cluster trusts it. The chart creates no issuer
+#      for you; `ClusterIssuer` is looked up cluster-wide, `Issuer` in this
+#      namespace.
 #
-#   spec:
-#     sources:
-#       - repoURL: ghcr.io/yadgarhq/charts
-#         chart: yadgar
-#         targetRevision: 0.1.0
-#         helm:
-#           valueFiles:
-#             # $<ref> BELOW, NOT `$self`. The name is yours to choose and it has to
-#             # match the `ref:` on the second source; `self` is not a reserved word
-#             # and nothing supplies one. The path is relative to that repository's
-#             # ROOT, so it is the path you committed the file at.
-#             - $values/yadgar/values.yaml
-#       # A REF-ONLY SOURCE: no `chart:` and no `path:`, because it contributes no
-#       # manifests. Exactly one source in a multi-source Application may render;
-#       # this one only lends its checkout to the interpolation above.
-#       - repoURL: https://github.com/YOUR-ORG/YOUR-GITOPS-REPO.git
-#         targetRevision: main
-#         ref: values
+# Strictly, `valuesObject: {}` also renders — the same 81 objects — but the estate
+# is then reachable at no hostname anyone can resolve.
+#
+# THE EDGE SERVICE STAYS `LoadBalancer`, the chart's default
+# (`platform.gatewayListener.envoyProxy.serviceType`, ledger 1076). On a cluster
+# with no load-balancer controller no address is ever assigned; set it to
+# `NodePort` there and pin the port yourself.
+#
+# WHAT ELSE YOU MAY SET: every knob any of the nine charts defines, under that
+# chart's own name. `example/values.yaml` beside this file restates the defaults
+# with a comment on each. There is NO parent schema, so a key no child declares
+# is accepted and silently ignored — `config` is the one child that refuses a
+# typo by name. Render before you sync:
+#
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.1 \
+#     -f values.yaml | less
+#
+# TO RUN YOUR OWN PLATFORM LAYER, add `platform.enabled: false` and
+# `gateway.adminBootstrap.tokenSecret: ""` (ADR-0807).
+#
+# A LARGER VALUES FILE CAN LIVE IN YOUR GIT REPOSITORY INSTEAD, through Argo's
+# multi-source form: the chart from the registry, and a ref-only second source
+# (`ref: values`) whose checkout `helm.valueFiles: [$values/<path>]` reads. A wrong
+# `$values` path fails the sync hard, which is why this file keeps its values
+# inline.
 #
 # THE SCHEME-LESS `repoURL` IS DELIBERATE. Argo auto-enables OCI for a Helm source
 # whose `repoURL` carries no scheme, which is why `chart:` sits beside it. The
@@ -61,11 +68,9 @@
 # the two must not be mixed.
 #
 # NO REPOSITORY SECRET, AND NO REGISTRY ACCESS AT INSTALL TIME BEYOND THIS ONE
-# PULL. Measured 2026-09-19: the published parent package carries all eight
-# subcharts inside it, expanded under `yadgar/charts/<module>/`, so Argo resolves
-# nothing further. `helm install` does not resolve dependencies at all — it expects
-# a self-contained package — and this one is. The parent package and every module
-# package are public, so the pull is anonymous.
+# PULL. The published parent package carries every subchart inside it, expanded
+# under `yadgar/charts/<name>/`, so Argo resolves nothing further. The parent
+# package and every module package are public, so the pull is anonymous.
 #
 # NO SYNC WAVE ON THIS APPLICATION, and that is the one thing to read before you
 # deploy it. The reference installation runs configuration at wave -12, ahead of
@@ -89,28 +94,35 @@ spec:
   source:
     repoURL: ghcr.io/yadgarhq/charts
     chart: yadgar
-    # EDIT THIS, and bump it deliberately. This is the line an upgrade moves, and
-    # it is the only thing that changes what you get.
-    #
-    # BARE SEMVER, no leading `v`. The git tag is `v0.1.0`; the chart version is
-    # `0.1.0`, because the release pipeline strips the `v` once and every published
-    # artifact carries the bare form. `chart/Chart.yaml` in this repository also
-    # reads `0.1.0` and that is not what decides the published version — the
-    # release packages with `--version` taken from the tag.
-    #
-    # THERE IS NO PUBLISHED PARENT YET. `ghcr.io/yadgarhq/charts/yadgar` has no
-    # tags as of 2026-09-19; the first one appears when this repository is tagged.
-    # Until then this Application has nothing to pull.
-    #
-    # `0.1.0` HERE ASSUMES THE FIRST TAG IS `v0.1.0`, and it is an assumption
-    # rather than a derivation. Every version after the first is computed from the
-    # Changelog, but `next_version.py` has an explicit branch for a repository with
-    # no `v*` tag at all: "the first tag of a repository is cut by hand". So
-    # whoever cuts it chooses the number, and if they choose another one, this
-    # line, the install snippet in `README.md` and the two `--version` examples in
-    # `example/values.yaml` are the three places that then name a version which
-    # does not exist.
-    targetRevision: 0.1.0
+    # EDIT THIS, and bump it deliberately. This is the line an upgrade moves.
+    # BARE SEMVER, no leading `v`: the git tag is `v0.3.1`, the chart version
+    # `0.3.1`. 0.3.1 is the first release with ADR-0807's two-key opt-out.
+    targetRevision: 0.3.1
+    helm:
+      valuesObject:
+        # YOUR HOSTNAME, five times. Replace `yadgar.example.com` everywhere.
+        platform:
+          gatewayListener:
+            hostname: yadgar.example.com
+          edgeTLS:
+            commonName: yadgar.example.com
+            dnsNames:
+              - yadgar.example.com
+            # YOUR ISSUER. The chart creates none. Both halves are required.
+            # The edge Gateway is HTTPS-only (one listener, 443, no port 80), so an
+            # ACME issuer must solve DNS-01; HTTP-01 cannot complete. These two
+            # sub-keys are checked by `platform`'s required guard, not by the
+            # suite's key walk (`issuerRef` defaults to an open `{}`).
+            issuerRef:
+              name: letsencrypt-production
+              kind: ClusterIssuer
+        gateway:
+          gateway:
+            hostname: yadgar.example.com
+        iam:
+          enrolment:
+            # No port: the edge listener is on 443.
+            gateway: https://yadgar.example.com
   destination:
     server: https://kubernetes.default.svc
     # WHERE EVERY OBJECT LANDS, and it has to be one namespace: a pod can only
@@ -122,8 +134,9 @@ spec:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true]
 
-  # KEEP THIS BLOCK IF YOU SET ANY `*-db.database.create` TRUE. It is not
-  # decoration and it is not about drift you can ignore.
+  # KEEP THIS BLOCK WHILE ANY `*-db.database.create` IS TRUE — and the chart's
+  # defaults set all three. It is not decoration and it is not about drift you can
+  # ignore.
   #
   # mariadb-operator writes the GENERATED CREDENTIAL'S NAME back onto the spec it
   # reconciles. Argo then sees its own manifest differ from the live object and
@@ -135,10 +148,8 @@ spec:
   # `ignoreDifferences` by group and kind with `name` optional, so this entry
   # names none of the three databases and holds for all of them.
   #
-  # NO VALUES FILE CAN EXPRESS THIS. It is Argo-level state, so an adopter who
-  # copies `example/values.yaml` and writes their own Application meets the loop
-  # with nothing anywhere to warn them. That is why it lives in the file you
-  # copy.
+  # NO VALUES FILE CAN EXPRESS THIS. It is Argo-level state, which is why it lives
+  # in the file you copy.
   ignoreDifferences:
     - group: k8s.mariadb.com
       kind: MariaDB

@@ -4174,3 +4174,175 @@ def test_the_defaults_render_only_the_declared_operators_crds() -> None:
     )
     declared_groups = {group.split("/")[0] for group in DECLARED_API_VERSIONS}
     assert {group for group, _ in found} - declared_groups == {"gateway.networking.k8s.io"}
+
+
+# ------------- 9. the example Application installs the whole estate (ADR-0803 step B7)
+
+
+EXAMPLE_APPLICATION = REPO / "example" / "application.yaml"
+PUBLISHED_CHART = "oci://ghcr.io/yadgarhq/charts/yadgar"
+
+# THE OLDEST PARENT THE EXAMPLE MAY PIN: 0.3.1, the release of ADR-0807
+# (`platform.enabled` false is the whole opt-out). 0.3.0 already defaults to the
+# whole estate but documents a ten-key opt-out the example's text no longer
+# describes. A floor, not a currency check. Every merge to `main` cuts a release, so
+# the example is one release behind the moment the pull request that bumps it
+# merges. A "pin == newest tag" check would go red on the next merge — including
+# the bot's pin commits — and nothing inside that merge could fix it. Moving the
+# pin is a deliberate change, gated by the render below.
+EXAMPLE_PIN_FLOOR = (0, 3, 1)
+
+# WHAT THE PINNED PARENT RENDERS WITH THE EXAMPLE'S `valuesObject`, a LITERAL like
+# `ADOPTER_OBJECTS` and K1 at that version. Measured 2026-09-27 on helm 3.18.4 and
+# 4.3.0 against the published 0.3.1: 81 objects.
+EXAMPLE_PIN_OBJECTS = 81
+
+# THE FIVE HOSTNAME KEYS (INSTALL.md, "Set the five hostname keys together"). The
+# chart ships `gateway.yadgar.internal`, which resolves for nobody, so an adopter
+# must name all five, and they must agree. `iam.enrolment.gateway` is a URL.
+HOSTNAME_KEYS = (
+    "platform.gatewayListener.hostname",
+    "platform.edgeTLS.commonName",
+    "platform.edgeTLS.dnsNames",
+    "gateway.gateway.hostname",
+    "iam.enrolment.gateway",
+)
+
+# THE PIN THE RED CASE SUBSTITUTES: a pre-B6 parent, where `platform.enabled`
+# defaulted false. Measured: 32 objects there with
+# the same `valuesObject`, because its platform keys reach a disabled dependency.
+A_PRE_B6_PIN = "0.2.38"
+A_PRE_B6_PIN_OBJECTS = 32
+
+
+def example_source() -> dict:
+    document = yaml.safe_load(EXAMPLE_APPLICATION.read_text())
+    return document["spec"]["source"]
+
+
+def pulled(version: str, destination: Path) -> Path:
+    """The PUBLISHED parent at `version`, pulled from the registry. NOT vendored.
+
+    The example pins a published artifact, so the artifact is what is rendered —
+    a vendored copy would be a second thing to keep equal to it. This suite
+    already needs the registry (`packaged` resolves nine dependencies from it),
+    and so do the pre-commit hook and CI's `precommit` job that run it.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    result = helm("pull", PUBLISHED_CHART, "--version", version, "-d", str(destination))
+    assert result.returncode == 0, f"cannot pull {PUBLISHED_CHART} {version}: {result.stderr}"
+    tarball = destination / f"yadgar-{version}.tgz"
+    assert tarball.is_file(), sorted(path.name for path in destination.iterdir())
+    return tarball
+
+
+def example_render(tarball: Path, values_object: dict, destination: Path) -> subprocess.CompletedProcess[str]:
+    values = overlay(destination / "values-object.yaml", yaml.safe_dump(values_object))
+    return helm("template", "yadgar", str(tarball), *API_VERSIONS, "-f", str(values))
+
+
+def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
+    """Every leaf of `values_object` that no chart in `tarball` declares a default for. PURE-ish.
+
+    helm accepts and ignores an unknown key under all but one child (there is no
+    parent schema), so this is the check that names a typo. A path is recognised
+    when each step exists in the default values, until a step whose default is an
+    empty mapping or null — an open map, such as `platform.edgeTLS.issuerRef`.
+    """
+    import tarfile
+
+    with tarfile.open(tarball, "r:gz") as archive:
+        def values_of(member: str) -> dict:
+            return yaml.safe_load(archive.extractfile(member).read()) or {}
+
+        defaults = values_of("yadgar/values.yaml")
+        for name in {m.split("/")[2] for m in archive.getnames() if m.count("/") >= 3 and m.startswith("yadgar/charts/")}:
+            member = f"yadgar/charts/{name}/values.yaml"
+            if member in archive.getnames():
+                defaults = merged({name: values_of(member)}, defaults)
+
+    failures = []
+    for path in leaves(values_object):
+        node = defaults
+        for step in path.split("."):
+            if isinstance(node, dict) and not node:
+                break
+            if node is None:
+                break
+            if not isinstance(node, dict) or step not in node:
+                failures.append(f"`{path}`: no chart in the pinned parent declares `{step}` there")
+                break
+            node = node[step]
+    return failures
+
+
+@pytest.fixture(scope="module")
+def pinned(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return pulled(str(example_source()["targetRevision"]), tmp_path_factory.mktemp("pinned"))
+
+
+def test_the_example_pins_a_published_parent_at_or_above_the_floor() -> None:
+    source = example_source()
+    assert source["repoURL"] == "ghcr.io/yadgarhq/charts" and source["chart"] == "yadgar", source
+    pin = str(source["targetRevision"])
+    assert re.fullmatch(r"\d+\.\d+\.\d+", pin), f"`targetRevision: {pin}` is not bare semver"
+    assert tuple(int(part) for part in pin.split(".")) >= EXAMPLE_PIN_FLOOR, (
+        f"the example pins {pin}, below {'.'.join(map(str, EXAMPLE_PIN_FLOOR))} (ADR-0807's release)"
+    )
+
+
+def test_the_example_installs_the_whole_estate_at_its_pin(pinned: Path, tmp_path: Path) -> None:
+    """B7's gate: the pinned PUBLISHED parent, the inline `valuesObject`, the four API versions."""
+    source = example_source()
+    values_object = source["helm"]["valuesObject"]
+    result = example_render(pinned, values_object, tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    print(f"\nB7: {source['targetRevision']} with the example's valuesObject renders {len(documents)} objects")
+    assert len(documents) == EXAMPLE_PIN_OBJECTS
+    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS)), (
+        "the example's valuesObject changed which objects the pinned parent renders"
+    )
+
+
+def test_the_example_names_the_five_hostname_keys_and_they_agree(pinned: Path, tmp_path: Path) -> None:
+    """The values reach the objects: one hostname, in all five places, and in the render."""
+    values_object = example_source()["helm"]["valuesObject"]
+    stated = {path: value_at(values_object, path) for path in HOSTNAME_KEYS}
+    missing = [path for path, value in stated.items() if value is _ABSENT]
+    assert missing == [], f"the example leaves these at `gateway.yadgar.internal`: {missing}"
+    host = stated["gateway.gateway.hostname"]
+    assert stated["platform.gatewayListener.hostname"] == host
+    assert stated["platform.edgeTLS.commonName"] == host
+    assert stated["platform.edgeTLS.dnsNames"] == [host]
+    assert stated["iam.enrolment.gateway"] == f"https://{host}", stated["iam.enrolment.gateway"]
+
+    rendered = example_render(pinned, values_object, tmp_path).stdout
+    assert "gateway.yadgar.internal" not in rendered, (
+        "the shipped hostname survives in the render; a sixth key carries it"
+    )
+
+
+def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
+    assert unrecognised_keys(example_source()["helm"]["valuesObject"], pinned) == []
+
+
+def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> None:
+    values_object = yaml.safe_load(yaml.safe_dump(example_source()["helm"]["valuesObject"]))
+    gateway = (values_object.get("gateway") or {}).get("gateway") or {}
+    assert "hostname" in gateway, (
+        f"the example's valuesObject no longer states gateway.gateway.hostname, so this red "
+        f"case has nothing to misspell; move it to another key: {values_object}"
+    )
+    gateway["hostnme"] = gateway.pop("hostname")
+    failures = unrecognised_keys(values_object, pinned)
+    assert len(failures) == 1 and "`gateway.gateway.hostnme`" in failures[0], failures
+
+
+def test_a_pre_b6_pin_reddens_the_count_and_names_the_version(tmp_path: Path) -> None:
+    """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone."""
+    tarball = pulled(A_PRE_B6_PIN, tmp_path / "old")
+    result = example_render(tarball, example_source()["helm"]["valuesObject"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert len(documents) == A_PRE_B6_PIN_OBJECTS != EXAMPLE_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))

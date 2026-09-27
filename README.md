@@ -11,21 +11,17 @@ ADR-0706; this repository is authorised by ADR-0723).
 source:
   repoURL: ghcr.io/yadgarhq/charts
   chart: yadgar
-  targetRevision: 0.1.0
+  targetRevision: 0.3.1
+  helm:
+    valuesObject: {} # your hostname and edge issuer; see example/application.yaml
 ```
 
 `example/application.yaml` is that file in full, with every line you may need to
-edit marked. `example/values.yaml` is how you change a module's setting from your
-own repository without forking anything.
-
-**There is no published parent yet.** `ghcr.io/yadgarhq/charts/yadgar` has no tags
-as of 2026-09-19. The first one appears when this repository is tagged, and the
-`0.1.0` above assumes that tag is `v0.1.0` — `next_version.py` derives every
-version after the first from the Changelog but has an explicit branch saying "the
-first tag of a repository is cut by hand", so the number is whoever cuts it's
-choice. A different first tag makes this snippet, `example/application.yaml`'s
-`targetRevision` and `example/values.yaml`'s two `--version` examples name a
-version that does not exist.
+edit marked: the pinned version, and an inline `valuesObject` holding only what the
+chart cannot default — your hostname in its five keys, and your edge issuer. The
+suite pulls that pinned version from the registry and renders it with that
+`valuesObject` on every commit. `example/values.yaml` restates every default with
+a comment on each, for when you change more.
 
 ## What it contains, and what it deliberately does not
 
@@ -196,8 +192,8 @@ changing the shared release workflow.
   here, because ADR-0584 forbids adopting a gate in a repository it hard-fails and
   this chart has no pod spec to check.
 - **The reference installation.** `yadgarhq/deploy` is how our own cluster runs,
-  and it does not use this chart yet. Converting it is a later phase and needs a
-  published parent version to pin first.
+  and it pins this chart with its own values file. Moving it to
+  this example's shape is phase E of `plans/the-one-application-install.md`.
 - **The development ApplicationSet.** D54's per-module discovery in
   `yadgarhq/argocd` stays as a development mechanism and is NOT shipped to an
   adopter. This chart is what an adopter gets.
