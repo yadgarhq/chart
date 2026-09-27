@@ -17,10 +17,11 @@ template-time discriminator between the two exists. An unconditional refusal her
 fires on the render of an adopter who brings their own platform layer, which the
 suite asserts as `MODULES_ONLY_VALUES` in `scripts/tests/test_parent_chart.py`.
 
-SO THE GUARD KEYS ON THE `platform.*.create` TOGGLES: any one of them being true.
-ADR-0777 records the narrowing this buys and the operator accepted it on
-2026-09-22: an adopter who brings their own platform layer, with every `create`
-false, is NOT refused for an empty admin token.
+SO THE GUARD KEYS ON THE `platform.*.create` TOGGLES: any one of them being true,
+with `platform.enabled` not false (ADR-0807). ADR-0777 records the narrowing this
+buys and the operator accepted it on 2026-09-22: an adopter who brings their own
+platform layer — `platform.enabled` false, or every `create` false — is NOT
+refused for an empty admin token.
 
 THE DEFAULTS OPEN THE GUARD SINCE ADR-0803 STEP B6. `chart/values.yaml` now sets
 every `create` true, so these refusals run on the DEFAULT path: an adopter who
@@ -358,6 +359,36 @@ therefore keeps its `invalid` exclusion, and the two ranges differ on purpose.
 {{- end -}}
 {{- end -}}
 
+{{/*
+ADR-0807: `platform.enabled` FALSE TURNS THE WHOLE PLATFORM LAYER OFF, whatever the
+`create` toggles say. `platform` is declared under `condition: platform.enabled`,
+so helm leaves the subchart out and none of its objects render. The `create`
+toggles are then inert, and the guard below is shut by emptying `$creating`: the
+admin-token and `iam-keys` refusals are about Secrets the bootstrap Job mints, and
+with the layer off it mints nothing.
+
+ADR-0777's REFUSAL 3 IS RETIRED BY THE SAME RULING. It refused a `create` left true
+with `platform.enabled` false, to catch an adopter who forgot `enabled: true`. The
+defaults now set `enabled` true (ADR-0803 step B6), so it fired almost only on a
+deliberate opt-out, which then took about ten keys. The opt-out is now two:
+`platform.enabled: false` and `gateway.adminBootstrap.tokenSecret: ""`.
+
+THE SECOND KEY IS DOCUMENTED, NOT REFUSED, and that is measured rather than
+chosen. With the layer off nothing mints the admin token, and the gateway exits at
+boot on a named Secret it cannot read — so a refusal naming a forgotten
+`tokenSecret` clear looked right. It cannot be told apart from D80's all-off
+render, which sets every `enabled` false and leaves that string alone: the refusal
+failed `d80_portability.py`'s all-off pass, and this suite's copy of it, on
+2026-09-27. ADR-0807 records the requirement in the README and the example.
+
+ONLY A BOOL `false` IS "OFF". An absent or non-bool `platform.enabled` leaves the
+dependency ENABLED in helm, and the shape refusal further down names it.
+*/}}
+{{- $tokenSecret := default "" (default dict (default dict .Values.gateway).adminBootstrap).tokenSecret -}}
+{{- if and (kindIs "bool" $platform.enabled) (not $platform.enabled) -}}
+{{- $creating = list -}}
+{{- end -}}
+
 {{- if $creating -}}
 {{- $asked := join ", " $creating -}}
 
@@ -369,7 +400,6 @@ creates the first user. An install of the whole estate with no admin token is an
 estate nobody can create a user in, and the parent refuses it at render rather
 than shipping it.
 */}}
-{{- $tokenSecret := default "" (default dict (default dict .Values.gateway).adminBootstrap).tokenSecret -}}
 {{- if empty $tokenSecret -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "gateway.adminBootstrap.tokenSecret is empty, and this install renders the platform layer (%s). "
@@ -451,27 +481,21 @@ rendered Job and reddens if the minted name stops being this literal.
 {{- end -}}
 
 {{/*
-THE TRAP THE DEPENDENCY `condition` OPENS, and it is measured rather than
-imagined. `platform` is declared under `condition: platform.enabled`, false in
-`chart/values.yaml`. A values file stating `platform.internalCA.create: true` and
-leaving `platform.enabled` alone reads as a fully configured platform layer and
-renders NOTHING of it — measured 2026-09-24 on helm 3.18.4: the same 32 objects as
-the bare default, exit 0, no warning. The refusal names both keys because the file
-that trips it names only one.
+A `platform.enabled` HELM CANNOT READ, refused by name. ADR-0777's refusal 3 used
+to sit here too — a `create` left true with `platform.enabled` false — and ADR-0807
+retired it: `false` now turns the whole layer off, and the block above shuts this
+guard for it. What remains is the state helm gets WRONG.
 
-TWO STATES, TWO MESSAGES, BECAUSE ONE MESSAGE WAS FALSE IN THE SECOND OF THEM.
-This clause used to be one arm, `ne (default false $platform.enabled) true`, and
-it told every adopter that "this render contains NONE of the objects those toggles
-name". That sentence is TRUE when `platform.enabled` is false or absent, and FALSE
-when it is present and not a bool. Measured 2026-09-26 on helm 3.20.2 and 4.3.0
-alike, with this clause's own `fail` neutered so the render could be counted:
+`platform` is declared under `condition: platform.enabled`, and helm leaves a
+dependency ENABLED when the path its condition names does not resolve. Measured
+2026-09-26 on helm 3.20.2 and 4.3.0 alike, with this clause's own `fail` neutered
+so the render could be counted:
 
   platform.enabled: false, platform.valkey.create: true  -> 32 objects, 0 valkey documents
   platform.enabled: <null>, the same toggle              -> 35 objects, 2 valkey documents
 
-Helm leaves a dependency ENABLED when the path its condition names does not
-resolve, so the second row is the platform layer GOING IN out of a key the values
-file never said to install. The only thing helm says about it is `Condition path
+So a null is the platform layer GOING IN out of a key the values file never said
+to install. The only thing helm says about it is `Condition path
 'platform.enabled' for chart platform returned non-bool value`, on stderr, beside
 whatever else is being printed.
 
@@ -492,16 +516,7 @@ the condition, so both belong in the same message — there is nothing for `hasK
 to separate. Above, an absent `create` is the DEFAULT STATE of five blocks and had
 to be told apart from a nulled one.
 */}}
-{{- if kindIs "bool" $platform.enabled -}}
-{{- if not $platform.enabled -}}
-{{- $refusals = append $refusals (printf (join "" (list
-      "platform.enabled is not true and %s asks for the platform layer. `platform` is declared under "
-      "`condition: platform.enabled`, so this render contains NONE of the objects those toggles name — "
-      "no Issuer, no Certificate, no Gateway, no bootstrap Job — while reading as fully configured. "
-      "Set platform.enabled true, or set those create toggles false."))
-      $asked) -}}
-{{- end -}}
-{{- else -}}
+{{- if not (kindIs "bool" $platform.enabled) -}}
 {{- $enabledShape := kindOf $platform.enabled -}}
 {{- if eq $enabledShape "invalid" -}}{{- $enabledShape = "null" -}}{{- end -}}
 {{- $refusals = append $refusals (printf (join "" (list
