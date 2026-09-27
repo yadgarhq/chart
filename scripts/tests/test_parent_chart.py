@@ -1,7 +1,7 @@
 """What an adopter actually receives, asserted on the render rather than on an exit code.
 
-SEVEN PROPERTIES, each one a thing that has already failed in this estate in some
-form:
+EIGHT PROPERTIES, each one a thing that has already failed in this estate in some
+form, or that ADR-0803 decided:
 
 1. THE PARENT RENDERS NOTHING OF ITS OWN. ADR-0723's `revisit_trigger` names a
    parent growing templates as the thing that would change what was authorised —
@@ -22,10 +22,11 @@ form:
 
 4. THE ALL-OFF RENDER CARRIES NO CRD-BEARING RESOURCE. `ci-pr.yaml`'s
    `portability` job asserts this from `yadgarhq/actions`, and it reads the
-   `enabled` keys out of `chart/values.yaml` of the chart under review. This
-   repository's `chart/values.yaml` therefore has to state
-   `gateway.gateway.enabled`, and a local copy of the property is what tells a
-   contributor WHY before CI does.
+   `enabled` and `create` keys out of `chart/values.yaml` of the chart under
+   review (ADR-0806). This repository's `chart/values.yaml` therefore has to
+   state every toggle its defaults turn on, `gateway.gateway.enabled` included,
+   and a local copy of the property is what tells a contributor WHY before CI
+   does.
 
 5. NO CONFIGURATION KNOB IS STATED IN TWO CONFIGMAPS AT ONCE, and THIS is the
    only repository that can assert it — see
@@ -39,15 +40,20 @@ form:
    that reads correct while admitting nothing — so its condition is PARSED and
    EVALUATED here rather than read.
 
-7. THE PLATFORM LAYER IS OFF BY DEFAULT AND WHOLE WHEN IT IS ON. `platform` is
-   the ninth dependency and the only one with a `condition`, so the default
-   render must be unchanged by its arrival — `EXPECTED` below does not move, and
-   the assertion that it did not is the load-bearing one. What IS counted is the
-   ADOPTER-values render, `example/values.yaml`, where every `platform.*.create`
-   is true: its object set, its renewal ladder, its RBAC triples and the
-   agreement between each preflight probe and the toggle that renders what the
-   probe probes. ADR-0777 is the record for the template that carries the
-   parent's own refusals.
+7. THE PLATFORM LAYER IS WHOLE WHEN IT IS ON AND ABSENT WHEN IT IS OFF.
+   `platform` is the ninth dependency and the only one with a `condition`, so
+   the modules-only render (`MODULES_ONLY_VALUES`) must be unchanged by its
+   arrival — `EXPECTED` below does not move, and the assertion that it did not is
+   the load-bearing one. What IS counted is the ADOPTER-values render,
+   `example/values.yaml`, where every `platform.*.create` is true: its object
+   set, its renewal ladder, its RBAC triples and the agreement between each
+   preflight probe and the toggle that renders what the probe probes. ADR-0777 is
+   the record for the template that carries the parent's own refusals.
+
+8. THE DEFAULTS ARE THE WHOLE ESTATE (ADR-0803 step B6, decision 2). The parent
+   with no values file renders exactly what the adopter values render (K1), and
+   refuses offline without the four API versions `chart/ci/api-versions.txt`
+   declares (K2) — the file every shared gate reads (ADR-0806).
 
 NO SKIPS (ADR-0650). `helm` absent is a failure, not a skip: this suite and the
 shared `helm lint and render` hook both need it, and a suite that skips when its
@@ -79,7 +85,8 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
 
-# WHAT A DEFAULT INSTALL OF THE WHOLE ESTATE IS, measured 2026-09-19 on helm
+# WHAT THE EIGHT MODULES ALONE ARE — the render of `MODULES_ONLY_VALUES`, which
+# was the default install until ADR-0803 step B6 — measured 2026-09-19 on helm
 # 4.2.3 against the eight pins in `chart/Chart.yaml` today: config 0.2.0,
 # gateway 0.9.49, iam 0.8.40, iam-db 0.7.41, project 0.1.18, project-db 0.3.6,
 # task 0.5.29 and task-db 0.6.30.
@@ -108,9 +115,11 @@ CHART = REPO / "chart"
 #
 # THE PLATFORM LAYER DID NOT MOVE IT, AND THAT IS THE POINT RATHER THAN A
 # COINCIDENCE. `platform` is the ninth dependency and the only one carrying a
-# `condition`, `platform.enabled`, which `chart/values.yaml` sets false. So the
-# default render gains no object — and no hook Job either, though `helm template`
-# does emit hooks. Re-measured 2026-09-24 on helm 3.18.4 and 4.3.0 with `platform`
+# `condition`, `platform.enabled`, which `MODULES_ONLY_VALUES` sets false. So that
+# render gains no object — and no hook Job either, though `helm template` does
+# emit hooks. B6 moved the DEFAULTS to the whole estate and did not move this
+# dict: re-measured 2026-09-27 on helm 3.18.4 and 4.3.0 over
+# `MODULES_ONLY_VALUES`, 32 objects, the same six kinds. Re-measured 2026-09-24 on helm 3.18.4 and 4.3.0 with `platform`
 # 0.1.8 declared, which is the pin `chart/Chart.yaml` carries today: 32 objects, the
 # same six kinds, unchanged. It first read that way at 0.1.7. ADR-0777 makes the
 # assertion that this dict is UNCHANGED the load-bearing one; a step that adds an
@@ -153,10 +162,11 @@ BUILTIN_GROUPS = {
 }
 
 # ── THE ADOPTER-VALUES RENDER, AND EVERY LITERAL COUNTED OVER IT ─────────────
-# `example/values.yaml` beside this chart. It turns the platform layer on — every
+# `example/values.yaml` beside this chart. It states the platform layer on — every
 # `platform.*.create` true, `autoscaling.enabled` true in all seven modules, and
-# `database.create` true in the three `-db` modules. It is the only render in this
-# suite where the platform layer exists at all.
+# `database.create` true in the three `-db` modules. Since ADR-0803 step B6 those
+# are also the chart's DEFAULTS, and K1 in section 8 holds the two renders equal;
+# the example adds only the edge issuer an adopter must name.
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
 # EVERY API GROUP THAT RENDER MUST BE HANDED, and a LITERAL rather than a list
@@ -211,7 +221,7 @@ API_VERSIONS = tuple(
 # at 0.1.8. A LITERAL for the same reason `EXPECTED` is one.
 #
 # A `platform` RELEASE MOVES THIS ONE AND NOT `EXPECTED`, because `platform` is
-# absent from the default render. A MODULE release that adds or drops an object
+# absent from the modules-only render. A MODULE release that adds or drops an object
 # moves BOTH, since every module renders in both. Update whichever moved in the
 # same commit as the pin, and say in the pull request which chart moved it.
 ADOPTER_EXPECTED = {
@@ -503,6 +513,91 @@ def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tarball
 
 
+# THE MODULES ALONE: what an adopter who runs their own platform layer writes, and
+# what this chart's defaults WERE before ADR-0803 step B6 made them the whole
+# estate. `platform.enabled` false is not enough on its own: the parent refuses a
+# `create` left true with the dependency off, so every `create` the defaults set
+# true is set false here too, and so is every toggle that needs an operator.
+# `gateway.gateway.enabled` stays true — Gateway API is a specification, and D80
+# permits it on (`EXPECTED` counts its HTTPRoute).
+#
+# TWO NON-TOGGLES RETURN TO THE CHILDREN'S OWN DEFAULTS as well, so the refusal
+# tests that overlay this file start from exactly the pre-B6 defaults.
+# `gateway.adminBootstrap.tokenSecret` is cleared: with no `platform.bootstrap`
+# nothing mints that Secret, and the gateway chart refuses to boot on a named
+# Secret it cannot read — clearing it is that chart's own instruction. The two
+# preflight probes go back to `platform`'s false.
+#
+# A LITERAL, NOT A FLIP OF `chart/values.yaml`. A derived file follows whatever
+# the defaults become; this one is what an adopter actually has to write, and the
+# refusal tests that render over it stay about the refusal they name.
+MODULES_ONLY_VALUES = """\
+gateway:
+  adminBootstrap:
+    tokenSecret: ""
+  autoscaling:
+    enabled: false
+platform:
+  enabled: false
+  preflight:
+    probes:
+      keda: false
+      mariadb: false
+  internalCA:
+    create: false
+  certificates:
+    create: false
+  edgeTLS:
+    create: false
+  gatewayListener:
+    create: false
+  valkey:
+    create: false
+  nats:
+    create: false
+  bootstrap:
+    create: false
+    iamKeys:
+      create: false
+iam:
+  autoscaling:
+    enabled: false
+iam-db:
+  autoscaling:
+    enabled: false
+  database:
+    create: false
+project:
+  autoscaling:
+    enabled: false
+project-db:
+  autoscaling:
+    enabled: false
+  database:
+    create: false
+task:
+  autoscaling:
+    enabled: false
+task-db:
+  autoscaling:
+    enabled: false
+  database:
+    create: false
+"""
+
+
+def modules_only_file(directory: Path) -> Path:
+    """`MODULES_ONLY_VALUES` on disk in `directory`, for a `-f` ahead of any overlay."""
+    path = directory / "modules-only.yaml"
+    path.write_text(MODULES_ONLY_VALUES)
+    return path
+
+
+@pytest.fixture(scope="module")
+def modules_only(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return modules_only_file(tmp_path_factory.mktemp("modules-only"))
+
+
 # ------------------------------------------- 1. the parent renders nothing itself
 
 
@@ -530,9 +625,14 @@ def chart_without_its_dependencies(destination: Path) -> Path:
     return copy
 
 
-def test_the_parent_declares_no_templates_of_its_own(tmp_path: Path) -> None:
-    """Every rendered object comes from a subchart, asserted by removing them all."""
-    assert render(str(chart_without_its_dependencies(tmp_path))) == [], (
+def test_the_parent_declares_no_templates_of_its_own(tmp_path: Path, modules_only: Path) -> None:
+    """Every rendered object comes from a subchart, asserted by removing them all.
+
+    OVER `MODULES_ONLY_VALUES`, because the defaults set `platform.*.create` true
+    and the parent's refusals then read subchart values this tree does not have.
+    `test_the_refusals_are_nil_safe_with_every_subchart_removed` covers that side.
+    """
+    assert render(str(chart_without_its_dependencies(tmp_path)), "-f", str(modules_only)) == [], (
         "this parent rendered an object of its own with every subchart removed. "
         "ADR-0723's revisit_trigger names that as a module nobody declared."
     )
@@ -546,7 +646,7 @@ def test_the_parent_declares_no_templates_of_its_own(tmp_path: Path) -> None:
 PERMITTED_NON_PARTIALS = {"validate.yaml"}
 
 
-def test_the_templates_directory_holds_only_partials(tmp_path: Path) -> None:
+def test_the_templates_directory_holds_only_partials(tmp_path: Path, modules_only: Path) -> None:
     """`helm lint --strict` needs the directory to exist; nothing in it may render.
 
     AMENDED BY NAME FOR `validate.yaml`, PER ADR-0777. That file carries the
@@ -559,6 +659,13 @@ def test_the_templates_directory_holds_only_partials(tmp_path: Path) -> None:
     stripped, exactly as `test_the_parent_declares_no_templates_of_its_own` does,
     and demands an empty render — the phrasing that catches `validate.yaml`
     growing an object, whatever guard that object happens to sit behind.
+
+    TWICE, ONE RENDER PER SIDE OF THE `create` GUARD. Over `MODULES_ONLY_VALUES`
+    the guard in `_validate.tpl` is shut. At the DEFAULTS it is open, because
+    ADR-0803 step B6 set every `create` true — so an object added inside that
+    guard shows only in the second render. `iam.keysSecret` is set because the
+    stripped tree has no `iam` defaults, and the `iam-keys` refusal would
+    otherwise fire; that is the one value the defaults leave to a child.
     """
     templates = sorted(path.name for path in (CHART / "templates").iterdir())
     assert templates, "`chart/templates/` is empty, and `helm lint --strict` refuses a chart with no templates directory"
@@ -569,11 +676,60 @@ def test_the_templates_directory_holds_only_partials(tmp_path: Path) -> None:
             f"renders no objects of its own. Adding a second one is a decision for "
             f"the record — see ADR-0777 and `_no_objects_of_its_own.tpl`."
         )
-    assert render(str(chart_without_its_dependencies(tmp_path))) == [], (
-        "`chart/templates/` holds a non-partial that EMITTED AN OBJECT. "
-        f"{sorted(PERMITTED_NON_PARTIALS)} is permitted here on the stated ground "
-        f"that it renders nothing, and this is the assertion that keeps that true."
+    failures = parent_emissions(chart_without_its_dependencies(tmp_path), modules_only)
+    assert failures == [], "\n".join(failures)
+
+
+# THE ONE VALUE THE GUARD-OPEN RENDER OF THE STRIPPED TREE NEEDS: `iam`'s own
+# default for the Secret it mounts, which the stripped tree does not carry.
+GUARD_OPEN_SETS = ("--set", "iam.keysSecret=iam-keys")
+
+
+def parent_emissions(copy: Path, modules_only: Path) -> list[str]:
+    """Every object the dependency-stripped parent emits, per side of the `create` guard.
+
+    Each failure names the template from helm's `# Source:` line, so an object that
+    `validate.yaml` grew is reported against `validate.yaml`.
+    """
+    failures = []
+    for side, arguments in (
+        ("guard shut (MODULES_ONLY_VALUES)", ("-f", str(modules_only))),
+        ("guard open (the defaults)", GUARD_OPEN_SETS),
+    ):
+        result = helm("template", "yadgar", str(copy), *arguments)
+        if result.returncode != 0:
+            failures.append(f"{side}: the stripped parent did not render: {result.stderr}")
+            continue
+        sources = sorted(set(re.findall(r"^# Source: (\S+)$", result.stdout, re.MULTILINE)))
+        documents = [
+            document
+            for document in yaml.safe_load_all(result.stdout)
+            if isinstance(document, dict) and document.get("apiVersion")
+        ]
+        if documents:
+            failures.append(
+                f"{side}: `chart/templates/` holds a non-partial that EMITTED "
+                f"{len(documents)} OBJECT(S), from {sources}. "
+                f"{sorted(PERMITTED_NON_PARTIALS)} is permitted here on the stated "
+                f"ground that it renders nothing (ADR-0777)."
+            )
+    return failures
+
+
+def test_an_object_inside_the_create_guard_reddens_the_emits_nothing_gate(
+    tmp_path: Path, modules_only: Path
+) -> None:
+    """THE RED CASE: an object in `validate.yaml` behind a `create`, seen only with the guard open."""
+    copy = chart_without_its_dependencies(tmp_path)
+    template = copy / "templates" / "validate.yaml"
+    template.write_text(
+        template.read_text()
+        + "\n{{- if .Values.platform.internalCA.create }}\n---\n"
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: leaked\n{{- end }}\n"
     )
+    failures = parent_emissions(copy, modules_only)
+    assert len(failures) == 1, failures
+    assert failures[0].startswith("guard open") and "yadgar/templates/validate.yaml" in failures[0], failures
 
 
 def test_helm_lint_strict_passes() -> None:
@@ -584,46 +740,41 @@ def test_helm_lint_strict_passes() -> None:
 # --------------------------- 2. the packaged artifact, and it matches the tree
 
 
-def test_the_packaged_chart_renders_the_whole_estate(packaged: Path) -> None:
-    assert dict(kinds(render(str(packaged)))) == EXPECTED
+def test_the_packaged_chart_renders_the_whole_estate(packaged: Path, modules_only: Path) -> None:
+    """The package an adopter downloads, at its defaults and with the platform layer off."""
+    assert dict(kinds(render(str(packaged), *API_VERSIONS))) == ADOPTER_EXPECTED
+    assert dict(kinds(render(str(packaged), "-f", str(modules_only)))) == EXPECTED
 
 
-def test_the_default_render_is_unchanged_by_the_platform_dependency() -> None:
+def test_platform_enabled_false_removes_the_whole_platform_layer(modules_only: Path) -> None:
     """THE LOAD-BEARING ASSERTION OF ADR-0777, stated on the DIRECTORY and directly.
 
-    `platform` is the ninth dependency and the only one with a `condition`. If
-    `chart/values.yaml` ever stops declaring `platform.enabled`, helm leaves a
-    dependency ENABLED when no path its `condition` names resolves — measured
-    2026-09-24 on helm 3.18.4, where `--set platform.valkey.create=true` with no
-    `platform.enabled` key rendered the Valkey Deployment, Service and
-    NetworkPolicy. So the whole platform layer arrives in every adopter's default
-    install behind a values key nobody deleted on purpose.
+    `platform` is the ninth dependency and the only one with a `condition`,
+    `platform.enabled`. An adopter who runs their own platform layer sets it false
+    — with every `create` false too, see `MODULES_ONLY_VALUES` — and must then get
+    the eight modules and not one object or hook Job of `platform`.
 
-    The equality below is what catches that, in both directions, on the render five
-    other assertions and the shared `helm-lint` hook depend on.
+    BEFORE ADR-0803 STEP B6 THIS WAS THE DEFAULT RENDER. The defaults are now the
+    whole estate, so the same equality is asserted over the values an adopter
+    writes to get the old default back, and it needs no `--api-versions`: nothing
+    in it asks for an operator.
     """
-    assert dict(kinds(render(str(CHART)))) == EXPECTED, (
-        "the default render moved. `platform` sits behind `condition: platform.enabled`, "
-        "which `chart/values.yaml` sets false, so it must contribute no object and no "
-        "hook Job to this render. ADR-0777: a step that adds an object to `platform` "
+    assert dict(kinds(render(str(CHART), "-f", str(modules_only)))) == EXPECTED, (
+        "the modules-only render moved. `platform` sits behind `condition: "
+        "platform.enabled`, which that render sets false, so it must contribute no "
+        "object and no hook Job. ADR-0777: a step that adds an object to `platform` "
         "moves `ADOPTER_EXPECTED` and not this."
     )
 
 
-def test_the_directory_and_the_package_render_the_same_objects(packaged: Path) -> None:
+def test_the_directory_and_the_package_render_the_same_objects(packaged: Path, modules_only: Path) -> None:
     """An adopter installs the package. A property true only of the tree is not a property."""
-
-    def identity(documents: list[dict]) -> set[tuple[str, str, str]]:
-        return {
-            (
-                str(document.get("apiVersion")),
-                str(document.get("kind")),
-                str((document.get("metadata") or {}).get("name")),
-            )
-            for document in documents
-        }
-
-    assert identity(render(str(CHART))) == identity(render(str(packaged)))
+    assert identities(render(str(CHART), *API_VERSIONS)) == identities(
+        render(str(packaged), *API_VERSIONS)
+    )
+    assert identities(render(str(CHART), "-f", str(modules_only))) == identities(
+        render(str(packaged), "-f", str(modules_only))
+    )
 
 
 # WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Nine first-level members,
@@ -777,7 +928,7 @@ def test_an_adopter_value_lands_in_the_rendered_child_object(packaged: Path, tmp
     values.write_text("config:\n  shared:\n    tlsRotation:\n      pollSeconds: 45\n")
 
     for target in (str(CHART), str(packaged)):
-        documents = render(target, "-f", str(values))
+        documents = render(target, *API_VERSIONS, "-f", str(values))
         shared = [
             document
             for document in documents
@@ -832,7 +983,7 @@ def test_a_value_for_one_child_does_not_reach_another(packaged: Path, tmp_path: 
         "  toolsPoll:\n"
         "    intervalSeconds: 111\n"
     )
-    documents = render(str(packaged), "-f", str(values))
+    documents = render(str(packaged), *API_VERSIONS, "-f", str(values))
 
     def body(name: str, key: str) -> str:
         found = [
@@ -868,17 +1019,16 @@ def test_a_value_for_one_child_does_not_reach_another(packaged: Path, tmp_path: 
 # ------------------------------------------ 4. installable on a bare cluster (D80)
 
 
-# PASS 1 flips every key named `enabled` in `chart/values.yaml`. Two today:
-# `gateway.gateway.enabled` and `platform.enabled`. Asserted as an equality rather
-# than a floor, because a key that stops being read is exactly the way this gate
-# goes green over nothing.
-ENABLED_KEYS_IN_THE_PARENTS_VALUES = 2
-
-# PASS 2 flips every key named `create` in `example/values.yaml` — eight in
-# `platform` (`bootstrap.iamKeys.create` joined the other seven at step 3c) and
-# one in each of the three `-db` charts. The number is asserted for the same
-# reason.
-CREATE_KEYS_IN_THE_ADOPTER_VALUES = 11
+# PASS 1 flips every BOOLEAN key named `enabled` or `create` in `chart/values.yaml`,
+# exactly as `d80_portability.py` in `yadgarhq/actions` does since ADR-0806, and
+# renders with NO `--api-versions`: the all-off render is the bare-cluster proof,
+# and a bare cluster declares nothing. Nine `enabled` today —
+# `gateway.gateway.enabled`, `platform.enabled` and seven `autoscaling.enabled` —
+# and eleven `create`: eight in `platform` and one `database.create` in each of the
+# three `-db` charts. Asserted as equalities rather than floors, because a key that
+# stops being read is exactly the way this gate goes green over nothing.
+ENABLED_KEYS_IN_THE_PARENTS_VALUES = 9
+CREATE_KEYS_IN_THE_PARENTS_VALUES = 11
 
 
 def merged(base: dict, over: dict) -> dict:
@@ -909,40 +1059,46 @@ def flip_every(node, name: str, to: bool, path: str = "") -> list[str]:
     return flipped
 
 
+def all_off() -> tuple[dict, list[str], list[str]]:
+    """`chart/values.yaml` with every `enabled` and every `create` false, and the paths flipped."""
+    values = yaml.safe_load((CHART / "values.yaml").read_text()) or {}
+    enabled = flip_every(values, "enabled", False)
+    created = flip_every(values, "create", False)
+    return values, enabled, created
+
+
 def test_every_crd_bearing_resource_can_be_switched_off(tmp_path: Path) -> None:
     """The property `ci-pr.yaml`'s `portability` job asserts, proved here too — TWICE.
 
-    PASS 1 — `enabled`, over `chart/values.yaml`. That job reads the `enabled`
-    keys out of THAT FILE and nothing else, so a parent whose own values file is
-    empty fails it for a resource an adopter can in fact turn off. This is what
-    says so locally, before CI does.
+    PASS 1 — every `enabled` and every `create` in `chart/values.yaml` false, and no
+    `--api-versions`. That job reads the toggles out of THAT FILE and nothing else,
+    so a toggle the defaults turn on that the file does not state is a resource an
+    adopter cannot be shown to switch off. This is what says so locally, before CI
+    does.
 
-    PASS 2 — `create`, over `example/values.yaml`, holding `platform.enabled` TRUE.
-    Pass 1 cannot reach a `create` toggle at all: `platform.enabled` false removes
-    the whole subchart, so every object behind a `create` is already absent and a
-    `create` toggle DEFAULTED TRUE would have no constructible red case — the gate
-    would pass having never rendered the object it is meant to be able to switch
-    off. Holding `platform.enabled` true and flipping only `create` is the render
-    in which that toggle is the only thing standing between the chart and a
-    CRD-bearing object.
-
-    EVERY OTHER `enabled` IS FALSE IN PASS 2, and that is not a widening of "flip
-    only `create`". `autoscaling.enabled` renders ScaledObjects and
-    `gateway.gateway.enabled` renders the HTTPRoute; both are CRD-bearing and both
-    are gated by `enabled` rather than by `create`, so leaving either on would make
-    this pass fail for pass 1's subject. Pass 1's all-off file is therefore the BASE
-    of pass 2 and the `create` flips are merged onto it. `platform.enabled` is the
-    one `enabled` held true, which is the whole point of the pass.
+    PASS 2 — the same file with `platform.enabled` held TRUE. Pass 1 cannot tell a
+    `create` toggle that works from one that does nothing: `platform.enabled` false
+    removes the whole subchart, so every object behind a `create` is absent either
+    way. Holding `platform.enabled` true is the render in which each `create` is
+    the only thing standing between the chart and a CRD-bearing object. It needs
+    the declared `--api-versions`, because `platform`'s preflight probes ask for
+    operators even with every `create` off.
     """
     # ── PASS 1 ───────────────────────────────────────────────────────────────
-    off = yaml.safe_load((CHART / "values.yaml").read_text()) or {}
-    flipped = flip_every(off, "enabled", False)
-    assert len(flipped) == ENABLED_KEYS_IN_THE_PARENTS_VALUES, (
-        f"`chart/values.yaml` declares {len(flipped)} `enabled` key(s) and this gate "
-        f"expects {ENABLED_KEYS_IN_THE_PARENTS_VALUES}: {flipped}. The `portability` "
+    off, enabled, created = all_off()
+    assert len(enabled) == ENABLED_KEYS_IN_THE_PARENTS_VALUES, (
+        f"`chart/values.yaml` declares {len(enabled)} `enabled` key(s) and this gate "
+        f"expects {ENABLED_KEYS_IN_THE_PARENTS_VALUES}: {enabled}. The `portability` "
         f"job's all-off render reads that file and nothing else, so a key that left "
         f"it is a resource an adopter can no longer be shown to switch off. See the "
         f"comment in that file."
+    )
+    assert len(created) == CREATE_KEYS_IN_THE_PARENTS_VALUES, (
+        f"`chart/values.yaml` declares {len(created)} `create` key(s) and this gate "
+        f"expects {CREATE_KEYS_IN_THE_PARENTS_VALUES}: {created}. NOT ALL of them are "
+        f"then PROVED switchable by pass 2: some render no CRD-bearing object at all "
+        f"— `bootstrap.iamKeys.create` among them — and for those this count is the "
+        f"whole of the coverage."
     )
 
     values = tmp_path / "all-off.yaml"
@@ -951,25 +1107,9 @@ def test_every_crd_bearing_resource_can_be_switched_off(tmp_path: Path) -> None:
     assert survivors == [], f"these resources survived the all-off render: {survivors}"
 
     # ── PASS 2 ───────────────────────────────────────────────────────────────
-    adopter = yaml.safe_load(ADOPTER_VALUES.read_text()) or {}
-    created = flip_every(adopter, "create", False)
-    assert len(created) == CREATE_KEYS_IN_THE_ADOPTER_VALUES, (
-        f"`example/values.yaml` states {len(created)} `create` key(s) and this gate "
-        f"expects {CREATE_KEYS_IN_THE_ADOPTER_VALUES}: {created}. A `create` toggle "
-        f"that left the adopter values is one this pass no longer flips. NOT ALL of "
-        f"them are then PROVED switchable by the render below: some render no "
-        f"CRD-bearing object at all — `bootstrap.iamKeys.create` among them — and "
-        f"for those this count is the whole of the coverage. No number is stated "
-        f"here beyond the one asserted above, because how many of the eleven render "
-        f"a CRD-bearing object is a property of the pinned subcharts and moves "
-        f"whenever they do."
-    )
-    flip_every(adopter, "enabled", False)
-    adopter = merged(off, adopter)
-    adopter["platform"]["enabled"] = True
-
+    off["platform"]["enabled"] = True
     held = tmp_path / "creates-off.yaml"
-    held.write_text(yaml.safe_dump(adopter))
+    held.write_text(yaml.safe_dump(off))
     survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(held)))
     assert survivors == [], (
         f"these resources survived the render with `platform.enabled` held true and "
@@ -981,22 +1121,16 @@ def test_every_crd_bearing_resource_can_be_switched_off(tmp_path: Path) -> None:
 def test_a_create_toggle_that_cannot_be_switched_off_reddens_the_second_pass(tmp_path: Path) -> None:
     """PASS 2'S RED CASE: one `create` stays true and its objects survive.
 
-    This is the shape a `create` toggle DEFAULTED TRUE would have — the case pass 1
-    cannot construct, and the reason pass 2 exists. `internalCA.create` is the
-    stand-in because its objects are `cert-manager.io/v1`, outside every built-in
-    group, so `crd_bearing` sees them.
+    This is the shape of a `create` toggle that the all-off pass cannot reach.
+    `internalCA.create` is the stand-in because its objects are
+    `cert-manager.io/v1`, outside every built-in group, so `crd_bearing` sees them.
     """
-    off = yaml.safe_load((CHART / "values.yaml").read_text()) or {}
-    flip_every(off, "enabled", False)
-    adopter = yaml.safe_load(ADOPTER_VALUES.read_text()) or {}
-    flip_every(adopter, "create", False)
-    flip_every(adopter, "enabled", False)
-    adopter = merged(off, adopter)
-    adopter["platform"]["enabled"] = True
-    adopter["platform"]["internalCA"]["create"] = True
+    off, _, _ = all_off()
+    off["platform"]["enabled"] = True
+    off["platform"]["internalCA"]["create"] = True
 
     values = tmp_path / "one-create-stuck-on.yaml"
-    values.write_text(yaml.safe_dump(adopter))
+    values.write_text(yaml.safe_dump(off))
     survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(values)))
     assert survivors != [], (
         "a `create` toggle was left true and the second pass found no CRD-bearing "
@@ -1005,16 +1139,21 @@ def test_a_create_toggle_that_cannot_be_switched_off_reddens_the_second_pass(tmp
     assert {kind for _, kind, _ in survivors} == {"Issuer", "Certificate"}, survivors
 
 
-def test_the_defaults_render_exactly_one_crd_bearing_resource() -> None:
-    """Gateway API is a SPECIFICATION and D80 permits it on by default.
+def test_a_toggle_left_on_reddens_the_first_pass(tmp_path: Path) -> None:
+    """PASS 1'S RED CASE: one default the flip missed, and its object survives.
 
-    Stated as an equality rather than a ceiling, so a module release that adds a
-    dependency on some PRODUCT's CRD arrives as a failing test rather than as a
-    line in a job summary nobody reads.
+    `task-db.database.create` held true over the all-off file stands in for a toggle
+    the defaults turn on under a key the flip does not reach. Rendered with the
+    declared API versions so the MariaDB check lets the object through: a bare
+    render would refuse outright, which also fails the job, but for a reason this
+    test does not examine.
     """
-    assert crd_bearing(render(str(CHART))) == [
-        ("gateway.networking.k8s.io/v1", "HTTPRoute", "gateway")
-    ]
+    off, _, _ = all_off()
+    off["task-db"]["database"]["create"] = True
+    values = tmp_path / "one-default-left-on.yaml"
+    values.write_text(yaml.safe_dump(off))
+    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(values)))
+    assert [kind for _, kind, _ in survivors] == ["MariaDB"], survivors
 
 
 
@@ -1046,7 +1185,7 @@ def test_no_knob_is_stated_in_two_configmaps(packaged: Path) -> None:
     would have been RED. That duplicate was the transitional state ADR-0740's
     migration created on purpose; nothing measured it going away.
     """
-    documents = render(str(packaged))
+    documents = render(str(packaged), *API_VERSIONS)
     names = sorted(
         str((document.get("metadata") or {}).get("name"))
         for document in documents
@@ -1238,7 +1377,7 @@ def test_the_push_path_job_admits_a_push_to_main() -> None:
         )
 
 
-# ------------- 7. the platform layer: off by default, whole and refused when on
+# ------------- 7. the platform layer: whole when on, absent when off, refused when half-on
 
 
 @pytest.fixture(scope="module")
@@ -2139,10 +2278,11 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
     that simply did not ask for X. The message is the only thing that
     discriminates.
 
-    THE OVERLAY IS APPLIED TO THE CHART'S OWN DEFAULTS, not to the adopter values.
-    Every refusal below needs a `platform.*.create` set EXPLICITLY, because all of
-    them default false and a red case written at the defaults reaches no refusal
-    at all.
+    THE OVERLAY IS APPLIED OVER `MODULES_ONLY_VALUES`, not over the defaults. Since
+    ADR-0803 step B6 the defaults ARE the whole estate, every `create` true and the
+    admin token named, so a red case written over them reaches the refusal it
+    names only by accident. `MODULES_ONLY_VALUES` is the pre-B6 defaults, and every
+    refusal below sets the `platform.*.create` it needs EXPLICITLY on top.
     """
     values = overlay(tmp_path / f"{name}.yaml", body)
     result = helm(
@@ -2150,6 +2290,8 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
         "yadgar",
         str(CHART),
         *API_VERSIONS,
+        "-f",
+        str(modules_only_file(tmp_path)),
         "-f",
         str(values),
     )
@@ -2883,7 +3025,7 @@ def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
 # with an unusable `create` inside it walked through every refusal in both charts.
 # Measured at `platform` 0.1.11, on helm 3.20.2 and 4.3.0 alike:
 # `platform.operators.create:` with no value rendered EXIT 0, 197 objects, 165 of
-# them from the five operator subcharts, against the 32 of the bare default — a
+# them from the five operator subcharts, against the 32 of the then-bare default — a
 # cluster-wide cert-manager, KEDA, argo-cd, Envoy Gateway and mariadb-operator out
 # of a key nobody could read.
 #
@@ -3026,6 +3168,8 @@ def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
             "yadgar",
             str(copy),
             *API_VERSIONS,
+            "-f",
+            str(modules_only_file(tmp_path)),
             "-f",
             str(overlay(tmp_path / f"{name}.yaml", body)),
         )
@@ -3332,7 +3476,7 @@ def chart_with_the_validate_line_rewritten(destination: Path, was: str, now: str
     """A copy of this chart with one line of `_validate.tpl` rewritten.
 
     THE NEEDLE IS ASSERTED BEFORE IT IS REPLACED, the way
-    `test_breaking_the_guard_makes_the_default_render_refuse` does it: a red case
+    `test_breaking_the_guard_makes_the_modules_only_render_refuse` does it: a red case
     whose mutation silently matched nothing would report a pass nobody earned.
     """
     copy = destination / "chart"
@@ -3348,7 +3492,20 @@ def chart_with_the_validate_line_rewritten(destination: Path, was: str, now: str
 
 
 def rendered(copy: Path, tmp_path: Path, name: str, body: str) -> subprocess.CompletedProcess[str]:
-    return helm("template", "yadgar", str(copy), "-f", str(overlay(tmp_path / name, body)))
+    """`body` over `MODULES_ONLY_VALUES`, the pre-B6 defaults, and no `--api-versions`.
+
+    Nothing in `MODULES_ONLY_VALUES` asks for an operator, so each red case below
+    turns on exactly what its own overlay names and no render check fires first.
+    """
+    return helm(
+        "template",
+        "yadgar",
+        str(copy),
+        "-f",
+        str(modules_only_file(tmp_path)),
+        "-f",
+        str(overlay(tmp_path / name, body)),
+    )
 
 
 def test_a_refusal_that_read_the_top_level_key_alone_would_let_a_sub_key_through(
@@ -3472,21 +3629,28 @@ def test_the_adopter_values_ask_for_no_operator() -> None:
     )
 
 
-def test_the_refusals_are_unreachable_at_the_defaults(tmp_path: Path) -> None:
-    """THE GUARD'S OWN GREEN CASE, and it is the property the three refusals rest on.
+def test_the_refusals_are_satisfied_at_the_defaults_and_unreachable_without_the_platform(
+    tmp_path: Path, modules_only: Path
+) -> None:
+    """THE GUARD'S TWO GREEN CASES, and the property the refusals rest on.
 
-    ADR-0777: the refusals are guarded on an ADOPTER-SET condition — any
-    `platform.*.create` being true — precisely so the bare default render reaches
-    none of them. `.Release.IsInstall` cannot do this: it is TRUE for `helm
-    template`, so it separates nothing.
+    ADR-0777: the refusals are guarded on any `platform.*.create` being true.
+    Before ADR-0803 step B6 that was an ADOPTER-SET condition and the bare default
+    render reached none of them. THE DEFAULTS NOW OPEN THE GUARD: every `create`
+    is true, so the first green case is that the defaults SATISFY every refusal —
+    the admin token named on both sides, `iam-keys` unrenamed, `platform.enabled`
+    true — and render the whole estate. `.Release.IsInstall` still cannot stand in
+    for the guard: it is TRUE for `helm template`, so it separates nothing.
 
-    ASSERTED OVER THE DEPENDENCY-STRIPPED TREE AS WELL, which is where
-    `.Values.platform` is ABSENT rather than merely all-false. That is the render
-    the nil-safe chain in `_validate.tpl` exists for, and the one that would raise
-    if somebody replaced it with a direct `.Values.platform.bootstrap.create`.
+    THE SECOND GREEN CASE is `MODULES_ONLY_VALUES`, which shuts the guard again,
+    asserted over the dependency-stripped tree as well. There `.Values.platform` is
+    ABSENT rather than merely all-false — the render the nil-safe chain in
+    `_validate.tpl` exists for, and the one that would raise if somebody replaced
+    it with a direct `.Values.platform.bootstrap.create`.
     """
-    assert dict(kinds(render(str(CHART)))) == EXPECTED
-    assert render(str(chart_without_its_dependencies(tmp_path))) == []
+    assert len(render(str(CHART), *API_VERSIONS)) == ADOPTER_OBJECTS
+    assert dict(kinds(render(str(CHART), "-f", str(modules_only)))) == EXPECTED
+    assert render(str(chart_without_its_dependencies(tmp_path)), "-f", str(modules_only)) == []
 
 
 def test_the_refusals_are_nil_safe_with_every_subchart_removed(tmp_path: Path) -> None:
@@ -3524,9 +3688,18 @@ def test_the_refusals_are_nil_safe_with_every_subchart_removed(tmp_path: Path) -
         "  internalCA:\n    create: true\n  bootstrap:\n    create: true\n"
         "    iamKeys:\n      create: true\n",
     }
+    # OVER `MODULES_ONLY_VALUES`, which clears the admin token the defaults name:
+    # every overlay below opens the guard with the token empty, as before B6.
+    base = modules_only_file(tmp_path)
     for name, body in sorted(overlays.items()):
         result = helm(
-            "template", "yadgar", str(copy), "-f", str(overlay(tmp_path / f"{name}.yaml", body))
+            "template",
+            "yadgar",
+            str(copy),
+            "-f",
+            str(base),
+            "-f",
+            str(overlay(tmp_path / f"{name}.yaml", body)),
         )
         assert result.returncode != 0, (
             f"`{name}` opened the guard over a tree with no subchart values and "
@@ -3547,13 +3720,14 @@ def test_the_refusals_are_nil_safe_with_every_subchart_removed(tmp_path: Path) -
             assert "platform.bootstrap.iamKeys.create is true" in result.stderr, result.stderr
 
 
-def test_breaking_the_guard_makes_the_default_render_refuse(tmp_path: Path) -> None:
-    """THE GUARD'S RED CASE: remove the guard and the bare default render goes red.
+def test_breaking_the_guard_makes_the_modules_only_render_refuse(tmp_path: Path) -> None:
+    """THE GUARD'S RED CASE: remove the guard and the modules-only render goes red.
 
     This is the measurement ADR-0777 records as the reason the guard exists, run
     rather than cited. An unconditional refusal in the parent fires on the render
-    that five other assertions in this file and the shared `helm-lint` pre-commit
-    hook all depend on.
+    of an adopter who runs their own platform layer — `MODULES_ONLY_VALUES`, which
+    was the bare default render before ADR-0803 step B6 — and who therefore
+    rightly names no admin token.
     """
     copy = tmp_path / "chart"
     shutil.copytree(CHART, copy)
@@ -3563,9 +3737,290 @@ def test_breaking_the_guard_makes_the_default_render_refuse(tmp_path: Path) -> N
     assert needle in text, "the guard moved; this red case is now testing nothing"
     partial.write_text(text.replace(needle, "{{- if true -}}", 1))
 
-    result = helm("template", "yadgar", str(copy))
+    result = helm("template", "yadgar", str(copy), "-f", str(modules_only_file(tmp_path)))
     assert result.returncode != 0, (
-        "the guard was removed and the bare default render still succeeded, so the "
+        "the guard was removed and the modules-only render still succeeded, so the "
         "guard is not what is keeping the refusals off that render"
     )
     assert "gateway.adminBootstrap.tokenSecret is empty" in result.stderr, result.stderr
+
+
+# ------------- 8. the defaults ARE the whole estate (ADR-0803 step B6, decision 2)
+
+
+# THE FILE THE SHARED GATES READ (ADR-0806). `helm-lint`, `d80_portability.py` and
+# `service_immutable.py` in `yadgarhq/actions` each pass every entry of it as
+# `--api-versions` when they render this chart offline. `DECLARED_API_VERSIONS`
+# above is the literal a human measured; this file is what CI renders with; the
+# test below holds the two equal, so neither drifts from the other.
+API_VERSIONS_DECLARATION = CHART / "ci" / "api-versions.txt"
+
+# THE KEYS `example/values.yaml` STATES AND THE DEFAULTS DELIBERATELY DO NOT. The
+# edge leaf's issuer is the one thing an adopter must name for themselves. The
+# defaults leave `platform.edgeTLS.issuerRef` empty, and `platform` (0.1.17, step
+# B3) then issues the edge leaf from the internal CA: it renders and goes Ready,
+# and no client outside the cluster trusts it. The example names a placeholder
+# `ClusterIssuer` so an adopter sees the key. Every other leaf of the example must
+# equal the default; a new exception needs its own line here and its own reason.
+ADOPTER_ONLY_KEYS = {
+    "platform.edgeTLS.issuerRef.name",
+    "platform.edgeTLS.issuerRef.kind",
+}
+
+# THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
+# restates the gateway chart's own default only so the `portability` job can
+# flip it (see the header of `chart/values.yaml`); an adopter has no reason to.
+DEFAULT_ONLY_KEYS = {"gateway.gateway.enabled"}
+
+# The edge leaf, and the issuer it falls back to when `issuerRef` is empty.
+EDGE_CERTIFICATE = "gateway-tls"
+EDGE_FALLBACK_ISSUER = {"name": "yadgar-internal-ca", "kind": "Issuer", "group": "cert-manager.io"}
+
+# The text every estate render check prints when a declared API is missing.
+THE_RENDER_CHECK_REFUSAL = "this render needs the API"
+
+# WHAT THE DEFAULT RENDER CARRIES OUTSIDE THE BUILT-IN GROUPS, as (group, kind).
+# A LITERAL for the reason `EXPECTED` is one. Every group but Gateway API's is one
+# `DECLARED_API_VERSIONS` names, which is what ties the declaration to the render:
+# a module release that brings some other product's CRD arrives here as a failing
+# test rather than as a line in a job summary. Measured 2026-09-27 on helm 3.18.4
+# and 4.3.0 against the nine pins in `chart/Chart.yaml` today.
+DEFAULT_CRD_BEARING = {
+    ("cert-manager.io", "Certificate"),
+    ("cert-manager.io", "Issuer"),
+    ("gateway.envoyproxy.io", "EnvoyProxy"),
+    ("gateway.networking.k8s.io", "Gateway"),
+    ("gateway.networking.k8s.io", "GatewayClass"),
+    ("gateway.networking.k8s.io", "HTTPRoute"),
+    ("k8s.mariadb.com", "MariaDB"),
+    ("keda.sh", "ScaledObject"),
+}
+
+
+def declared_in(text: str) -> list[str]:
+    """The entries of an `api-versions.txt` body, by `scripts/api_versions.py`'s rules. PURE.
+
+    `#` to the end of the line is a comment and a blank line is nothing. The format
+    checks belong to the shared reader, which refuses a malformed line in every
+    gate; this suite asks only whether the entries are the measured ones.
+    """
+    return [
+        entry
+        for entry in (line.split("#", 1)[0].strip() for line in text.splitlines())
+        if entry
+    ]
+
+
+def identities(documents: list[dict]) -> set[tuple[str, str, str]]:
+    return {
+        (
+            str(document.get("apiVersion")),
+            str(document.get("kind")),
+            str((document.get("metadata") or {}).get("name")),
+        )
+        for document in documents
+    }
+
+
+_ABSENT = object()
+
+
+def value_at(node, path: str):
+    for key in path.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return _ABSENT
+        node = node[key]
+    return node
+
+
+def default_disagreements(defaults: dict, adopter: dict) -> list[str]:
+    """Every leaf the adopter values state that the parent's defaults state otherwise. PURE.
+
+    THIS IS WHAT NAMES THE KEY. The render equality in the K1 test says THAT two
+    renders differ and by which objects; it cannot say which default moved. This
+    walk can, because every leaf of `example/values.yaml` outside
+    `ADOPTER_ONLY_KEYS` is a statement of what the defaults are.
+    """
+    failures = []
+    for path in leaves(adopter):
+        if path in ADOPTER_ONLY_KEYS:
+            continue
+        want = value_at(adopter, path)
+        have = value_at(defaults, path)
+        if have is _ABSENT:
+            failures.append(
+                f"`{path}` is {want!r} in `example/values.yaml` and `chart/values.yaml` "
+                f"does not state it, so the default comes from the child chart"
+            )
+        elif have != want:
+            failures.append(
+                f"`{path}` is {have!r} in `chart/values.yaml` and {want!r} in "
+                f"`example/values.yaml`"
+            )
+    return failures
+
+
+def unstated_defaults(defaults: dict, adopter: dict) -> list[str]:
+    """Every leaf `chart/values.yaml` sets that `example/values.yaml` does not state. PURE.
+
+    THE OTHER DIRECTION OF `default_disagreements`. That walk reads the example's
+    leaves, so a default added to `chart/values.yaml` alone passes it — and the
+    example stops being the full statement of the defaults it says it is.
+    """
+    return [
+        f"`{path}` is {value_at(defaults, path)!r} in `chart/values.yaml` and "
+        f"`example/values.yaml` does not state it"
+        for path in leaves(defaults)
+        if path not in DEFAULT_ONLY_KEYS and value_at(adopter, path) is _ABSENT
+    ]
+
+
+def chart_with_no_defaults(destination: Path) -> Path:
+    """A copy of this chart whose `values.yaml` is empty — every child at its own default."""
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    (copy / "values.yaml").write_text("{}\n")
+    return copy
+
+
+def test_the_declaration_the_shared_gates_read_is_the_measured_one() -> None:
+    """`chart/ci/api-versions.txt` equals `DECLARED_API_VERSIONS`, in order."""
+    assert API_VERSIONS_DECLARATION.is_file(), (
+        f"`{API_VERSIONS_DECLARATION.relative_to(REPO)}` is missing. The shared gates "
+        f"then render this chart with no `--api-versions`, and the default render "
+        f"refuses in every one of them (ADR-0806)."
+    )
+    assert declared_in(API_VERSIONS_DECLARATION.read_text()) == list(DECLARED_API_VERSIONS)
+
+
+def test_a_declaration_missing_a_group_reddens_the_agreement_gate() -> None:
+    """THE RED CASE: the same file with any one line deleted no longer agrees."""
+    lines = API_VERSIONS_DECLARATION.read_text().splitlines()
+    for dropped in DECLARED_API_VERSIONS:
+        text = "\n".join(line for line in lines if line.strip() != dropped)
+        assert declared_in(text) != list(DECLARED_API_VERSIONS), dropped
+        assert dropped not in declared_in(text), dropped
+
+
+def test_k1_the_defaults_render_what_the_adopter_values_render(tmp_path: Path) -> None:
+    """K1 OF ADR-0803: the parent at its defaults IS the whole estate.
+
+    TWO HALVES. The leaf walks name any key where `chart/values.yaml` and
+    `example/values.yaml` part company, in either direction. The render equality
+    proves the two files produce one object set, of `ADOPTER_OBJECTS` objects;
+    `pytest -s` prints the count.
+
+    THE EXAMPLE IS RENDERED OVER A CHART WITH NO DEFAULTS, not over this one. Over
+    this one, a default the example leaves out is present in both renders and the
+    equality cannot see it.
+    """
+    defaults = render(str(CHART), *API_VERSIONS)
+    stated = render(str(chart_with_no_defaults(tmp_path)), *API_VERSIONS, "-f", str(ADOPTER_VALUES))
+    print(
+        f"\nK1: the default render holds {len(defaults)} objects; "
+        f"the adopter values over no defaults hold {len(stated)}"
+    )
+    chart_values = yaml.safe_load((CHART / "values.yaml").read_text()) or {}
+    adopter_values = yaml.safe_load(ADOPTER_VALUES.read_text()) or {}
+    assert default_disagreements(chart_values, adopter_values) == []
+    assert unstated_defaults(chart_values, adopter_values) == []
+    assert identities(defaults) == identities(stated), (
+        f"only in the defaults: {sorted(identities(defaults) - identities(stated))}; "
+        f"only in the adopter values: {sorted(identities(stated) - identities(defaults))}"
+    )
+    assert len(defaults) == ADOPTER_OBJECTS
+    assert dict(kinds(defaults)) == ADOPTER_EXPECTED
+
+
+def test_k1_a_default_the_example_omits_reddens_the_equality_and_names_the_key(
+    tmp_path: Path,
+) -> None:
+    """K1'S OTHER RED CASE: the example loses a block the defaults still set."""
+    adopter_values = yaml.safe_load(ADOPTER_VALUES.read_text())
+    del adopter_values["platform"]["valkey"]
+    shrunk = overlay(tmp_path / "example-without-valkey.yaml", yaml.safe_dump(adopter_values))
+
+    failures = unstated_defaults(yaml.safe_load((CHART / "values.yaml").read_text()), adopter_values)
+    assert len(failures) == 1 and "`platform.valkey.create`" in failures[0], failures
+
+    stated = render(str(chart_with_no_defaults(tmp_path)), *API_VERSIONS, "-f", str(shrunk))
+    missing = identities(render(str(CHART), *API_VERSIONS)) - identities(stated)
+    assert {name for _, _, name in missing} == {"valkey", "valkey-ingress"}, sorted(missing)
+
+
+def test_k1_a_reverted_default_reddens_the_equality_and_names_the_key(tmp_path: Path) -> None:
+    """K1'S RED CASE: one default reverted in a copy. Both halves go red; the walk names it."""
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    values = yaml.safe_load((copy / "values.yaml").read_text())
+    values["platform"]["valkey"]["create"] = False
+    (copy / "values.yaml").write_text(yaml.safe_dump(values, sort_keys=False))
+
+    failures = default_disagreements(values, yaml.safe_load(ADOPTER_VALUES.read_text()))
+    assert len(failures) == 1 and "`platform.valkey.create`" in failures[0], failures
+
+    reverted = render(str(copy), *API_VERSIONS)
+    stated = render(str(copy), *API_VERSIONS, "-f", str(ADOPTER_VALUES))
+    assert identities(reverted) != identities(stated)
+    assert len(reverted) < len(stated) == ADOPTER_OBJECTS, (len(reverted), len(stated))
+
+
+def test_k2_the_defaults_refuse_a_render_without_the_declared_api_versions() -> None:
+    """K2 OF ADR-0803: a bare offline render of the defaults refuses, naming an operator.
+
+    Refusing is the point. An adopter whose cluster lacks an operator the defaults
+    use meets a render check that names it, not `no matches for kind` half-way
+    through a sync. Matched on the render check's own text rather than on an exit
+    code, so a refusal for any other reason does not pass here.
+    """
+    result = helm("template", "yadgar", str(CHART))
+    assert result.returncode != 0, "the default render succeeded with no --api-versions"
+    assert THE_RENDER_CHECK_REFUSAL in result.stderr, result.stderr
+    assert any(group in result.stderr for group in DECLARED_API_VERSIONS), result.stderr
+
+
+def test_k2_every_declared_group_is_required_by_the_defaults() -> None:
+    """K2'S RED CASE, and the proof that no declared line is decorative.
+
+    With all four the render succeeds — the K1 test renders it. Drop any one and
+    the render refuses, naming the group that was dropped.
+    """
+    for dropped in DECLARED_API_VERSIONS:
+        flags = [
+            part
+            for group in DECLARED_API_VERSIONS
+            if group != dropped
+            for part in ("--api-versions", group)
+        ]
+        result = helm("template", "yadgar", str(CHART), *flags)
+        assert result.returncode != 0, f"the defaults rendered without {dropped}"
+        assert THE_RENDER_CHECK_REFUSAL in result.stderr and dropped in result.stderr, (
+            dropped,
+            result.stderr,
+        )
+
+
+def test_the_default_edge_leaf_is_issued_by_the_internal_ca() -> None:
+    """The defaults leave `platform.edgeTLS.issuerRef` empty, and the edge leaf still names a real Issuer."""
+    documents = render(str(CHART), *API_VERSIONS)
+    edge = [
+        document
+        for document in certificates(documents)
+        if (document.get("metadata") or {}).get("name") == EDGE_CERTIFICATE
+    ]
+    assert len(edge) == 1, names_of(documents, "Certificate")
+    assert edge[0]["spec"]["issuerRef"] == EDGE_FALLBACK_ISSUER, edge[0]["spec"]["issuerRef"]
+    assert EDGE_FALLBACK_ISSUER["name"] in names_of(documents, "Issuer")
+
+
+def test_the_defaults_render_only_the_declared_operators_crds() -> None:
+    """Every CRD-bearing object of the default render is a declared operator's or Gateway API's."""
+    found = {
+        (api_version.split("/")[0], kind)
+        for api_version, kind, _ in crd_bearing(render(str(CHART), *API_VERSIONS))
+    }
+    assert found == DEFAULT_CRD_BEARING, (
+        f"new: {sorted(found - DEFAULT_CRD_BEARING)}; gone: {sorted(DEFAULT_CRD_BEARING - found)}"
+    )
+    declared_groups = {group.split("/")[0] for group in DECLARED_API_VERSIONS}
+    assert {group for group, _ in found} - declared_groups == {"gateway.networking.k8s.io"}

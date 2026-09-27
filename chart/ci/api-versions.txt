@@ -1,0 +1,4 @@
+cert-manager.io/v1
+gateway.envoyproxy.io/v1alpha1
+k8s.mariadb.com/v1alpha1
+keda.sh/v1alpha1

@@ -14,16 +14,19 @@ tidy the two into one file, and do not move the call into `_no_objects_of_its_ow
 THE GUARD, AND WHY IT IS NOT `.Release.IsInstall`. That field is TRUE for
 `helm template`, so it does not separate an install from a render and no
 template-time discriminator between the two exists. An unconditional refusal here
-fires on the bare default render, which is load-bearing in six measured places in
-`scripts/tests/test_parent_chart.py` and in the shared `helm-lint` pre-commit hook
-that is part of `ci / passed` in every chart repository.
+fires on the render of an adopter who brings their own platform layer, which the
+suite asserts as `MODULES_ONLY_VALUES` in `scripts/tests/test_parent_chart.py`.
 
-SO THE GUARD KEYS ON SOMETHING AN ADOPTER SETS: any `platform.*.create` toggle
-being true. All of them are false in `platform`'s own `values.yaml`, so the
-default render reaches no refusal at all, and an adopter installing the platform
-layer sets at least one. ADR-0777 records the narrowing this buys and the operator
-accepted it on 2026-09-22: an adopter who brings their own platform layer, with
-every `create` false, is NOT refused for an empty admin token.
+SO THE GUARD KEYS ON THE `platform.*.create` TOGGLES: any one of them being true.
+ADR-0777 records the narrowing this buys and the operator accepted it on
+2026-09-22: an adopter who brings their own platform layer, with every `create`
+false, is NOT refused for an empty admin token.
+
+THE DEFAULTS OPEN THE GUARD SINCE ADR-0803 STEP B6. `chart/values.yaml` now sets
+every `create` true, so these refusals run on the DEFAULT path: an adopter who
+empties `gateway.adminBootstrap.tokenSecret`, or renames one side of a minted
+Secret, is refused at their first render with no other change. The defaults
+themselves satisfy every refusal, and the suite asserts that they render.
 
 THE TOGGLES ARE RANGED OVER, NEVER ENUMERATED. A literal list of the seven names
 `platform` ships today goes stale in silence the day an eighth block arrives —
@@ -518,8 +521,8 @@ setting a `platform.<name>.create`; the operators clause is not, because the val
 file it exists for sets none. Raising here rather than inside the guard is what
 makes both reachable from one `fail`, which is the accumulation rule this file
 opens with. The guard itself is unmoved and still decides which refusals are
-COLLECTED — `test_breaking_the_guard_makes_the_default_render_refuse` replaces it
-with `{{- if true -}}` and still reddens the bare default render.
+COLLECTED — `test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
+with `{{- if true -}}` and reddens the modules-only render.
 */}}
 {{- if $refusals -}}
 {{- fail (printf "\n\nyadgar: this parent chart refuses to render.\n\n%s\n" (join "\n\n" $refusals)) -}}
