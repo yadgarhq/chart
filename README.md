@@ -76,10 +76,11 @@ mariadb-operator and KEDA. The chart installs none of them by default
 render check that refuses, naming the operator, rather than letting a sync fail
 half-way. Argo and `helm install` read the API versions from the cluster. An
 offline `helm template` knows only the built-in groups, so a bare render refuses;
-pass the four declared in `chart/ci/api-versions.txt`:
+pass the four declared in `chart/ci/api-versions.txt`. The `sed` drops `#`
+comments and blank lines, which the shared reader permits in that file:
 
 ```
-helm template yadgar chart $(sed 's/^/--api-versions /' chart/ci/api-versions.txt)
+helm template yadgar chart $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
 ```
 
 The shared gates in `yadgarhq/actions` read the same file (ADR-0806).

@@ -16,7 +16,7 @@
 # this chart offline passes them as `--api-versions` (ADR-0806). Render it by hand
 # the same way:
 #
-#   helm template yadgar chart $(sed 's/^/--api-versions /' chart/ci/api-versions.txt)
+#   helm template yadgar chart $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
 #
 # Every other knob an adopter can set belongs to a child chart and is reached
 # through the child's own name — `config.shared.tlsRotation.pollSeconds`,

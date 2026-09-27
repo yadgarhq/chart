@@ -659,6 +659,13 @@ def test_the_templates_directory_holds_only_partials(tmp_path: Path, modules_onl
     stripped, exactly as `test_the_parent_declares_no_templates_of_its_own` does,
     and demands an empty render — the phrasing that catches `validate.yaml`
     growing an object, whatever guard that object happens to sit behind.
+
+    TWICE, ONE RENDER PER SIDE OF THE `create` GUARD. Over `MODULES_ONLY_VALUES`
+    the guard in `_validate.tpl` is shut. At the DEFAULTS it is open, because
+    ADR-0803 step B6 set every `create` true — so an object added inside that
+    guard shows only in the second render. `iam.keysSecret` is set because the
+    stripped tree has no `iam` defaults, and the `iam-keys` refusal would
+    otherwise fire; that is the one value the defaults leave to a child.
     """
     templates = sorted(path.name for path in (CHART / "templates").iterdir())
     assert templates, "`chart/templates/` is empty, and `helm lint --strict` refuses a chart with no templates directory"
@@ -669,11 +676,60 @@ def test_the_templates_directory_holds_only_partials(tmp_path: Path, modules_onl
             f"renders no objects of its own. Adding a second one is a decision for "
             f"the record — see ADR-0777 and `_no_objects_of_its_own.tpl`."
         )
-    assert render(str(chart_without_its_dependencies(tmp_path)), "-f", str(modules_only)) == [], (
-        "`chart/templates/` holds a non-partial that EMITTED AN OBJECT. "
-        f"{sorted(PERMITTED_NON_PARTIALS)} is permitted here on the stated ground "
-        f"that it renders nothing, and this is the assertion that keeps that true."
+    failures = parent_emissions(chart_without_its_dependencies(tmp_path), modules_only)
+    assert failures == [], "\n".join(failures)
+
+
+# THE ONE VALUE THE GUARD-OPEN RENDER OF THE STRIPPED TREE NEEDS: `iam`'s own
+# default for the Secret it mounts, which the stripped tree does not carry.
+GUARD_OPEN_SETS = ("--set", "iam.keysSecret=iam-keys")
+
+
+def parent_emissions(copy: Path, modules_only: Path) -> list[str]:
+    """Every object the dependency-stripped parent emits, per side of the `create` guard.
+
+    Each failure names the template from helm's `# Source:` line, so an object that
+    `validate.yaml` grew is reported against `validate.yaml`.
+    """
+    failures = []
+    for side, arguments in (
+        ("guard shut (MODULES_ONLY_VALUES)", ("-f", str(modules_only))),
+        ("guard open (the defaults)", GUARD_OPEN_SETS),
+    ):
+        result = helm("template", "yadgar", str(copy), *arguments)
+        if result.returncode != 0:
+            failures.append(f"{side}: the stripped parent did not render: {result.stderr}")
+            continue
+        sources = sorted(set(re.findall(r"^# Source: (\S+)$", result.stdout, re.MULTILINE)))
+        documents = [
+            document
+            for document in yaml.safe_load_all(result.stdout)
+            if isinstance(document, dict) and document.get("apiVersion")
+        ]
+        if documents:
+            failures.append(
+                f"{side}: `chart/templates/` holds a non-partial that EMITTED "
+                f"{len(documents)} OBJECT(S), from {sources}. "
+                f"{sorted(PERMITTED_NON_PARTIALS)} is permitted here on the stated "
+                f"ground that it renders nothing (ADR-0777)."
+            )
+    return failures
+
+
+def test_an_object_inside_the_create_guard_reddens_the_emits_nothing_gate(
+    tmp_path: Path, modules_only: Path
+) -> None:
+    """THE RED CASE: an object in `validate.yaml` behind a `create`, seen only with the guard open."""
+    copy = chart_without_its_dependencies(tmp_path)
+    template = copy / "templates" / "validate.yaml"
+    template.write_text(
+        template.read_text()
+        + "\n{{- if .Values.platform.internalCA.create }}\n---\n"
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: leaked\n{{- end }}\n"
     )
+    failures = parent_emissions(copy, modules_only)
+    assert len(failures) == 1, failures
+    assert failures[0].startswith("guard open") and "yadgar/templates/validate.yaml" in failures[0], failures
 
 
 def test_helm_lint_strict_passes() -> None:
@@ -3420,7 +3476,7 @@ def chart_with_the_validate_line_rewritten(destination: Path, was: str, now: str
     """A copy of this chart with one line of `_validate.tpl` rewritten.
 
     THE NEEDLE IS ASSERTED BEFORE IT IS REPLACED, the way
-    `test_breaking_the_guard_makes_the_default_render_refuse` does it: a red case
+    `test_breaking_the_guard_makes_the_modules_only_render_refuse` does it: a red case
     whose mutation silently matched nothing would report a pass nobody earned.
     """
     copy = destination / "chart"
@@ -3664,7 +3720,7 @@ def test_the_refusals_are_nil_safe_with_every_subchart_removed(tmp_path: Path) -
             assert "platform.bootstrap.iamKeys.create is true" in result.stderr, result.stderr
 
 
-def test_breaking_the_guard_makes_the_default_render_refuse(tmp_path: Path) -> None:
+def test_breaking_the_guard_makes_the_modules_only_render_refuse(tmp_path: Path) -> None:
     """THE GUARD'S RED CASE: remove the guard and the modules-only render goes red.
 
     This is the measurement ADR-0777 records as the reason the guard exists, run

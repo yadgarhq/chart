@@ -521,7 +521,7 @@ setting a `platform.<name>.create`; the operators clause is not, because the val
 file it exists for sets none. Raising here rather than inside the guard is what
 makes both reachable from one `fail`, which is the accumulation rule this file
 opens with. The guard itself is unmoved and still decides which refusals are
-COLLECTED — `test_breaking_the_guard_makes_the_default_render_refuse` replaces it
+COLLECTED — `test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
 with `{{- if true -}}` and reddens the modules-only render.
 */}}
 {{- if $refusals -}}
