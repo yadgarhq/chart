@@ -1,12 +1,14 @@
 # THE VALUES FILE AN ORGANISATION COMMITS BESIDE `application.yaml`, in its OWN
 # GitOps repository. Copy it there and point the Application at it.
 #
-# COPYING IT AS IT STANDS TURNS THE PLATFORM LAYER ON, and that changed on
-# 2026-09-24. This file used to be `{}` and its header used to say that copying it
-# changed nothing. It is now the render this repository's suite calls the ADOPTER
-# VALUES: every `platform.*.create` toggle true, autoscaling on, a database in each
-# of the three `-db` modules. Read the block at the bottom before you copy it, and
-# delete what you do not want — every key below is a choice, not a requirement.
+# EVERY KEY BELOW BUT ONE RESTATES THE CHART'S OWN DEFAULT, and that changed with
+# ADR-0803 step B6. The chart's defaults are now the whole estate: every
+# `platform.*.create` toggle true, autoscaling on, a database in each of the three
+# `-db` modules. This file states each of them so you can see every choice, and
+# the suite holds its render equal to the defaults' (K1). The one key it adds is
+# `platform.edgeTLS.issuerRef` — the issuer of YOUR edge certificate, which the
+# defaults cannot know. Change a key to turn that part off; deleting a key keeps
+# the default, which is ON.
 #
 # ─── how a knob is addressed ─────────────────────────────────────────────────
 #
@@ -48,20 +50,22 @@
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
 #     --version 0.1.0 -f values.yaml | less
 #
-# ─── rendering this file OFFLINE needs three flags ───────────────────────────
+# ─── rendering this file OFFLINE needs four flags ────────────────────────────
 #
-# THE PLATFORM LAYER AND THE THREE DATABASES CARRY RENDER CHECKS, which refuse
-# rather than let an install fail half-way through with `no matches for kind`.
-# A check asks `.Capabilities.APIVersions.Has`, and helm populates that from a
-# LIVE CLUSTER only — never from a bare `helm template`. So a render of this file
-# with no cluster is refused by the first check it reaches, naming the operator you
-# would have to install. Measured 2026-09-24 on helm 3.18.4, dropping one flag at a
-# time: three of them are required and `keda.sh/v1alpha1` is not.
+# THE PLATFORM LAYER, THE MODULES' AUTOSCALING AND THE THREE DATABASES CARRY
+# RENDER CHECKS, which refuse rather than let an install fail half-way through
+# with `no matches for kind`. A check asks `.Capabilities.APIVersions.Has`, and
+# helm populates that from a LIVE CLUSTER only — never from a bare `helm
+# template`. So a render of this file with no cluster is refused by the first
+# check it reaches, naming the operator you would have to install. Measured
+# 2026-09-27 on helm 3.18.4 and 4.3.0, dropping one flag at a time: all four are
+# required. `chart/ci/api-versions.txt` declares the same four.
 #
 #   helm template yadgar chart -f example/values.yaml \
 #     --api-versions cert-manager.io/v1 \
 #     --api-versions gateway.envoyproxy.io/v1alpha1 \
-#     --api-versions k8s.mariadb.com/v1alpha1
+#     --api-versions k8s.mariadb.com/v1alpha1 \
+#     --api-versions keda.sh/v1alpha1
 #
 # Against a real cluster there is nothing to pass: Argo renders with the cluster's
 # own API versions, and so does `helm install`.
@@ -86,20 +90,22 @@
 # before anything else starts. It is a separate chart (`yadgarhq/platform`,
 # ADR-0752) and the parent declares it under `condition: platform.enabled`.
 #
-# WHAT YOU NEED FIRST, and the charts install none of it: cert-manager,
+# WHAT YOU NEED FIRST, and the charts install none of it by default: cert-manager,
 # mariadb-operator, KEDA, Envoy Gateway and Argo CD. Everything above those is
 # rendered from here.
 #
-# IF YOU RUN YOUR OWN PLATFORM LAYER, delete this whole block. The eight modules
-# install against it and the parent asks nothing of you — including, and this is
-# stated rather than buried, no refusal for an empty admin token. ADR-0777 records
-# that narrowing and the operator accepted it.
+# IF YOU RUN YOUR OWN PLATFORM LAYER, set `enabled` false AND every `create` below
+# false — deleting this block now keeps the defaults, which are on. The eight
+# modules then install against your layer and the parent asks nothing of you —
+# including, and this is stated rather than buried, no refusal for an empty admin
+# token. ADR-0777 records that narrowing and the operator accepted it. Clear
+# `gateway.adminBootstrap.tokenSecret` too unless you mint that Secret yourself.
 platform:
-  # WITHOUT THIS LINE EVERY `create` BELOW RENDERS NOTHING, and the parent refuses
+  # WITH THIS FALSE EVERY `create` BELOW RENDERS NOTHING, and the parent refuses
   # rather than letting you find that out after the sync. `platform` sits behind
-  # `condition: platform.enabled`: a file that sets a `create` true and leaves this
-  # alone reads as fully configured and renders NONE of it. That is the third
-  # refusal in `chart/templates/_validate.tpl`, and it names both keys.
+  # `condition: platform.enabled`: a file that sets a `create` true and this false
+  # reads as configured and renders NONE of it. That is the third refusal in
+  # `chart/templates/_validate.tpl`, and it names both keys.
   enabled: true
 
   # THE INTERNAL CERTIFICATE AUTHORITY: a self-signed Issuer, the CA Certificate it
@@ -112,12 +118,12 @@ platform:
   certificates:
     create: true
 
-  # THE EDGE LEAF, AND THE ONE THING YOU CANNOT COPY FROM HERE. It is issued by
-  # YOUR authority, not by the internal CA, and the chart carries no default for
-  # it: a guessed issuer renders a Certificate that never goes Ready, and you meet
-  # a pending object rather than a message naming the key you did not set. Both
-  # halves are required, because `kind` decides whether the name is looked up in
-  # this namespace or cluster-wide.
+  # THE EDGE LEAF, AND THE ONE THING YOU CANNOT COPY FROM HERE. It should be issued
+  # by YOUR authority. The chart's default leaves `issuerRef` empty, and `platform`
+  # then issues the edge leaf from the INTERNAL CA: it goes Ready, and no client
+  # outside the cluster trusts it. Both halves are required when you set it,
+  # because `kind` decides whether the name is looked up in this namespace or
+  # cluster-wide.
   #
   # `ClusterIssuer` AND `yadgar-edge-ca` ARE PLACEHOLDERS. Replace them with the
   # issuer your organisation actually runs before you sync this.
@@ -150,10 +156,10 @@ platform:
       # the parent refuses the render naming both keys.
       secretName: admin-bootstrap-token
 
-    # `iam`'S ENCRYPTION KEYS, A FOURTH `create` IN THE SAME JOB. Off by default
-    # in `platform` itself: an adopter installing against an EMPTY database has no
-    # existing key pair and nothing to transcribe, which is the case this toggle
-    # is for. Set it true here for exactly that install.
+    # `iam`'S ENCRYPTION KEYS, A FOURTH `create` IN THE SAME JOB. Off in `platform`
+    # itself and ON in this chart's defaults: an adopter installing against an EMPTY
+    # database has no existing key pair and nothing to transcribe, which is the
+    # case this toggle is for. Set it false if you bring an existing key pair.
     #
     # SAFE ONLY BECAUSE `iam` CAN REFUSE A WRONG KEY (ADR-0753). `iam` v0.8.43
     # stores a fingerprint over both keys and refuses to boot when the key set it
@@ -169,8 +175,8 @@ platform:
     # THE TWO PROBES NOTHING CAN INFER FOR YOU. A probe's default is tied to the
     # toggle that renders what it probes, and `platform` renders neither a
     # ScaledObject nor a MariaDB CR — those come from the module charts, which a
-    # subchart cannot read. So these two are FALSE unless you say otherwise, and
-    # you say otherwise here because `autoscaling.enabled` and `database.create`
+    # subchart cannot read. So these two are FALSE in `platform`, and this chart's
+    # defaults set them true because `autoscaling.enabled` and `database.create`
     # are true further down. `probes.certManager` is left UNSET on purpose: its tie
     # resolves it from the three `create` toggles above.
     probes:
@@ -182,7 +188,8 @@ platform:
 gateway:
   adminBootstrap:
     # THE SECRET THE GATEWAY MOUNTS, and the same name the bootstrap Job mints
-    # above. EMPTY IS THE CHART'S DEFAULT and empty means the administrative
+    # above. EMPTY IS THE GATEWAY CHART'S DEFAULT (this parent's default names it)
+    # and empty means the administrative
     # bootstrap route is disabled: the estate serves everything else and answers
     # 503 to the one request that creates the first administrator. With any
     # `platform.*.create` true the parent refuses an empty value outright.
@@ -201,8 +208,8 @@ task:
     enabled: true
 
 # THE THREE DATABASE MODULES. `database.create` renders a MariaDB CR for
-# mariadb-operator to reconcile; delete it in any module whose database you run
-# yourself, and drop `platform.preflight.probes.mariadb` with the last one.
+# mariadb-operator to reconcile; set it false in any module whose database you run
+# yourself, and set `platform.preflight.probes.mariadb` false with the last one.
 iam-db:
   autoscaling:
     enabled: true

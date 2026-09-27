@@ -28,7 +28,7 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.20.1
+    rev: v1.28.0
     hooks:
       - id: gitleaks
       - id: prettier
@@ -55,6 +55,11 @@ repos:
       # class is not running: actionlint silently disables that whole class when
       # the binary is absent, and "Passed, having checked nothing" is the defect
       # the guard closes rather than a state this check may report.
+      # `helm-lint` READS `chart/ci/api-versions.txt` from v1.28.0 on (ADR-0806)
+      # and passes each entry to `helm template` as `--api-versions`. The
+      # whole-estate defaults refuse a render without them, so this rev is the
+      # floor for this chart; v1.20.1's bare `helm template` refuses at `task`'s
+      # KEDA check.
       - id: helm-lint
       - id: actionlint
       - id: no-test-skips
@@ -74,8 +79,9 @@ repos:
   # installs PyYAML, which a bare CI interpreter does not carry — `Chart.yaml` and
   # `values.yaml` are read with it, and so is a rendered ConfigMap's own YAML body.
   #
-  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 32 objects
-  # of a default install, that the PACKAGED chart renders the same set as the
+  # THE SUITE CARRIES THE RENDER ASSERTIONS an adopter cares about: the 81 objects
+  # of a default install (K1), that it refuses offline without the four declared
+  # API versions (K2), that the PACKAGED chart renders the same set as the
   # directory, that an adopter's own value reaches a child's rendered object (goal
   # item 6), and that every CRD-bearing resource can be switched off (D80). Per
   # ADR-0725 the packaged-chart fixture resolves dependencies with
