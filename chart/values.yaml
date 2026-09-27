@@ -62,6 +62,32 @@
 # `create` below turns on an object that a child chart leaves off, and each is in
 # THIS FILE so the all-off pass can find it and turn it off again.
 #
+# ─── the estate's hostname, stated once (ADR-0808) ───────────────────────────
+#
+# `global.hostname` IS THE HOST YOUR EDGE ANSWERS ON, and it is the one key an
+# adopter sets for it. Helm hands `global` to every child, and three children
+# derive their own keys from it when those keys are left empty:
+#
+#   platform  gatewayListener.hostname, edgeTLS.commonName, edgeTLS.dnsNames
+#   gateway   gateway.hostname (the HTTPRoute)
+#   iam       enrolment.gateway, as `https://<hostname>` with NO PORT — the edge
+#             listener answers on 443. An edge on another port sets
+#             `iam.enrolment.gateway` itself.
+#
+# A CHILD'S OWN KEY, WHEN SET, STILL WINS over this one, so an existing values
+# file that names the five keys keeps working unchanged. EMPTY HERE, and empty
+# everywhere renders `gateway.yadgar.internal` in all five places — the chart's
+# behaviour before ADR-0808. `iam.enrolment.enabled: false` is how you turn
+# IssueEnrolment off; an empty `iam.enrolment.gateway` now means "derive", not
+# "off".
+#
+# THIS IS THE ONE KEY HERE THAT RESTATES NO CHILD'S DEFAULT. No child declares
+# `global.hostname`; each reads it with a fallback. It is stated so that
+# `helm show values` names it, and so the example's recognition gate can tell
+# `global.hostname` from a typo such as `global.hostnme`.
+global:
+  hostname: ""
+
 # ─── the whole-estate defaults ───────────────────────────────────────────────
 
 gateway:

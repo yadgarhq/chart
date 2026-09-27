@@ -4194,12 +4194,15 @@ EXAMPLE_PIN_FLOOR = (0, 3, 1)
 
 # WHAT THE PINNED PARENT RENDERS WITH THE EXAMPLE'S `valuesObject`, a LITERAL like
 # `ADOPTER_OBJECTS` and K1 at that version. Measured 2026-09-27 on helm 3.18.4 and
-# 4.3.0 against the published 0.3.1: 81 objects.
+# 4.3.0 against the published 0.3.5: 81 objects.
 EXAMPLE_PIN_OBJECTS = 81
 
-# THE FIVE HOSTNAME KEYS (INSTALL.md, "Set the five hostname keys together"). The
-# chart ships `gateway.yadgar.internal`, which resolves for nobody, so an adopter
-# must name all five, and they must agree. `iam.enrolment.gateway` is a URL.
+# THE ESTATE'S HOSTNAME IS ONE KEY (ADR-0808). The example states `global.hostname`
+# and nothing else for it; platform, gateway and iam derive the five keys below
+# from it when they are left empty. The example must NOT state any of the five:
+# a per-chart key wins over the global, so stating one is a second source that
+# can disagree with the first.
+HOSTNAME_KEY = "global.hostname"
 HOSTNAME_KEYS = (
     "platform.gatewayListener.hostname",
     "platform.edgeTLS.commonName",
@@ -4207,6 +4210,12 @@ HOSTNAME_KEYS = (
     "gateway.gateway.hostname",
     "iam.enrolment.gateway",
 )
+BUILT_IN_HOSTNAME = "gateway.yadgar.internal"
+
+# THE LAST PARENT BEFORE ADR-0808's THREE PINS (platform 0.1.18, gateway 0.9.53,
+# iam 0.8.45 arrived in 0.3.3, 0.3.4 and 0.3.5). Its children do not read
+# `global`, so the example's `valuesObject` renders the built-in hostname there.
+A_PRE_0808_PIN = "0.3.2"
 
 # THE PIN THE RED CASE SUBSTITUTES: a pre-B6 parent, where `platform.enabled`
 # defaulted false. Measured: 32 objects there with
@@ -4256,6 +4265,16 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             return yaml.safe_load(archive.extractfile(member).read()) or {}
 
         defaults = values_of("yadgar/values.yaml")
+        # `global` IS DECLARED BY THIS REPOSITORY'S `chart/values.yaml`, not by any
+        # child: the children READ `global.hostname` with a fallback and declare
+        # nothing. A pinned parent older than that declaration (0.3.5 predates it by
+        # one release, the release this repository's own change cuts) would name
+        # `global.hostname` unrecognised although every child in it reads the key,
+        # so the declaration is taken from the source. A typo under `global` is
+        # still named, because only the declared leaves are recognised.
+        declared_global = (yaml.safe_load((CHART / "values.yaml").read_text()) or {}).get("global")
+        if declared_global:
+            defaults = merged({"global": declared_global}, defaults)
         for name in {m.split("/")[2] for m in archive.getnames() if m.count("/") >= 3 and m.startswith("yadgar/charts/")}:
             member = f"yadgar/charts/{name}/values.yaml"
             if member in archive.getnames():
@@ -4305,22 +4324,111 @@ def test_the_example_installs_the_whole_estate_at_its_pin(pinned: Path, tmp_path
     )
 
 
-def test_the_example_names_the_five_hostname_keys_and_they_agree(pinned: Path, tmp_path: Path) -> None:
-    """The values reach the objects: one hostname, in all five places, and in the render."""
-    values_object = example_source()["helm"]["valuesObject"]
-    stated = {path: value_at(values_object, path) for path in HOSTNAME_KEYS}
-    missing = [path for path, value in stated.items() if value is _ABSENT]
-    assert missing == [], f"the example leaves these at `gateway.yadgar.internal`: {missing}"
-    host = stated["gateway.gateway.hostname"]
-    assert stated["platform.gatewayListener.hostname"] == host
-    assert stated["platform.edgeTLS.commonName"] == host
-    assert stated["platform.edgeTLS.dnsNames"] == [host]
-    assert stated["iam.enrolment.gateway"] == f"https://{host}", stated["iam.enrolment.gateway"]
+def hostname_sites(documents: list[dict]) -> dict[str, object]:
+    """The five places the rendered estate carries its public hostname. PURE."""
 
-    rendered = example_render(pinned, values_object, tmp_path).stdout
-    assert "gateway.yadgar.internal" not in rendered, (
-        "the shipped hostname survives in the render; a sixth key carries it"
+    def only(kind: str, name: str | None = None) -> dict:
+        found = [
+            d for d in documents
+            if d.get("kind") == kind and (name is None or d["metadata"]["name"] == name)
+        ]
+        assert len(found) == 1, (kind, name, len(found))
+        return found[0]
+
+    (listener,) = only("Gateway")["spec"]["listeners"]
+    edge = only("Certificate", EDGE_CERTIFICATE)["spec"]
+    (route_host,) = only("HTTPRoute")["spec"]["hostnames"]
+    enrolment = [
+        variable["value"]
+        for container in only("Deployment", "iam")["spec"]["template"]["spec"]["containers"]
+        for variable in container.get("env", [])
+        if variable["name"] == "ENROLMENT_GATEWAY"
+    ]
+    assert len(enrolment) == 1, enrolment
+    return {
+        "platform.gatewayListener.hostname": listener["hostname"],
+        "platform.edgeTLS.commonName": edge["commonName"],
+        "platform.edgeTLS.dnsNames": edge["dnsNames"],
+        "gateway.gateway.hostname": route_host,
+        "iam.enrolment.gateway": enrolment[0],
+    }
+
+
+def derived_from(host: str) -> dict[str, object]:
+    return {
+        "platform.gatewayListener.hostname": host,
+        "platform.edgeTLS.commonName": host,
+        "platform.edgeTLS.dnsNames": [host],
+        "gateway.gateway.hostname": host,
+        # No port: the edge listener answers on 443.
+        "iam.enrolment.gateway": f"https://{host}",
+    }
+
+
+def five_key_form(values_object: dict, host: str) -> dict:
+    """The same `valuesObject` with the hostname written into the five keys instead. PURE."""
+    five = {key: value for key, value in values_object.items() if key != "global"}
+    return merged(
+        five,
+        {
+            "platform": {
+                "gatewayListener": {"hostname": host},
+                "edgeTLS": {"commonName": host, "dnsNames": [host]},
+            },
+            "gateway": {"gateway": {"hostname": host}},
+            "iam": {"enrolment": {"gateway": f"https://{host}"}},
+        },
     )
+
+
+def test_the_example_states_the_hostname_once() -> None:
+    values_object = example_source()["helm"]["valuesObject"]
+    host = value_at(values_object, HOSTNAME_KEY)
+    assert isinstance(host, str) and host, f"the example does not set `{HOSTNAME_KEY}`"
+    stated = [path for path in HOSTNAME_KEYS if value_at(values_object, path) is not _ABSENT]
+    assert stated == [], (
+        f"the example also states {stated}; each wins over `{HOSTNAME_KEY}` and is a "
+        f"second source for the same hostname (ADR-0808)"
+    )
+
+
+def test_every_hostname_site_derives_from_global_hostname(pinned: Path, tmp_path: Path) -> None:
+    """The one value reaches all five sites, and the built-in hostname is gone."""
+    values_object = example_source()["helm"]["valuesObject"]
+    host = value_at(values_object, HOSTNAME_KEY)
+    result = example_render(pinned, values_object, tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert hostname_sites(documents) == derived_from(host)
+    assert BUILT_IN_HOSTNAME not in result.stdout, (
+        "the built-in hostname survives in the render; a sixth site carries it"
+    )
+
+
+def test_the_global_form_renders_byte_equal_to_the_five_key_form(pinned: Path, tmp_path: Path) -> None:
+    """`global.hostname` is exactly the five keys, written once."""
+    values_object = example_source()["helm"]["valuesObject"]
+    host = value_at(values_object, HOSTNAME_KEY)
+    (tmp_path / "one").mkdir()
+    (tmp_path / "five").mkdir()
+    one = example_render(pinned, values_object, tmp_path / "one")
+    five = example_render(pinned, five_key_form(values_object, host), tmp_path / "five")
+    assert one.returncode == 0 and five.returncode == 0, (one.stderr, five.stderr)
+    assert one.stdout == five.stdout
+
+
+def test_a_pre_0808_pin_reddens_the_derivation(tmp_path: Path) -> None:
+    """THE RED CASE: at 0.3.2 no child reads `global`, so every site keeps the built-in."""
+    values_object = example_source()["helm"]["valuesObject"]
+    host = value_at(values_object, HOSTNAME_KEY)
+    tarball = pulled(A_PRE_0808_PIN, tmp_path / "old")
+    (tmp_path / "render").mkdir()
+    result = example_render(tarball, values_object, tmp_path / "render")
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    sites = hostname_sites(documents)
+    assert all(sites[key] != derived_from(host)[key] for key in HOSTNAME_KEYS), sites
+    assert BUILT_IN_HOSTNAME in result.stdout
 
 
 def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
@@ -4329,14 +4437,14 @@ def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
 
 def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> None:
     values_object = yaml.safe_load(yaml.safe_dump(example_source()["helm"]["valuesObject"]))
-    gateway = (values_object.get("gateway") or {}).get("gateway") or {}
-    assert "hostname" in gateway, (
-        f"the example's valuesObject no longer states gateway.gateway.hostname, so this red "
+    declared = values_object.get("global") or {}
+    assert "hostname" in declared, (
+        f"the example's valuesObject no longer states global.hostname, so this red "
         f"case has nothing to misspell; move it to another key: {values_object}"
     )
-    gateway["hostnme"] = gateway.pop("hostname")
+    declared["hostnme"] = declared.pop("hostname")
     failures = unrecognised_keys(values_object, pinned)
-    assert len(failures) == 1 and "`gateway.gateway.hostnme`" in failures[0], failures
+    assert len(failures) == 1 and "`global.hostnme`" in failures[0], failures
 
 
 def test_a_pre_b6_pin_reddens_the_count_and_names_the_version(tmp_path: Path) -> None:
