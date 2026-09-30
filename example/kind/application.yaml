@@ -28,18 +28,16 @@
 # the `ca.crt` of Secret `gateway-tls` in namespace `yadgar`; an enrolment token
 # also carries that CA.
 #
-# TWO THINGS STAY RED ON THIS CLUSTER AT 0.3.8, measured, and neither is a fault
-# of this file:
+# HISTORY, measured on that run at 0.3.8, and fixed since:
 #
-#   - PROMETHEUS. The modules' ScaledObjects query
-#     `prometheus-server.observability`, and neither Application installs it.
-#     Without it every ScaledObject reports `TriggerError` and this Application
-#     stays `Degraded`.
-#   - THE PostSync `envoy-gateway-probe` Job fails at its 300 s bound. Its probe
-#     Gateway reuses EnvoyProxy `edge`, so its Service asks for node port 30443
-#     too, which the real edge Service already holds. The estate itself is
-#     `Healthy`; the sync operation reports `Failed`. Setting
-#     `platform.preflight.probes.envoyGateway: false` removes that probe.
+#   - PROMETHEUS was missing: the ScaledObjects query
+#     `prometheus-server.observability` and neither Application installed it, so
+#     every ScaledObject reported `TriggerError` and this Application stayed
+#     `Degraded`. `operators-application.yaml` installs it from platform 0.1.21,
+#     and the preflight now probes it before anything installs (ADR-0820).
+#   - THE PostSync `envoy-gateway-probe` failed at its 300 s bound: its probe
+#     Gateway reused EnvoyProxy `edge` and asked for node port 30443 too. From
+#     platform 0.1.20 the probe runs on its own EnvoyProxy.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -51,7 +49,7 @@ spec:
     repoURL: ghcr.io/yadgarhq/charts
     chart: yadgar
     # THE SAME PIN AS `../application.yaml`. The suite holds the two equal.
-    targetRevision: 0.3.8
+    targetRevision: 0.3.10
     helm:
       valuesObject:
         global:

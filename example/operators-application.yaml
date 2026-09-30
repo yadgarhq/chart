@@ -1,12 +1,14 @@
-# THE FOUR OPERATORS `application.yaml` NEEDS, AS AN APPLICATION OF THEIR OWN.
+# THE OPERATORS `application.yaml` NEEDS, AS AN APPLICATION OF THEIR OWN.
 # Sync this one first. `application.yaml` beside it installs no operator — its
 # parent refuses `platform.operators.*` outright (ADR-0787) — and its render checks
 # refuse a cluster that lacks cert-manager, Envoy Gateway, mariadb-operator or KEDA.
 #
 # WHAT IT INSTALLS: the `platform` chart with its `operators` half on and nothing
-# else, measured 2026-09-30 on a kind VM against platform 0.1.19 — cert-manager,
-# Envoy Gateway, mariadb-operator and KEDA with their CRDs, 151 objects, 45 CRDs,
-# Synced/Healthy in 2m15s. The chart's other toggles (`internalCA`,
+# else — cert-manager, Envoy Gateway, mariadb-operator and KEDA with their CRDs,
+# and, from platform 0.1.21 on, a Prometheus server as Service `prometheus-server`
+# in namespace `observability`, the address every module's ScaledObjects query
+# (ADR-0820). History: measured 2026-09-30 on a kind VM against platform 0.1.19
+# (before Prometheus joined), 151 objects, 45 CRDs, Synced/Healthy in 2m15s. The chart's other toggles (`internalCA`,
 # `gatewayListener`, `valkey`, ...) keep `platform`'s own defaults, which are all
 # false: the estate's half of `platform` comes in through `application.yaml`.
 #
@@ -40,7 +42,7 @@ spec:
     chart: platform
     # BARE SEMVER. The `platform` version inside the parent `application.yaml`
     # pins, read from that parent's `charts/platform/Chart.yaml`.
-    targetRevision: 0.1.19
+    targetRevision: 0.1.21
     helm:
       valuesObject:
         operators:

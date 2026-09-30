@@ -357,16 +357,25 @@ LADDER = {
 # denominator is read off the RENDER by `unpaired_probes`, because a count of the
 # pairs this file iterates agrees with this file whatever the estate does. This
 # constant is what reddens if somebody adds a pair and forgets the number.
-AGREEMENT_PAIRS_AT_R5 = 3
+#
+# FOUR SINCE ADR-0820. `platform` 0.1.21 added a `prometheus` arm to the same
+# pre-install `preflight` Job, off unless stated like `keda`, and this parent
+# states it true beside the modules' `autoscaling.enabled`. It pairs with the
+# same toggle `keda` does: a ScaledObject needs both KEDA and the Prometheus it
+# queries.
+AGREEMENT_PAIRS_AT_R5 = 4
 
 # The operator each probe names in the rendered script, and the kind whose
 # presence in the same render is the other half of the pair.
-PROBE_OPERATOR = {"certManager": "cert-manager", "keda": "keda", "mariadb": "mariadb-operator"}
-PROBE_KIND = {"certManager": "Certificate", "keda": "ScaledObject", "mariadb": "MariaDB"}
+PROBE_OPERATOR = {
+    "certManager": "cert-manager", "keda": "keda", "mariadb": "mariadb-operator", "prometheus": "prometheus",
+}
+PROBE_KIND = {"certManager": "Certificate", "keda": "ScaledObject", "mariadb": "MariaDB", "prometheus": "ScaledObject"}
 PROBE_TOGGLE = {
     "certManager": "platform.internalCA.create, platform.certificates.create or platform.edgeTLS.create",
     "keda": "autoscaling.enabled in the module charts",
     "mariadb": "database.create in the three `-db` charts",
+    "prometheus": "autoscaling.enabled in the module charts",
 }
 
 PROBE_LIST = re.compile(r'^PROBES="(?P<probes>[^"]*)"$', re.MULTILINE)
@@ -824,6 +833,15 @@ NESTED_SUBCHART_MEMBERS = [
     "yadgar/charts/platform/charts/keda/Chart.yaml",
     "yadgar/charts/platform/charts/mariadb-operator/Chart.yaml",
     "yadgar/charts/platform/charts/mariadb-operator/charts/mariadb-operator-crds/Chart.yaml",
+    # PROMETHEUS JOINED AT `platform` 0.1.21 (ADR-0820), behind
+    # `operators.prometheus.create,operators.create` like the other operators. The
+    # prometheus chart vendors its own four subcharts; `platform` turns all four
+    # off, and they are packaged all the same.
+    "yadgar/charts/platform/charts/prometheus/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/alertmanager/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/kube-state-metrics/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/prometheus-node-exporter/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/prometheus-pushgateway/Chart.yaml",
 ]
 
 
@@ -2091,7 +2109,72 @@ PAIR_OFF_END = {
     ),
     "mariadb": "platform:\n  preflight:\n    probes:\n      mariadb: false\n"
     + "".join(f"{module}:\n  database:\n    create: false\n" for module in DATABASE_MODULES),
+    "prometheus": "platform:\n  preflight:\n    probes:\n      prometheus: false\n"
+    + "".join(
+        f"{module}:\n  autoscaling:\n    enabled: false\n"
+        for module in AUTOSCALING_MODULES
+    ),
 }
+
+
+# ── the Prometheus the preflight probes is the one every ScaledObject queries ──
+#
+# ADR-0780's shape: two charts each carry one half of an agreement no single chart
+# can see. `platform`'s preflight probes `preflight.prometheus.address`, and each
+# of the seven module charts points its ScaledObject at its own
+# `autoscaling.prometheusAddress`. Both default to the same URL today; an adopter
+# who moves one and not the other gets a probe that passes against a server no
+# ScaledObject asks. Read off the RENDER, the script and the triggers.
+
+PROMETHEUS_ADDRESS_LINE = re.compile(r"^PROMETHEUS_ADDRESS='(?P<address>[^']*)'$", re.MULTILINE)
+
+
+def prometheus_address_failures(documents: list[dict]) -> list[str]:
+    """The preflight's Prometheus address and every ScaledObject's must be one. PURE."""
+    jobs = [d for d in documents if d.get("kind") == "Job" and d["metadata"]["name"] == "preflight"]
+    if len(jobs) != 1:
+        return [f"{len(jobs)} `preflight` Jobs render"]
+    script = "\n".join(jobs[0]["spec"]["template"]["spec"]["containers"][0]["args"])
+    found = PROMETHEUS_ADDRESS_LINE.search(script)
+    if found is None:
+        return ["the preflight script carries no PROMETHEUS_ADDRESS, so the prometheus arm is off"]
+    probed = found.group("address")
+    queried = {
+        d["metadata"]["name"]: [t["metadata"].get("serverAddress") for t in d["spec"]["triggers"] if t.get("type") == "prometheus"]
+        for d in documents
+        if d.get("kind") == "ScaledObject"
+    }
+    failures = []
+    if sorted(queried) != sorted(AUTOSCALING_MODULES):
+        failures.append(f"ScaledObjects render for {sorted(queried)}, not the seven modules")
+    failures += [
+        f"`{name}` queries {addresses} and the preflight probes {probed}"
+        for name, addresses in sorted(queried.items())
+        if addresses != [probed]
+    ]
+    return failures
+
+
+def test_the_preflight_probes_the_prometheus_every_scaled_object_queries() -> None:
+    assert prometheus_address_failures(adopter_render()) == []
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        ("gateway:\n  autoscaling:\n    prometheusAddress: http://prometheus.elsewhere:9090\n", "`gateway` queries"),
+        (
+            "platform:\n  preflight:\n    prometheus:\n      address: http://prometheus.elsewhere:9090\n",
+            "the preflight probes http://prometheus.elsewhere:9090",
+        ),
+        ("platform:\n  preflight:\n    probes:\n      prometheus: false\n", "the prometheus arm is off"),
+    ],
+    ids=["one-module-moved", "the-probe-moved", "the-arm-off"],
+)
+def test_a_prometheus_address_that_disagrees_reddens_the_address_gate(tmp_path: Path, body: str, named: str) -> None:
+    documents = adopter_render("-f", str(overlay(tmp_path / "prometheus.yaml", body)))
+    failures = prometheus_address_failures(documents)
+    assert failures and all(named in failure for failure in failures), failures
 
 
 def pair_failures(probe: str, declared: list[str], objects: int, expected: bool) -> list[str]:
@@ -4631,10 +4714,21 @@ OPERATORS_SYNC_OPTIONS = {"CreateNamespace=true", "ServerSideApply=true"}
 # and 53 more (Argo CD) with `operators.create` alone. Every object comes from one
 # of the four operator subcharts or `platform`'s vendored CRDs, each of the four
 # contributes, and the CRDs serve every API version the parent declares it needs.
-OPERATOR_SOURCES = {"cert-manager", "gateway-helm", "keda", "mariadb-operator"}
-VENDORED_CRDS_SOURCE = "templates/vendored-crds"
+# READ OFF `platform`'s `Chart.yaml` AT THE PIN: every dependency whose
+# `condition` names `operators.create`, Argo CD excepted. Not a literal, so the
+# operator that arrives with a `platform` release is expected the moment it is
+# pinned. At 0.1.21: cert-manager, gateway-helm, keda, mariadb-operator and
+# prometheus.
 CRDS_DIRECTORY = "crds/"
+# WHAT `platform`'s OWN TEMPLATES MAY ADD TO THE OPERATORS: the CRDs it vendors, and
+# a Namespace an operator lands in (`observability`, for Prometheus — Argo creates
+# only the Application's own destination namespace).
+PLATFORM_OWN_KINDS = {"CustomResourceDefinition", "Namespace"}
 ARGO_CD_SOURCE = "argo-cd"
+# WHERE THE MODULES' ScaledObjects LOOK FOR PROMETHEUS by default, and so where the
+# operators Application must put it: Service `prometheus-server` in
+# `observability`. Asserted against the module charts' own default below.
+PROMETHEUS_SERVICE = ("prometheus-server", "observability")
 ARGO_CD_PART_OF = "argocd"
 
 # THE ENTRY `application.yaml` EXPLAINS, and every parent example must carry it
@@ -5006,7 +5100,7 @@ def operators_sources(chart: Path, values_object: dict, destination: Path) -> li
     assert result.returncode == 0, result.stderr
     found = []
     for chunk in result.stdout.split("\n---\n"):
-        source = re.search(r"^# Source: platform/(charts/(?P<chart>[^/]+)|(?P<template>templates/[^/]+))", chunk, re.M)
+        source = re.search(r"^# Source: platform/(charts/(?P<chart>[^/]+)|(?P<template>templates/[^/\n]+))", chunk, re.M)
         for document in yaml.safe_load_all(chunk):
             if isinstance(document, dict) and document.get("apiVersion"):
                 # A CRD from a chart's `crds/` directory carries no `# Source:` line.
@@ -5019,14 +5113,34 @@ def operators_sources(chart: Path, values_object: dict, destination: Path) -> li
     return found
 
 
-def operators_failures(found: list[tuple[str, dict]]) -> list[str]:
+def operator_charts(chart: Path) -> set[str]:
+    """The operator subcharts `platform` declares at this version, Argo CD excepted."""
+    import tarfile
+
+    with tarfile.open(chart, "r:gz") as archive:
+        metadata = yaml.safe_load(archive.extractfile("platform/Chart.yaml").read())
+    return {
+        dependency["name"]
+        for dependency in metadata.get("dependencies") or []
+        if "operators.create" in str(dependency.get("condition") or "").split(",")
+        and dependency["name"] != ARGO_CD_SOURCE
+    }
+
+
+def operators_failures(found: list[tuple[str, dict]], operators: set[str]) -> list[str]:
     """What the operators render must be, at any `platform` pin. PURE."""
     failures = []
     sources = {source for source, _ in found}
-    stray = sorted(sources - OPERATOR_SOURCES - {VENDORED_CRDS_SOURCE, CRDS_DIRECTORY})
+    stray = sorted(
+        {
+            source for source, d in found
+            if source not in operators | {CRDS_DIRECTORY}
+            and not (source.startswith("templates/") and d["kind"] in PLATFORM_OWN_KINDS)
+        }
+    )
     if stray:
-        failures.append(f"objects come from outside the four operators: {stray}")
-    absent = sorted(OPERATOR_SOURCES - sources)
+        failures.append(f"objects come from outside the operators: {stray}")
+    absent = sorted(operators - sources)
     if absent:
         failures.append(f"no object comes from {absent}")
     served = {
@@ -5056,27 +5170,56 @@ def argo_cd_objects(documents: list[dict]) -> list[str]:
     ]
 
 
-def test_the_operators_example_installs_the_four_operators_and_no_argo_cd(
+def test_the_operators_example_installs_the_operators_and_no_argo_cd(
     operators_chart: Path, tmp_path: Path
 ) -> None:
     found = operators_sources(
         operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
     )
     print(f"\noperators: {len(found)} objects, {kinds([d for _, d in found])['CustomResourceDefinition']} CRDs")
-    assert operators_failures(found) == []
+    assert operators_failures(found, operator_charts(operators_chart)) == []
 
 
 def test_operators_create_alone_installs_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
     """THE RED CASE for the Argo CD half: without `argoCd.create: false`, Argo CD comes too."""
-    failures = operators_failures(operators_sources(operators_chart, {"operators": {"create": True}}, tmp_path))
+    failures = operators_failures(
+        operators_sources(operators_chart, {"operators": {"create": True}}, tmp_path), operator_charts(operators_chart)
+    )
     assert len(failures) == 2, failures
     assert f"'{ARGO_CD_SOURCE}'" in failures[0] and "Argo CD objects render" in failures[1], failures
+
+
+def test_the_operators_example_installs_prometheus_where_the_modules_query_it(
+    operators_chart: Path, pinned: Path, tmp_path: Path
+) -> None:
+    """The Service the modules' default address names exists in the operators render."""
+    import tarfile
+
+    found = operators_sources(
+        operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
+    )
+    services = [(d["metadata"]["name"], d["metadata"].get("namespace")) for _, d in found if d["kind"] == "Service"]
+    assert PROMETHEUS_SERVICE in services, services
+    name, namespace = PROMETHEUS_SERVICE
+    with tarfile.open(pinned, "r:gz") as archive:
+        for module in AUTOSCALING_MODULES:
+            values = yaml.safe_load(archive.extractfile(f"yadgar/charts/{module}/values.yaml").read())
+            assert values["autoscaling"]["prometheusAddress"] == f"http://{name}.{namespace}.svc.cluster.local", module
+
+
+def test_prometheus_off_leaves_the_modules_nothing_to_query(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the Service: `operators.prometheus.create: false` removes it."""
+    values_object = merged({"operators": {"prometheus": {"create": False}}}, OPERATORS_VALUES)
+    found = operators_sources(operators_chart, values_object, tmp_path)
+    services = [(d["metadata"]["name"], d["metadata"].get("namespace")) for _, d in found if d["kind"] == "Service"]
+    assert PROMETHEUS_SERVICE not in services
+    assert any("['prometheus']" in f for f in operators_failures(found, operator_charts(operators_chart)))
 
 
 def test_an_operator_left_out_reddens_the_operators_gate(operators_chart: Path, tmp_path: Path) -> None:
     """THE RED CASE for the other half: without KEDA, its source and its API version are missing."""
     values_object = merged({"operators": {"keda": {"create": False}}}, OPERATORS_VALUES)
-    failures = operators_failures(operators_sources(operators_chart, values_object, tmp_path))
+    failures = operators_failures(operators_sources(operators_chart, values_object, tmp_path), operator_charts(operators_chart))
     assert any("['keda']" in failure for failure in failures), failures
 
 
@@ -5211,6 +5354,15 @@ def test_the_kind_example_renders_a_node_port_edge_and_the_enrolment_port(pinned
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     assert kind_edge_failures(documents, kind_values()) == []
     assert identities(documents) == identities(render(str(pinned), *API_VERSIONS))
+
+
+def test_the_kind_example_on_heads_chart_probes_prometheus(packaged: Path, tmp_path: Path) -> None:
+    """HEAD's defaults, which the next tag publishes, turn the preflight's prometheus arm on."""
+    result = example_render(packaged, kind_values(), tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert "prometheus" in probes_declared(documents)
+    assert prometheus_address_failures(documents) == []
 
 
 def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_path: Path) -> None:

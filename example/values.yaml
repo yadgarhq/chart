@@ -183,16 +183,19 @@ platform:
       create: true
 
   preflight:
-    # THE TWO PROBES NOTHING CAN INFER FOR YOU. A probe's default is tied to the
+    # THE THREE PROBES NOTHING CAN INFER FOR YOU. A probe's default is tied to the
     # toggle that renders what it probes, and `platform` renders neither a
     # ScaledObject nor a MariaDB CR — those come from the module charts, which a
-    # subchart cannot read. So these two are FALSE in `platform`, and this chart's
-    # defaults set them true because `autoscaling.enabled` and `database.create`
-    # are true further down. `probes.certManager` is left UNSET on purpose: its tie
+    # subchart cannot read. So these three are FALSE in `platform`, and this
+    # chart's defaults set them true because `autoscaling.enabled` and
+    # `database.create` are true further down. `prometheus` checks the server the
+    # ScaledObjects query (`platform.preflight.prometheus.address`); if you point
+    # the modules' `autoscaling.prometheusAddress` elsewhere, point it there too. `probes.certManager` is left UNSET on purpose: its tie
     # resolves it from the three `create` toggles above.
     probes:
       keda: true
       mariadb: true
+      prometheus: true
 
 # ═══ THE MODULES ══════════════════════════════════════════════════════════════
 
