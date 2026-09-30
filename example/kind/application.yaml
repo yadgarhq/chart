@@ -79,13 +79,17 @@ spec:
   syncPolicy:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true]
-    # A FINITE RETRY THAT OUTLASTS OPERATOR AND DATABASE START-UP. Measured: with
-    # Argo's default of 5 attempts the budget ran out while the Application was
-    # still `Degraded`, and a hand-started sync was the only way on. Never `-1`.
+    # A RETRY WINDOW THAT OUTLASTS OPERATOR AND DATABASE START-UP. Measured:
+    # Argo's default window ran out while the Application was still `Degraded`,
+    # and a hand-started sync was the only way on. The waits are
+    # 30, 60, 120, 240, 300 and 300 s: 17.5 minutes in all (Argo waits `duration *
+    # factor^n` before retry n, capped at `maxDuration`). Longer is worse, not
+    # safer: while an operation is retrying, Argo syncs no new revision, so a fix
+    # pushed during the window waits for it to end. Never `-1`.
     retry:
-      limit: 10
+      limit: 6
       backoff:
-        duration: 30s
+        duration: 15s
         factor: 2
         maxDuration: 5m
   ignoreDifferences:

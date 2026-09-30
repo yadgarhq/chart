@@ -39,7 +39,7 @@ spec:
     repoURL: ghcr.io/yadgarhq/charts
     chart: platform
     # BARE SEMVER. The `platform` version inside the parent `application.yaml`
-    # pins (0.3.8 carries 0.1.19).
+    # pins, read from that parent's `charts/platform/Chart.yaml`.
     targetRevision: 0.1.19
     helm:
       valuesObject:
@@ -59,13 +59,15 @@ spec:
     # `ServerSideApply=true`: four of these CRDs exceed the 256 KiB annotation
     # a client-side apply writes, and the apply is refused.
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
-    # A FINITE RETRY THAT OUTLASTS OPERATOR START-UP. KEDA's pods restart while its
-    # webhook bootstraps, and Argo's default budget is 5 attempts. Never `-1`: an
-    # Application that can never go Healthy then retries forever and says so
-    # nowhere.
+    # A RETRY WINDOW THAT OUTLASTS OPERATOR START-UP. KEDA's pods restart while its
+    # webhook bootstraps, and Argo's default window is about 5 minutes. The waits are
+    # 30, 60, 120, 240, 300 and 300 s: 17.5 minutes in all (Argo waits `duration *
+    # factor^n` before retry n, capped at `maxDuration`). Longer is worse, not
+    # safer: while an operation is retrying, Argo syncs no new revision, so a fix
+    # pushed during the window waits for it to end. Never `-1`.
     retry:
-      limit: 10
+      limit: 6
       backoff:
-        duration: 30s
+        duration: 15s
         factor: 2
         maxDuration: 5m

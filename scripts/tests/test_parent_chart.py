@@ -4422,11 +4422,16 @@ def test_the_global_form_renders_byte_equal_to_the_five_key_form(pinned: Path, t
     assert one.stdout == five.stdout
 
 
-def test_a_pre_0808_pin_reddens_the_derivation(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def pre_0808(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return pulled(A_PRE_0808_PIN, tmp_path_factory.mktemp("pre-0808"))
+
+
+def test_a_pre_0808_pin_reddens_the_derivation(pre_0808: Path, tmp_path: Path) -> None:
     """THE RED CASE: at 0.3.2 no child reads `global`, so every site keeps the built-in."""
     values_object = example_source()["helm"]["valuesObject"]
     host = value_at(values_object, HOSTNAME_KEY)
-    tarball = pulled(A_PRE_0808_PIN, tmp_path / "old")
+    tarball = pre_0808
     (tmp_path / "render").mkdir()
     result = example_render(tarball, values_object, tmp_path / "render")
     assert result.returncode == 0, result.stderr
@@ -4474,14 +4479,20 @@ OPERATORS_APPLICATION = REPO / "example" / "operators-application.yaml"
 KIND_APPLICATION = REPO / "example" / "kind" / "application.yaml"
 KIND_CONFIG = REPO / "example" / "kind" / "kind-config.yaml"
 EXAMPLE_APPLICATIONS = (EXAMPLE_APPLICATION, OPERATORS_APPLICATION, KIND_APPLICATION)
-PARENT_EXAMPLES = (EXAMPLE_APPLICATION, KIND_APPLICATION)
 PUBLISHED_PLATFORM = "oci://ghcr.io/yadgarhq/charts/platform"
+ARGO_KINDS = {"Application", "ApplicationSet"}
 
-# THE SMALLEST RETRY BUDGET AN EXAMPLE MAY CARRY. Argo's default is 5, and 5 ran
-# out on the VM. `-1` (retry forever) is below it too: an Application that can
-# never go Healthy then retries without end and reports nothing.
-MINIMUM_RETRY_LIMIT = 10
+# THE RETRY WINDOW EVERY EXAMPLE MUST FALL INSIDE: the sum of the waits Argo takes
+# before each retry. Below 5 minutes, operators and databases are still starting
+# when the budget runs out; the VM exhausted Argo's default (5 retries, 5s x2,
+# max 3m: 310 s) that way. Above 20 minutes, the Application is locked in its
+# retry loop for longer than anybody waits: a new revision cannot sync while an
+# operation is retrying, so a fix pushed during the window waits for it to end.
+# `-1` (retry forever) never ends at all.
+RETRY_WINDOW_SECONDS = (5 * 60, 20 * 60)
 RETRY_BACKOFF_KEYS = ("duration", "factor", "maxDuration")
+GO_DURATION = re.compile(r"(\d+(?:\.\d+)?)(h|m|s)")
+GO_UNIT_SECONDS = {"h": 3600, "m": 60, "s": 1}
 
 OPERATORS_NAMESPACE = "yadgar-operators"
 OPERATORS_VALUES = {"operators": {"create": True, "argoCd": {"create": False}}}
@@ -4493,6 +4504,15 @@ OPERATORS_CRDS = 45
 # WHAT `operators.create` ALONE ADDS: Argo CD, every object labelled part-of argocd.
 ARGO_CD_OBJECTS = 53
 ARGO_CD_PART_OF = "argocd"
+
+# THE ENTRY `application.yaml` EXPLAINS, and every parent example must carry it
+# unchanged: the chart's defaults create three MariaDB CRs, and without both
+# pointers Argo and mariadb-operator revert each other forever.
+MARIADB_IGNORE_DIFFERENCES = {
+    "group": "k8s.mariadb.com",
+    "kind": "MariaDB",
+    "jsonPointers": ["/spec/rootPasswordSecretKeyRef/generate", "/spec/passwordSecretKeyRef/generate"],
+}
 
 KIND_NODE_IMAGE = (
     "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
@@ -4509,54 +4529,117 @@ def copied(document: dict) -> dict:
     return yaml.safe_load(yaml.safe_dump(document))
 
 
-def retry_failures(document: dict) -> list[str]:
-    """What is wrong with one Application's `syncPolicy.retry`. PURE."""
-    retry = ((document.get("spec") or {}).get("syncPolicy") or {}).get("retry")
-    if not isinstance(retry, dict):
-        return ["no `spec.syncPolicy.retry`: Argo's default budget of 5 attempts runs out while operators start"]
-    failures = []
-    limit = retry.get("limit")
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit < MINIMUM_RETRY_LIMIT:
-        failures.append(
-            f"`retry.limit: {limit}` is not a finite budget of at least {MINIMUM_RETRY_LIMIT} "
-            "(-1 retries forever, 5 is the default that ran out)"
-        )
-    backoff = retry.get("backoff") or {}
-    failures += [f"`retry.backoff.{key}` is not set" for key in RETRY_BACKOFF_KEYS if key not in backoff]
-    return failures
+def argo_documents_under(root: Path) -> list[str]:
+    """Every file under `root` holding an Argo Application or ApplicationSet, relative. PURE-ish."""
+    found = []
+    for path in sorted(root.rglob("*.y*ml")):
+        documents = [d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)]
+        if any(d.get("kind") in ARGO_KINDS for d in documents):
+            found.append(str(path.relative_to(root)))
+    return found
 
 
 def test_every_example_application_is_one_the_suite_reads() -> None:
     """The denominator: an Application added under `example/` without joining the gates reddens here."""
-    found = sorted(
-        path.relative_to(REPO)
-        for path in (REPO / "example").rglob("*.yaml")
-        if (application(path) or {}).get("kind") == "Application"
+    assert argo_documents_under(REPO / "example") == sorted(
+        str(path.relative_to(REPO / "example")) for path in EXAMPLE_APPLICATIONS
     )
-    assert found == sorted(path.relative_to(REPO) for path in EXAMPLE_APPLICATIONS)
 
 
-def test_every_example_application_retries_finitely() -> None:
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [("extra.yml", "Application"), ("extra.yaml", "ApplicationSet")],
+    ids=["yml-suffix", "application-set"],
+)
+def test_an_unread_example_reddens_the_denominator(tmp_path: Path, name: str, kind: str) -> None:
+    copy = tmp_path / "example"
+    shutil.copytree(REPO / "example", copy)
+    (copy / name).write_text(yaml.safe_dump({"apiVersion": "argoproj.io/v1alpha1", "kind": kind}))
+    assert name in argo_documents_under(copy)
+
+
+def go_seconds(value) -> float:
+    """Argo's `parseStringToDuration`: a bare integer is seconds, else a Go duration. PURE."""
+    text = str(value)
+    if re.fullmatch(r"-?\d+", text):
+        return float(text)
+    parts = GO_DURATION.findall(text)
+    assert parts and "".join(f"{n}{u}" for n, u in parts) == text, f"not a Go duration: {text!r}"
+    return sum(float(number) * GO_UNIT_SECONDS[unit] for number, unit in parts)
+
+
+def retry_window(retry: dict) -> float:
+    """Total seconds Argo waits across every retry, computed as Argo v3.1.8 does. PURE.
+
+    `controller/appcontroller.go` increments `RetryCount` when it schedules a retry
+    and then waits `NextRetryAt(finishedAt, RetryCount)` before running it, and
+    `RetryStrategy.NextRetryAt` waits `duration * factor^count`, capped at
+    `maxDuration`. So retry k of `limit` waits `min(maxDuration, duration *
+    factor^k)` for k = 1..limit — the FIRST retry already waits `duration * factor`.
+    """
+    backoff = retry["backoff"]
+    duration, factor, ceiling = go_seconds(backoff["duration"]), int(backoff["factor"]), go_seconds(backoff["maxDuration"])
+    total, wait = 0.0, float(duration)
+    for _ in range(int(retry["limit"])):
+        # `duration * factor^count`, one factor per retry; the cap stops the growth.
+        wait = min(ceiling, wait * factor) if ceiling > 0 else wait * factor
+        total += wait
+        if total > RETRY_WINDOW_SECONDS[1] * 1000:
+            break  # far outside the window already; a limit of 100000 need not be summed
+    return total
+
+
+def retry_failures(document: dict) -> list[str]:
+    """What is wrong with one Application's `syncPolicy.retry`. PURE."""
+    retry = ((document.get("spec") or {}).get("syncPolicy") or {}).get("retry")
+    if not isinstance(retry, dict):
+        return ["no `spec.syncPolicy.retry`: Argo's default window of 310 s runs out while operators start"]
+    limit = retry.get("limit")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return [f"`retry.limit: {limit}` is not a finite, positive budget (-1 retries forever)"]
+    missing = [f"`retry.backoff.{key}` is not set" for key in RETRY_BACKOFF_KEYS if key not in (retry.get("backoff") or {})]
+    if missing:
+        return missing
+    window = retry_window(retry)
+    low, high = RETRY_WINDOW_SECONDS
+    if not low <= window <= high:
+        return [f"the retry window is {window:.0f} s, outside {low}..{high} s"]
+    return []
+
+
+def test_every_example_application_retries_inside_the_window() -> None:
     failures = {str(path.relative_to(REPO)): retry_failures(application(path)) for path in EXAMPLE_APPLICATIONS}
     assert failures == {name: [] for name in failures}
+
+
+def test_the_retry_window_is_argos_arithmetic() -> None:
+    """Hand-computed against NextRetryAt: 30, 60, 120, 240, 300, 300."""
+    retry = {"limit": 6, "backoff": {"duration": "15s", "factor": 2, "maxDuration": "5m"}}
+    assert retry_window(retry) == 30 + 60 + 120 + 240 + 300 + 300
+    # Argo's own default (limit 5, 5s x2, max 3m) is the window the VM exhausted.
+    assert retry_window({"limit": 5, "backoff": {"duration": "5s", "factor": 2, "maxDuration": "3m"}}) == 310
+    assert go_seconds("1h30m") == 5400 and go_seconds("45") == 45
 
 
 @pytest.mark.parametrize(
     ("mutation", "named"),
     [
         (lambda retry: retry.update(limit=-1), "`retry.limit: -1`"),
-        (lambda retry: retry.update(limit=5), "`retry.limit: 5`"),
+        (lambda retry: retry.update(limit=100000), "outside"),
+        (lambda retry: retry["backoff"].update(maxDuration="24h"), "outside"),
+        (lambda retry: retry["backoff"].update(duration="1h"), "outside"),
+        (lambda retry: retry.update(limit=1), "outside"),
         (lambda retry: retry.clear(), "`retry.limit: None`"),
         (lambda retry: retry.pop("backoff"), "`retry.backoff.duration` is not set"),
     ],
-    ids=["forever", "argo-default", "emptied", "no-backoff"],
+    ids=["forever", "limit-100000", "max-24h", "duration-1h", "too-short", "emptied", "no-backoff"],
 )
-def test_an_unbounded_or_default_retry_reddens_the_retry_gate(mutation, named: str) -> None:
+def test_a_retry_outside_the_window_reddens_the_retry_gate(mutation, named: str) -> None:
     for path in EXAMPLE_APPLICATIONS:
         document = copied(application(path))
         mutation(document["spec"]["syncPolicy"]["retry"])
         failures = retry_failures(document)
-        assert any(named in failure for failure in failures), (path.name, failures)
+        assert len(failures) >= 1 and named in failures[0], (path.name, failures)
 
 
 def test_a_missing_retry_reddens_the_retry_gate() -> None:
@@ -4566,29 +4649,137 @@ def test_a_missing_retry_reddens_the_retry_gate() -> None:
         assert len(retry_failures(document)) == 1, path.name
 
 
-def parent_pin_failures(documents: dict[str, dict]) -> list[str]:
-    """Every parent example must pin the same published parent. PURE."""
-    pins = {name: document["spec"]["source"]["targetRevision"] for name, document in documents.items()}
-    charts = {name: document["spec"]["source"]["chart"] for name, document in documents.items()}
-    failures = [f"`{name}` installs chart `{chart}`, not `yadgar`" for name, chart in charts.items() if chart != "yadgar"]
-    if len(set(map(str, pins.values()))) != 1:
-        failures.append(f"the parent examples pin different versions: {pins}")
-    return failures
+# ─── every parent example: derived, not listed ────────────────────────────────
+
+
+def parent_examples_of(documents: dict[str, dict]) -> dict[str, dict]:
+    """The examples that install the parent, by what they install. PURE."""
+    return {name: d for name, d in documents.items() if d["spec"]["source"].get("chart") == "yadgar"}
+
+
+def example_documents() -> dict[str, dict]:
+    return {str(path.relative_to(REPO)): application(path) for path in EXAMPLE_APPLICATIONS}
 
 
 def parent_examples() -> dict[str, dict]:
-    return {str(path.relative_to(REPO)): application(path) for path in PARENT_EXAMPLES}
+    return parent_examples_of(example_documents())
 
 
-def test_every_parent_example_pins_the_same_parent() -> None:
-    assert parent_pin_failures(parent_examples()) == []
+def parent_pin_failures(documents: dict[str, dict]) -> list[str]:
+    """Every parent example must pin the same published parent. PURE."""
+    pins = {name: str(document["spec"]["source"]["targetRevision"]) for name, document in documents.items()}
+    if len(set(pins.values())) != 1:
+        return [f"the parent examples pin different versions: {pins}"]
+    return []
 
 
-def test_a_kind_example_left_on_an_older_parent_reddens_the_pin_gate() -> None:
-    documents = {name: copied(document) for name, document in parent_examples().items()}
-    documents["example/kind/application.yaml"]["spec"]["source"]["targetRevision"] = A_PRE_0808_PIN
-    (failure,) = parent_pin_failures(documents)
-    assert "pin different versions" in failure and A_PRE_0808_PIN in failure, failure
+def ignore_differences_failures(name: str, document: dict) -> list[str]:
+    """One parent example must carry the MariaDB entry unchanged. PURE."""
+    if MARIADB_IGNORE_DIFFERENCES in ((document.get("spec") or {}).get("ignoreDifferences") or []):
+        return []
+    return [f"`{name}` does not carry the MariaDB ignoreDifferences entry with both /generate pointers"]
+
+
+def parent_example_failures(documents: dict[str, dict], tarball: Path, destination: Path) -> list[str]:
+    """Every gate a parent example must pass, for each of them. Renders with helm."""
+    failures = parent_pin_failures(documents)
+    expected = identities(render(str(tarball), *API_VERSIONS))
+    for index, (name, document) in enumerate(sorted(documents.items())):
+        failures += ignore_differences_failures(name, document)
+        values_object = document["spec"]["source"]["helm"]["valuesObject"]
+        failures += [f"`{name}`: {failure}" for failure in unrecognised_keys(values_object, tarball)]
+        (destination / str(index)).mkdir(parents=True, exist_ok=True)
+        result = example_render(tarball, values_object, destination / str(index))
+        if result.returncode != 0:
+            failures.append(f"`{name}` does not render: {result.stderr}")
+            continue
+        documents_rendered = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+        if identities(documents_rendered) != expected:
+            failures.append(f"`{name}` renders a different object set from the pinned parent's defaults")
+    return failures
+
+
+def test_the_parent_examples_are_derived_from_what_they_install() -> None:
+    assert sorted(parent_examples()) == ["example/application.yaml", "example/kind/application.yaml"]
+
+
+def test_every_parent_example_passes_every_parent_gate(pinned: Path, tmp_path: Path) -> None:
+    assert parent_example_failures(parent_examples(), pinned, tmp_path) == []
+
+
+A_NEW_PARENT_EXAMPLE = "example/new/application.yaml"
+
+
+def with_new_parent_example(change) -> dict[str, dict]:
+    """The examples plus a new yadgar Application, a copy of the kind one with `change` applied."""
+    documents = example_documents()
+    new = copied(documents["example/kind/application.yaml"])
+    change(new)
+    documents[A_NEW_PARENT_EXAMPLE] = new
+    return documents
+
+
+def misspell_node_port(document: dict) -> None:
+    proxy = document["spec"]["source"]["helm"]["valuesObject"]["platform"]["gatewayListener"]["envoyProxy"]
+    proxy["httpsNodePrt"] = proxy.pop("httpsNodePort")
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        (lambda d: d["spec"]["source"].update(targetRevision=A_PRE_0808_PIN), "pin different versions"),
+        (misspell_node_port, "`platform.gatewayListener.envoyProxy.httpsNodePrt`"),
+        (lambda d: d["spec"]["ignoreDifferences"][0]["jsonPointers"].pop(), "ignoreDifferences"),
+        (lambda d: d["spec"]["source"]["helm"]["valuesObject"].update(platform={"enabled": False}), "different object set"),
+    ],
+    ids=["pin", "key", "ignore-differences", "render"],
+)
+def test_a_new_parent_example_meets_every_parent_gate(pinned: Path, tmp_path: Path, change, named: str) -> None:
+    """THE RED CASE: a yadgar Application the scan finds is a parent example with no list to join."""
+    documents = parent_examples_of(with_new_parent_example(change))
+    assert A_NEW_PARENT_EXAMPLE in documents
+    failures = parent_example_failures(documents, pinned, tmp_path)
+    assert len(failures) == 1 and named in failures[0], failures
+    assert "pin different versions" in failures[0] or A_NEW_PARENT_EXAMPLE in failures[0], failures
+
+
+# ─── the stated pin in prose: README and `helm template --version` comments ───
+
+STATED_PIN_FILES = (REPO / "README.md", *sorted((REPO / "example").rglob("*.y*ml")))
+STATED_PIN = re.compile(r"(?:--version|targetRevision:)\s+(\d+\.\d+\.\d+)")
+
+
+def stated_pin_failures(texts: dict[str, str], pin: str, platform_pin: str) -> list[str]:
+    """Every `--version X` and `targetRevision: X` in prose names the pinned parent. PURE.
+
+    The operators example's own `targetRevision` is the one exception, and it must
+    name the `platform` the parent carries instead.
+    """
+    failures = []
+    for name, text in texts.items():
+        for match in STATED_PIN.finditer(text):
+            want = platform_pin if name == "example/operators-application.yaml" else pin
+            if match.group(1) != want:
+                line = text.count("\n", 0, match.start()) + 1
+                failures.append(f"{name}:{line} states {match.group(1)}, not {want}")
+    return failures
+
+
+def stated_texts() -> dict[str, str]:
+    return {str(path.relative_to(REPO)): path.read_text() for path in STATED_PIN_FILES}
+
+
+def test_every_stated_version_is_the_pinned_parent(pinned: Path) -> None:
+    pin = str(example_source()["targetRevision"])
+    assert stated_pin_failures(stated_texts(), pin, platform_inside(pinned)) == []
+
+
+def test_a_stale_readme_version_reddens_the_stated_pin_gate(pinned: Path) -> None:
+    pin = str(example_source()["targetRevision"])
+    texts = stated_texts()
+    texts["README.md"] = texts["README.md"].replace(f"targetRevision: {pin}", "targetRevision: 0.3.5", 1)
+    (failure,) = stated_pin_failures(texts, pin, platform_inside(pinned))
+    assert failure.startswith("README.md:") and "states 0.3.5" in failure, failure
 
 
 # ─── the operators example ─────────────────────────────────────────────────────
@@ -4628,9 +4819,9 @@ def test_the_operators_example_pins_the_platform_its_parent_carries(pinned: Path
     assert operators_pin_failures(application(OPERATORS_APPLICATION), platform_inside(pinned)) == []
 
 
-def test_a_parent_carrying_another_platform_reddens_the_operators_pin(tmp_path: Path) -> None:
+def test_a_parent_carrying_another_platform_reddens_the_operators_pin(pre_0808: Path) -> None:
     """THE RED CASE: 0.3.2 carries an older `platform` than the operators example pins."""
-    older = platform_inside(pulled(A_PRE_0808_PIN, tmp_path))
+    older = platform_inside(pre_0808)
     (failure,) = operators_pin_failures(application(OPERATORS_APPLICATION), older)
     assert f"carries platform {older}" in failure, failure
 
@@ -4785,23 +4976,6 @@ def test_an_unpinned_kind_node_image_reddens_the_mapping_gate() -> None:
     cluster["nodes"][0]["image"] = "kindest/node:v1.36.1"
     (failure,) = kind_mapping_failures(cluster, kind_values())
     assert "not the measured" in failure, failure
-
-
-def test_the_kind_example_pins_the_parent_the_suite_pulled(pinned: Path) -> None:
-    """`pinned` is pulled at `application.yaml`'s pin; the kind gates below reuse it."""
-    assert pinned.name == f"yadgar-{application(KIND_APPLICATION)['spec']['source']['targetRevision']}.tgz"
-
-
-def test_every_kind_example_key_is_one_a_chart_declares(pinned: Path) -> None:
-    assert unrecognised_keys(kind_values(), pinned) == []
-
-
-def test_a_misspelt_kind_example_key_reddens_the_recognition_gate(pinned: Path) -> None:
-    values_object = copied(kind_values())
-    proxy = values_object["platform"]["gatewayListener"]["envoyProxy"]
-    proxy["httpsNodePrt"] = proxy.pop("httpsNodePort")
-    failures = unrecognised_keys(values_object, pinned)
-    assert len(failures) == 1 and "`platform.gatewayListener.envoyProxy.httpsNodePrt`" in failures[0], failures
 
 
 def kind_edge_failures(documents: list[dict], values_object: dict) -> list[str]:
