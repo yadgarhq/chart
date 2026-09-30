@@ -426,7 +426,9 @@ ensure_edge_ca() {
     rm -f "$tmp"
     die "Secret $ESTATE_NAMESPACE/gateway-tls has no ca.crt"
   }
-  mkdir -p "$(dirname "$CA_FILE")"
+  # 0755 explicitly: the script runs under umask 077, and a 0644 file in a
+  # 0700 directory is readable by root alone.
+  install -d -m 0755 "$(dirname "$CA_FILE")"
   install -m 0644 "$tmp" "$CA_FILE"
   rm -f "$tmp"
   log "[8/10] edge CA written to $CA_FILE"
@@ -469,7 +471,9 @@ read_bootstrap_token() {
 }
 
 # Issues an enrolment for the recorded admin and writes the token to a 0600
-# file. Returns 2 when the gateway says the admin already holds a credential.
+# file. Returns 2 when the gateway says the admin already holds a credential —
+# matched on that refusal's own body, because the gateway answers 403 for other
+# reasons too (a refused origin, a refused authority).
 issue_enrolment() {
   local user_id="$1" token="$2" work code
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
@@ -488,9 +492,11 @@ issue_enrolment() {
       log "[9/10] enrolment token for $ADMIN_EXTERNAL_ID written to $ENROLMENT_FILE (0600, valid 24 hours)"
       ;;
     403)
-      rm -rf "$work"
-      return 2
-      ;;
+      if grep -q 'never held a credential' "$work/out"; then
+        rm -rf "$work"
+        return 2
+      fi
+      ;&
     *)
       local answer
       answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null || true)"

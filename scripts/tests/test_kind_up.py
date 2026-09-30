@@ -565,6 +565,19 @@ def test_an_admin_who_already_holds_a_credential_is_done_not_failed(rig: Rig) ->
     assert not rig.enrolment_file.exists()
 
 
+def test_any_other_403_from_issue_enrolment_is_a_failure(rig: Rig) -> None:
+    """The gateway answers 403 for more than one reason; only one of them means done."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": "403",
+         "o_content": '{"error":"origin not allowed"}'},
+    ] + admin_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode != 0
+    assert "origin not allowed" in proc.stderr
+    assert "already enrolled" not in proc.stdout
+
+
 def test_create_user_refused_fails_with_the_way_out_and_is_not_retried(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = admin_rules(bootstrap, enrolment, create_code="503") + rig.rules
@@ -607,6 +620,8 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
     assert rig.enrolment_file.read_text().strip() == enrolment
     ca_file = rig.root / "etc" / "yadgar" / "edge-ca.crt"
     assert stat.S_IMODE(ca_file.stat().st_mode) == 0o644
+    # A 0644 file in a 0700 directory is readable by nobody but root.
+    assert stat.S_IMODE(ca_file.parent.stat().st_mode) == 0o755
     assert "BEGIN CERTIFICATE" in ca_file.read_text()
     assert "yaadgaar enrol --token-file" in first.stdout
     assert "pipx install yaadgaar" in first.stdout
