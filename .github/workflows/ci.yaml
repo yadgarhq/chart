@@ -189,7 +189,7 @@ jobs:
           set -euo pipefail
           # The suite's own versions, matching `.pre-commit-config.yaml`'s
           # `pytest-scripts` hook so a local run and this one mean the same thing.
-          python3 -m pip install --quiet "pytest==9.1.1" "pyyaml==6.0.3"
+          python3 -m pip install --quiet "pytest==9.1.1" "pyyaml==6.0.3" "shellcheck-py==0.11.0.1"
           # ADR-0725: this chart's dependencies are resolved, never vendored, and
           # `helm lint --strict` REFUSES a chart whose `dependencies:` key is
           # unresolved exactly as `helm package` does. So this runs FIRST, not after.

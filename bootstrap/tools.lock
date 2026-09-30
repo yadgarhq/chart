@@ -1,0 +1,20 @@
+# THE THREE HOST TOOLS `kind-up.sh` INSTALLS, PINNED BY VERSION AND SHA-256.
+#
+# One row per tool and architecture:  name  version  arch  sha256  url  [member]
+# `member` names the file inside a .tar.gz; a row without one is the binary itself.
+#
+# THE CHECKSUMS ARE THE PROJECTS' OWN, read 2026-09-30 from the file each project
+# publishes beside the download (kind `.sha256sum`, dl.k8s.io `.sha256`,
+# get.helm.sh `.sha256sum`), and for amd64 re-measured with `sha256sum` on the
+# downloaded artefact. The versions are the ones the from-scratch kind run was
+# measured with. A mismatch installs nothing: `kind-up.sh` refuses and exits.
+#
+# TO BUMP: change the version in the URL and the version column, and take the
+# new sha256 from the project's published checksum file — never from a
+# `sha256sum` of a file you just downloaded, which proves only that it arrived.
+kind v0.32.0 amd64 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54 https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-amd64
+kind v0.32.0 arm64 b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-arm64
+kubectl v1.36.1 amd64 629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7 https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
+kubectl v1.36.1 arm64 59f7ee8e477fae658447607dc3c8790ac17a1b016c01c622c12070e969e2d4e7 https://dl.k8s.io/release/v1.36.1/bin/linux/arm64/kubectl
+helm v4.3.0 amd64 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz linux-amd64/helm
+helm v4.3.0 arm64 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08 https://get.helm.sh/helm-v4.3.0-linux-arm64.tar.gz linux-arm64/helm

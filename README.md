@@ -39,6 +39,7 @@ example/application.yaml  what you commit to your own repository
 example/operators-application.yaml  the four operators it needs; sync it first
 example/kind/             the same install on a kind cluster: NodePort edge, kind config
 example/values.yaml       how you set a module's knob from your own repository
+bootstrap/kind-up.sh      one command from a clean Debian/Ubuntu host to a first admin on kind
 ```
 
 `chart/charts/` and `chart/Chart.lock` are not in that list, and not in the
@@ -63,6 +64,31 @@ accepted and silently ignored. `config` is the exception — its schema is close
 every level, so a typo under `config:` is refused by name. Closing the gap for the
 other seven belongs in those seven charts, not in a file here that would own their
 interfaces from outside them.
+
+## One machine, one command
+
+`bootstrap/kind-up.sh` installs the whole estate on a kind cluster on the machine it
+runs on, and creates the first administrator (ADR-0820). Clone this repository at a
+release tag — the published chart package does not carry `bootstrap/` or
+`example/` — and run it as root:
+
+```sh
+git clone --branch v<version> https://github.com/yadgarhq/chart.git
+sudo chart/bootstrap/kind-up.sh              # add --with-client to enrol this machine too
+```
+
+It needs a Debian or Ubuntu host with podman or docker. In order, it sets the
+inotify and forwarding sysctls, installs kind, kubectl and helm at the versions and
+sha256 sums in `bootstrap/tools.lock`, creates the cluster from
+`example/kind/kind-config.yaml`, installs Argo CD, applies
+`example/operators-application.yaml` and then `example/kind/application.yaml`,
+waits for each to succeed on its first sync, and checks the edge answers. Then it
+creates the first admin and writes their enrolment token to
+`/root/yadgar-enrolment.token` (0600). Each step checks before it acts, so running
+it again changes nothing and resumes a run that stopped. It never forces a sync, it
+never prints a secret, and it only addresses the kind cluster, through a kubeconfig
+of its own in `/var/lib/yadgar-bootstrap`. The header of the script lists the
+environment variables that change its defaults.
 
 ## What the defaults install
 

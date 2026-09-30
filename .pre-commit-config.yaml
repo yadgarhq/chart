@@ -90,6 +90,11 @@ repos:
   #
   # PYYAML'S PIN matches `yadgarhq/actions`' own `pytest-scripts` hook.
   #
+  # `shellcheck-py` PUTS `shellcheck` ON THE HOOK'S PATH for
+  # `test_kind_up.py`, which lints `bootstrap/kind-up.sh` and fails rather than
+  # skips when the binary is absent (ADR-0650). A pinned wheel rather than
+  # whatever the machine carries, so a local run and CI lint with one version.
+  #
   # `always_run` with `pass_filenames: false`, and `files:` is omitted rather
   # than written as documentation: a hook filtered on `^scripts/` reports
   # `Skipped`, exit 0, on a pull request that changes only `chart/Chart.yaml` —
@@ -100,7 +105,8 @@ repos:
       - id: pytest-scripts
         name: pytest scripts/tests
         language: python
-        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        additional_dependencies:
+          ["pytest==9.1.1", "pyyaml==6.0.3", "shellcheck-py==0.11.0.1"]
         entry: pytest scripts/tests/ -q
         pass_filenames: false
         always_run: true

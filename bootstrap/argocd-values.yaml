@@ -1,0 +1,19 @@
+# ARGO CD FOR THE kind CLUSTER `kind-up.sh` CREATES, and only for that.
+#
+# Installed as argo-helm's `argo-cd` chart 8.6.1, which ships Argo CD v3.1.8 —
+# the version every Application in this repository is written against. These are
+# the settings the from-scratch kind run was measured with on 2026-09-30.
+configs:
+  params:
+    # NO TLS ON THE API SERVER. Nothing outside the cluster reaches it: the
+    # script talks to the Kubernetes API, never to Argo's own.
+    server.insecure: true
+  cm:
+    # POLL THE REGISTRY EVERY MINUTE rather than every three, so a first sync
+    # starts promptly after `kubectl apply`.
+    timeout.reconciliation: 60s
+# NO SSO AND NO NOTIFICATIONS: one machine, one operator.
+dex:
+  enabled: false
+notifications:
+  enabled: false
