@@ -95,6 +95,14 @@ ENROLMENT_FILE="${YADGAR_ENROLMENT_FILE:-/root/yadgar-enrolment.token}"
 ADMIN_EXTERNAL_ID="${YADGAR_ADMIN_EXTERNAL_ID:-admin}"
 ADMIN_DISPLAY_NAME="${YADGAR_ADMIN_DISPLAY_NAME:-Administrator}"
 RUNTIME="${YADGAR_RUNTIME:-}"
+# THE WAITS OUTLAST ARGO'S OWN WINDOW, so a timeout here never cuts off an
+# operation Argo is still retrying. Both examples retry 6 times with waits of
+# 30, 60, 120, 240, 300 and 300 s: 17.5 minutes of backoff beside the attempts.
+#   operators  25 min: a 25-minute install budget, which the measured 2m15s
+#              first sync and KEDA's webhook restarts sit well inside.
+#   estate     65 min: the same 25-minute budget plus that 17.5-minute window,
+#              with room for a PostSync hook that uses its 300 s bound on each
+#              of the 7 attempts.
 OPERATORS_TIMEOUT="${YADGAR_OPERATORS_TIMEOUT:-1500}"
 ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
 POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"
