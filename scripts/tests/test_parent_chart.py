@@ -74,6 +74,7 @@ Run: python3 -m pytest scripts/tests/ -q
 from __future__ import annotations
 
 import collections
+import os
 import re
 import shutil
 import subprocess
@@ -4192,10 +4193,13 @@ PUBLISHED_CHART = "oci://ghcr.io/yadgarhq/charts/yadgar"
 # pin is a deliberate change, gated by the render below.
 EXAMPLE_PIN_FLOOR = (0, 3, 1)
 
-# WHAT THE PINNED PARENT RENDERS WITH THE EXAMPLE'S `valuesObject`, a LITERAL like
-# `ADOPTER_OBJECTS` and K1 at that version. Measured 2026-09-27 on helm 3.18.4 and
-# 4.3.0 against the published 0.3.5: 81 objects.
-EXAMPLE_PIN_OBJECTS = 81
+# WHAT "THE WHOLE ESTATE" MEANS AT ANY PIN, as properties rather than a count. The
+# release tooling moves the example's pin at every tag (ADR-0820), so a literal
+# count measured at one pin would redden `main` at the next release that adds an
+# object. At every pin the example's render must equal the pinned parent's own
+# defaults, object for object, and those defaults must carry the platform layer,
+# autoscaling and the databases: a kind from each.
+WHOLE_ESTATE_KINDS = ("Gateway", "EnvoyProxy", "Certificate", "ScaledObject", "MariaDB", "Job")
 
 # THE ESTATE'S HOSTNAME IS ONE KEY (ADR-0808). The example states `global.hostname`
 # and nothing else for it; platform, gateway and iam derive the five keys below
@@ -4300,9 +4304,131 @@ def undeclared_leaves(values_object: dict, defaults: dict, declarer: str) -> lis
     return failures
 
 
+# THE PUSH THAT STAMPS A PIN RUNS BEFORE THAT PIN IS PUBLISHED. The release tooling
+# writes `vN` into the examples in the commit the tag `vN` points at (ADR-0820), and
+# the tag's release job publishes `vN` after that commit's push validation has
+# started. Whether HEAD is tagged is not a usable test: the tag ref is created after
+# the stamp commit, and a checkout can come first. What IS stable is the registry:
+# a pin STRICTLY NEWER than every version GHCR holds for the chart is a version
+# being cut, and `ci-release.yaml`'s post-publish job pulls it once it exists.
+# A pin that is published-or-older and cannot be pulled, and any unpublished pin
+# on a pull request, fail.
+GHCR = "https://ghcr.io"
+PARENT_REPOSITORY = "yadgarhq/charts/yadgar"
+
+
+def published_versions(repository: str = PARENT_REPOSITORY) -> list[str]:
+    """Every tag GHCR holds for `repository`, read anonymously from the OCI tags list."""
+    import json
+    import urllib.request
+
+    scope = f"{GHCR}/token?scope=repository:{repository}:pull"
+    token = json.load(urllib.request.urlopen(scope, timeout=30))["token"]
+    request = urllib.request.Request(
+        f"{GHCR}/v2/{repository}/tags/list?n=10000", headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert "next" not in (response.headers.get("Link") or ""), "the tags list is paginated; read every page"
+        return json.load(response)["tags"]
+
+
+def semver(version: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def being_cut(version: str, event: str, published: list[str]) -> bool:
+    """`version` is newer than every published one, and this is no pull request. PURE."""
+    if event == "pull_request" or semver(version) is None:
+        return False
+    ordered = [semver(tag) for tag in published if semver(tag) is not None]
+    assert ordered, f"GHCR lists no semver version at all: {published[:10]}"
+    return semver(version) > max(ordered)
+
+
+def parent_at(version: str, destination: Path, event: str | None = None, published: list[str] | None = None) -> Path:
+    """The published parent at `version`, or HEAD's chart packaged AS `version` while it is being cut.
+
+    NOT A SKIP, and nothing is weaker for it. The artifact the tag publishes is
+    `helm package chart -u --version <tag>` of the tagged commit, which is what this
+    packages, and every gate then runs against it.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    result = helm("pull", PUBLISHED_CHART, "--version", version, "-d", str(destination))
+    if result.returncode == 0:
+        return destination / f"yadgar-{version}.tgz"
+    event = os.environ.get("GITHUB_EVENT_NAME", "") if event is None else event
+    published = published_versions() if published is None else published
+    assert being_cut(version, event, published), (
+        f"cannot pull {PUBLISHED_CHART} {version}, and it is not a version being cut: "
+        f"event {event!r}, newest published {max(published, key=lambda tag: semver(tag) or (-1,))}. "
+        f"{result.stderr}"
+    )
+    print(f"\n{PUBLISHED_CHART} {version} is newer than every published version; rendering HEAD packaged as it")
+    workspace = destination / "head"
+    shutil.copytree(CHART, workspace / "chart")
+    made = helm("package", "chart", "-u", "--version", version, "--app-version", version, cwd=workspace)
+    assert made.returncode == 0, made.stderr
+    tarball = workspace / f"yadgar-{version}.tgz"
+    assert tarball.is_file(), sorted(path.name for path in workspace.iterdir())
+    return tarball
+
+
 @pytest.fixture(scope="module")
 def pinned(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return pulled(str(example_source()["targetRevision"]), tmp_path_factory.mktemp("pinned"))
+    return parent_at(str(example_source()["targetRevision"]), tmp_path_factory.mktemp("pinned"))
+
+
+AN_UNPUBLISHED_VERSION = "99.99.99"
+AN_UNPUBLISHED_OLDER_VERSION = "0.0.99"
+# A registry listing with a signature tag in it, and `0.3.10` so a LEXICAL maximum
+# (`0.3.8`) would call `0.3.9` newer than everything. Semver says it is not.
+A_LISTING = ["0.1.0", "0.3.8", "0.3.10", "sha256-abc.sig"]
+
+
+@pytest.mark.parametrize(
+    ("version", "event", "cut"),
+    [
+        (AN_UNPUBLISHED_VERSION, "push", True),
+        (AN_UNPUBLISHED_VERSION, "", True),
+        (AN_UNPUBLISHED_VERSION, "pull_request", False),
+        (AN_UNPUBLISHED_OLDER_VERSION, "push", False),
+        ("0.3.9", "push", False),
+        ("0.3.10", "push", False),
+        ("0.3.11", "push", True),
+    ],
+    ids=[
+        "newer-on-push", "newer-locally", "never-on-a-pull-request", "unpublished-but-older",
+        "lexically-newer-only", "the-newest-itself", "the-next-patch",
+    ],
+)
+def test_only_a_version_newer_than_every_published_one_is_being_cut(version: str, event: str, cut: bool) -> None:
+    assert being_cut(version, event, A_LISTING) is cut
+
+
+def test_the_registry_lists_the_published_parent() -> None:
+    """The query the fallback rests on answers, and holds a version the examples may pin."""
+    published = published_versions()
+    assert "0.3.8" in published, published[-5:]
+    assert not being_cut("0.3.8", "push", published)
+
+
+@pytest.mark.parametrize(
+    ("version", "event"),
+    [(AN_UNPUBLISHED_OLDER_VERSION, "push"), (AN_UNPUBLISHED_VERSION, "pull_request")],
+    ids=["unpublished-older-pin", "pull-request"],
+)
+def test_an_unpublished_pin_that_is_not_being_cut_fails(tmp_path: Path, version: str, event: str) -> None:
+    """THE RED CASES: an unpublished pin older than the newest release, and any on a pull request."""
+    with pytest.raises(AssertionError, match=f"{version}, and it is not a version being cut"):
+        parent_at(version, tmp_path, event, A_LISTING)
+
+
+def test_a_version_being_cut_renders_from_head(tmp_path: Path) -> None:
+    """On the stamp commit the pin is HEAD's chart packaged as that version, and it renders."""
+    tarball = parent_at(AN_UNPUBLISHED_VERSION, tmp_path, "push", A_LISTING)
+    assert tarball.name == f"yadgar-{AN_UNPUBLISHED_VERSION}.tgz"
+    assert set(WHOLE_ESTATE_KINDS) <= set(kinds(render(str(tarball), *API_VERSIONS)))
 
 
 def test_the_example_pins_a_published_parent_at_or_above_the_floor() -> None:
@@ -4323,10 +4449,10 @@ def test_the_example_installs_the_whole_estate_at_its_pin(pinned: Path, tmp_path
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     print(f"\nB7: {source['targetRevision']} with the example's valuesObject renders {len(documents)} objects")
-    assert len(documents) == EXAMPLE_PIN_OBJECTS
     assert identities(documents) == identities(render(str(pinned), *API_VERSIONS)), (
         "the example's valuesObject changed which objects the pinned parent renders"
     )
+    assert [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)] == []
 
 
 def hostname_sites(documents: list[dict]) -> dict[str, object]:
@@ -4457,13 +4583,15 @@ def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> No
     assert len(failures) == 1 and "`global.hostnme`" in failures[0], failures
 
 
-def test_a_pre_b6_pin_reddens_the_count_and_names_the_version(tmp_path: Path) -> None:
+def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
     """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone."""
     tarball = pulled(A_PRE_B6_PIN, tmp_path / "old")
     result = example_render(tarball, example_source()["helm"]["valuesObject"], tmp_path)
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
-    assert len(documents) == A_PRE_B6_PIN_OBJECTS != EXAMPLE_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
+    assert len(documents) == A_PRE_B6_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
+    missing = [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]
+    assert {"Gateway", "EnvoyProxy", "MariaDB"} <= set(missing), missing
 
 
 # ------------- 10. the operators and kind examples, and every example's retry (ADR-0820)
@@ -4497,12 +4625,16 @@ GO_UNIT_SECONDS = {"h": 3600, "m": 60, "s": 1}
 OPERATORS_NAMESPACE = "yadgar-operators"
 OPERATORS_VALUES = {"operators": {"create": True, "argoCd": {"create": False}}}
 OPERATORS_SYNC_OPTIONS = {"CreateNamespace=true", "ServerSideApply=true"}
-# `helm template --include-crds` of `platform` 0.1.19 with `OPERATORS_VALUES`,
-# measured 2026-09-30 on helm 4.3.0; the VM's sync applied the same set.
-OPERATORS_OBJECTS = 151
-OPERATORS_CRDS = 45
-# WHAT `operators.create` ALONE ADDS: Argo CD, every object labelled part-of argocd.
-ARGO_CD_OBJECTS = 53
+# WHAT THE OPERATORS EXAMPLE INSTALLS, as properties that hold at any `platform`
+# pin, because the release tooling moves that pin whenever `platform` releases
+# (ADR-0820). Measured 2026-09-30 at 0.1.19 for the record: 151 objects, 45 CRDs,
+# and 53 more (Argo CD) with `operators.create` alone. Every object comes from one
+# of the four operator subcharts or `platform`'s vendored CRDs, each of the four
+# contributes, and the CRDs serve every API version the parent declares it needs.
+OPERATOR_SOURCES = {"cert-manager", "gateway-helm", "keda", "mariadb-operator"}
+VENDORED_CRDS_SOURCE = "templates/vendored-crds"
+CRDS_DIRECTORY = "crds/"
+ARGO_CD_SOURCE = "argo-cd"
 ARGO_CD_PART_OF = "argocd"
 
 # THE ENTRY `application.yaml` EXPLAINS, and every parent example must carry it
@@ -4743,43 +4875,59 @@ def test_a_new_parent_example_meets_every_parent_gate(pinned: Path, tmp_path: Pa
     assert "pin different versions" in failures[0] or A_NEW_PARENT_EXAMPLE in failures[0], failures
 
 
-# ─── the stated pin in prose: README and `helm template --version` comments ───
+# ─── no prose states a version the release tooling will not move ──────────────
+#
+# THE STAMP REWRITES `targetRevision:` KEYS AND NOTHING ELSE (`example_pins.py` in
+# `yadgarhq/actions`, ADR-0820): "prose that names a version is not rewritten". So
+# a command or sentence here that names the current pin is stale at the next tag.
+# Prose says `<your targetRevision>` or `X.Y.Z` instead. A dated measurement record
+# ("measured 2026-09-30 against 0.3.8") is history and stays true, and this gate
+# does not read it.
 
-STATED_PIN_FILES = (REPO / "README.md", *sorted((REPO / "example").rglob("*.y*ml")))
-STATED_PIN = re.compile(r"(?:--version|targetRevision:)\s+(\d+\.\d+\.\d+)")
+PROSE_FILES = (REPO / "README.md", *sorted((REPO / "example").rglob("*.y*ml")))
+PROSE_PIN = re.compile(r"(--version\s+v?\d+\.\d+\.\d+|targetRevision:\s*v?\d+\.\d+\.\d+|`v\d+\.\d+\.\d+`)")
+STAMPED = {"example/application.yaml", "example/kind/application.yaml", "example/operators-application.yaml"}
 
 
-def stated_pin_failures(texts: dict[str, str], pin: str, platform_pin: str) -> list[str]:
-    """Every `--version X` and `targetRevision: X` in prose names the pinned parent. PURE.
+def prose_pin_failures(texts: dict[str, str]) -> list[str]:
+    """Every version stated where the stamp will not rewrite it. PURE.
 
-    The operators example's own `targetRevision` is the one exception, and it must
-    name the `platform` the parent carries instead.
+    A `targetRevision:` key on a non-comment line of a stamped example is the one
+    place a version may stand; everything else is prose.
     """
     failures = []
     for name, text in texts.items():
-        for match in STATED_PIN.finditer(text):
-            want = platform_pin if name == "example/operators-application.yaml" else pin
-            if match.group(1) != want:
-                line = text.count("\n", 0, match.start()) + 1
-                failures.append(f"{name}:{line} states {match.group(1)}, not {want}")
+        for number, line in enumerate(text.splitlines(), start=1):
+            code = name in STAMPED and not line.lstrip().startswith("#")
+            for match in PROSE_PIN.finditer(line):
+                if code and match.group(0).startswith("targetRevision:") and "#" not in line[: match.start()]:
+                    continue
+                failures.append(f"{name}:{number} states `{match.group(0)}`, which no release moves")
     return failures
 
 
-def stated_texts() -> dict[str, str]:
-    return {str(path.relative_to(REPO)): path.read_text() for path in STATED_PIN_FILES}
+def prose_texts() -> dict[str, str]:
+    return {str(path.relative_to(REPO)): path.read_text() for path in PROSE_FILES}
 
 
-def test_every_stated_version_is_the_pinned_parent(pinned: Path) -> None:
-    pin = str(example_source()["targetRevision"])
-    assert stated_pin_failures(stated_texts(), pin, platform_inside(pinned)) == []
+def test_no_prose_states_a_version_the_stamp_will_not_move() -> None:
+    assert prose_pin_failures(prose_texts()) == []
 
 
-def test_a_stale_readme_version_reddens_the_stated_pin_gate(pinned: Path) -> None:
-    pin = str(example_source()["targetRevision"])
-    texts = stated_texts()
-    texts["README.md"] = texts["README.md"].replace(f"targetRevision: {pin}", "targetRevision: 0.3.5", 1)
-    (failure,) = stated_pin_failures(texts, pin, platform_inside(pinned))
-    assert failure.startswith("README.md:") and "states 0.3.5" in failure, failure
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("README.md", "  targetRevision: 0.3.8\n"),
+        ("example/values.yaml", "#   helm template yadgar chart --version 0.3.8\n"),
+        ("example/application.yaml", "    # the git tag is `v0.3.8`\n"),
+    ],
+    ids=["readme-snippet", "helm-command", "tag-in-a-comment"],
+)
+def test_a_stated_version_reddens_the_prose_gate(name: str, line: str) -> None:
+    texts = prose_texts()
+    texts[name] = texts[name] + line
+    (failure,) = prose_pin_failures(texts)
+    assert failure.startswith(f"{name}:"), failure
 
 
 # ─── the operators example ─────────────────────────────────────────────────────
@@ -4848,8 +4996,56 @@ def operators_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def operators_render(chart: Path, values_object: dict, destination: Path) -> list[dict]:
+    return [document for _, document in operators_sources(chart, values_object, destination)]
+
+
+def operators_sources(chart: Path, values_object: dict, destination: Path) -> list[tuple[str, dict]]:
+    """Each rendered object with the chart it came from: a subchart name, or a platform template."""
     values = overlay(destination / "operators-values.yaml", yaml.safe_dump(values_object))
-    return render(str(chart), "-n", OPERATORS_NAMESPACE, "--include-crds", "-f", str(values))
+    result = helm("template", "operators", str(chart), "-n", OPERATORS_NAMESPACE, "--include-crds", "-f", str(values))
+    assert result.returncode == 0, result.stderr
+    found = []
+    for chunk in result.stdout.split("\n---\n"):
+        source = re.search(r"^# Source: platform/(charts/(?P<chart>[^/]+)|(?P<template>templates/[^/]+))", chunk, re.M)
+        for document in yaml.safe_load_all(chunk):
+            if isinstance(document, dict) and document.get("apiVersion"):
+                # A CRD from a chart's `crds/` directory carries no `# Source:` line.
+                # Only a CRD may lack one.
+                if source is None:
+                    assert document["kind"] == "CustomResourceDefinition", chunk[:200]
+                    found.append((CRDS_DIRECTORY, document))
+                else:
+                    found.append((source.group("chart") or source.group("template"), document))
+    return found
+
+
+def operators_failures(found: list[tuple[str, dict]]) -> list[str]:
+    """What the operators render must be, at any `platform` pin. PURE."""
+    failures = []
+    sources = {source for source, _ in found}
+    stray = sorted(sources - OPERATOR_SOURCES - {VENDORED_CRDS_SOURCE, CRDS_DIRECTORY})
+    if stray:
+        failures.append(f"objects come from outside the four operators: {stray}")
+    absent = sorted(OPERATOR_SOURCES - sources)
+    if absent:
+        failures.append(f"no object comes from {absent}")
+    served = {
+        f"{d['spec']['group']}/{version['name']}"
+        for _, d in found
+        if d["kind"] == "CustomResourceDefinition"
+        for version in d["spec"]["versions"]
+        if version.get("served")
+    }
+    unserved = [api for api in DECLARED_API_VERSIONS if api not in served]
+    if unserved:
+        failures.append(f"no CRD serves {unserved}, which the parent declares it needs")
+    argo = argo_cd_objects([d for _, d in found]) + [
+        d["metadata"]["name"] for _, d in found
+        if d["kind"] == "CustomResourceDefinition" and d["spec"]["group"] == "argoproj.io"
+    ]
+    if argo:
+        failures.append(f"{len(argo)} Argo CD objects render")
+    return failures
 
 
 def argo_cd_objects(documents: list[dict]) -> list[str]:
@@ -4863,20 +5059,25 @@ def argo_cd_objects(documents: list[dict]) -> list[str]:
 def test_the_operators_example_installs_the_four_operators_and_no_argo_cd(
     operators_chart: Path, tmp_path: Path
 ) -> None:
-    documents = operators_render(
+    found = operators_sources(
         operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
     )
-    print(f"\noperators: {len(documents)} objects, {kinds(documents)['CustomResourceDefinition']} CRDs")
-    assert len(documents) == OPERATORS_OBJECTS
-    assert kinds(documents)["CustomResourceDefinition"] == OPERATORS_CRDS
-    assert argo_cd_objects(documents) == []
+    print(f"\noperators: {len(found)} objects, {kinds([d for _, d in found])['CustomResourceDefinition']} CRDs")
+    assert operators_failures(found) == []
 
 
 def test_operators_create_alone_installs_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
     """THE RED CASE for the Argo CD half: without `argoCd.create: false`, Argo CD comes too."""
-    documents = operators_render(operators_chart, {"operators": {"create": True}}, tmp_path)
-    assert len(argo_cd_objects(documents)) == ARGO_CD_OBJECTS
-    assert len(documents) == OPERATORS_OBJECTS + ARGO_CD_OBJECTS
+    failures = operators_failures(operators_sources(operators_chart, {"operators": {"create": True}}, tmp_path))
+    assert len(failures) == 2, failures
+    assert f"'{ARGO_CD_SOURCE}'" in failures[0] and "Argo CD objects render" in failures[1], failures
+
+
+def test_an_operator_left_out_reddens_the_operators_gate(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the other half: without KEDA, its source and its API version are missing."""
+    values_object = merged({"operators": {"keda": {"create": False}}}, OPERATORS_VALUES)
+    failures = operators_failures(operators_sources(operators_chart, values_object, tmp_path))
+    assert any("['keda']" in failure for failure in failures), failures
 
 
 def platform_declared(chart: Path) -> dict:
@@ -4914,7 +5115,7 @@ def test_a_misspelt_argo_cd_key_is_named_and_would_install_argo_cd(operators_cha
     values_object = {"operators": {"create": True, "argoCD": {"create": False}}}
     failures = undeclared_leaves(values_object, platform_declared(operators_chart), "platform")
     assert len(failures) == 1 and "`operators.argoCD.create`" in failures[0], failures
-    assert len(argo_cd_objects(operators_render(operators_chart, values_object, tmp_path))) == ARGO_CD_OBJECTS
+    assert argo_cd_objects(operators_render(operators_chart, values_object, tmp_path)) != []
 
 
 # ─── the kind example ──────────────────────────────────────────────────────────
@@ -5009,7 +5210,6 @@ def test_the_kind_example_renders_a_node_port_edge_and_the_enrolment_port(pinned
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     assert kind_edge_failures(documents, kind_values()) == []
-    assert len(documents) == EXAMPLE_PIN_OBJECTS
     assert identities(documents) == identities(render(str(pinned), *API_VERSIONS))
 
 

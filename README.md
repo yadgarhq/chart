@@ -11,7 +11,7 @@ ADR-0706; this repository is authorised by ADR-0723).
 source:
   repoURL: ghcr.io/yadgarhq/charts
   chart: yadgar
-  targetRevision: 0.3.8
+  targetRevision: X.Y.Z # the newest release; example/application.yaml pins it
   helm:
     valuesObject:
       global:
