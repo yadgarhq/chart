@@ -68,27 +68,31 @@ interfaces from outside them.
 ## One machine, one command
 
 `bootstrap/kind-up.sh` installs the whole estate on a kind cluster on the machine it
-runs on, and creates the first administrator (ADR-0820). Clone this repository at a
+runs on, and creates the first administrator (ADR-0820). Fetch this repository at a
 release tag — the published chart package does not carry `bootstrap/` or
-`example/` — and run it as root:
+`example/`. A fresh Debian cloud image has no git, so take the release tarball with
+curl, and run the script as root:
 
 ```sh
-git clone --branch v<version> https://github.com/yadgarhq/chart.git
-sudo chart/bootstrap/kind-up.sh              # add --with-client to enrol this machine too
+curl -fsSL https://github.com/yadgarhq/chart/archive/refs/tags/v<version>.tar.gz | tar xz
+sudo ./chart-<version>/bootstrap/kind-up.sh   # add --with-client to enrol this machine too
 ```
 
-It needs a Debian or Ubuntu host with podman or docker. In order, it sets the
-inotify and forwarding sysctls, installs kind, kubectl and helm at the versions and
-sha256 sums in `bootstrap/tools.lock`, creates the cluster from
-`example/kind/kind-config.yaml`, installs Argo CD, applies
-`example/operators-application.yaml` and then `example/kind/application.yaml`,
-waits for each to succeed on its first sync, and checks the edge answers. Then it
-creates the first admin and writes their enrolment token to
-`/root/yadgar-enrolment.token` (0600). Each step checks before it acts, so running
-it again changes nothing and resumes a run that stopped. It never forces a sync, it
-never prints a secret, and it only addresses the kind cluster, through a kubeconfig
-of its own in `/var/lib/yadgar-bootstrap`. The header of the script lists the
-environment variables that change its defaults.
+It needs a Debian or Ubuntu host with podman or docker. In order, it raises the
+inotify and forwarding sysctls where they are lower than kind needs, installs kind,
+kubectl and helm into `/opt/yadgar-bootstrap/bin` at the versions and sha256 sums in
+`bootstrap/tools.lock`, creates the cluster from `example/kind/kind-config.yaml`,
+installs Argo CD, applies `example/operators-application.yaml` and then
+`example/kind/application.yaml`, waits for each to succeed on its first sync, adds
+the gateway hostname to `/etc/hosts`, and checks the edge answers. Then it creates
+the first admin and writes their enrolment token to `/root/yadgar-enrolment.token`
+(0600). Each step checks before it acts, so running it again changes nothing and
+resumes a run that stopped. The one exception is a failed Argo sync: Argo does not
+retry it on its own, so the script prints the failed resources and the command that
+starts one sync once the cause is fixed. It never forces a sync, it never prints a
+secret, and it only addresses the kind cluster, through a kubeconfig of its own in
+`/var/lib/yadgar-bootstrap`. The header of the script lists the environment
+variables that change its defaults.
 
 ## What the defaults install
 

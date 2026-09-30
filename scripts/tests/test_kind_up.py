@@ -62,6 +62,24 @@ FAKED = (
     "yaadgaar",
 )
 PINNED = {"kind": "v0.32.0", "kubectl": "v1.36.1", "helm": "v4.3.0"}
+
+# THE REAL PROGRAMS THE SCRIPT MAY USE, each linked into a directory of its own
+# that is the whole of PATH after the fakes. The host's PATH is never inherited:
+# a developer's machine may carry a real `yaadgaar` or `kubectl` beside `jq`, and
+# a test that removes a fake must then find nothing rather than the real one.
+HOST_TOOLS = (
+    "bash", "python3", "jq", "awk", "sed", "grep", "base64", "sha256sum", "tar", "install",
+    "mktemp", "find", "date", "tee", "head", "tail", "cat", "mv", "rm", "mkdir", "chmod",
+    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc",
+)
+
+
+def link_host_tools(into: Path) -> None:
+    into.mkdir()
+    for tool in HOST_TOOLS:
+        found = shutil.which(tool)
+        assert found, f"{tool} is not installed"
+        (into / tool).symlink_to(Path(found).resolve())
 GATEWAY = "https://gateway.yadgar.internal:18443"
 
 
@@ -128,6 +146,7 @@ class Rig:
             (self.root / d).mkdir()
         for name in FAKED:
             (self.root / "fakebin" / name).symlink_to(FAKE)
+        link_host_tools(self.root / "hostbin")
         # The pinned tools live in YADGAR_BIN_DIR, where the script installs them.
         for name in PINNED:
             (self.root / "bin" / name).symlink_to(FAKE)
@@ -148,7 +167,7 @@ class Rig:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = {
-            "PATH": f"{self.root / 'fakebin'}:{os.environ['PATH']}",
+            "PATH": f"{self.root / 'fakebin'}:{self.root / 'hostbin'}",
             "HOME": str(self.root / "home"),
             "KUBECONFIG": str(self.root / "home" / "never-read"),
             "FAKE_DIR": str(self.root / "fake"),
@@ -269,6 +288,12 @@ def test_it_refuses_an_unknown_flag(rig: Rig) -> None:
 
 def test_sysctls_are_written_once_and_applied_once(rig: Rig) -> None:
     conf = rig.root / "etc" / "90-yadgar-kind.conf"
+    # A stock Debian host: every limit below what kind needs, then raised.
+    rig.rules = [
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_watches"], "stdout": ["94294\n", "524288\n"]},
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_instances"], "stdout": ["128\n", "512\n"]},
+        {"cmd": "sysctl", "match": ["-n", "net.ipv4.ip_forward"], "stdout": ["0\n", "1\n"]},
+    ] + rig.rules
     proc = rig.run("ensure_sysctls")
     assert proc.returncode == 0, proc.stderr
     assert "fs.inotify.max_user_watches = 524288" in conf.read_text()
@@ -281,6 +306,29 @@ def test_sysctls_are_written_once_and_applied_once(rig: Rig) -> None:
     assert proc.returncode == 0, proc.stderr
     assert not any("-p" in c["argv"] for c in rig.calls("sysctl")), "applied again with nothing to change"
     assert "already" in proc.stdout
+
+
+def test_a_host_with_higher_limits_is_left_alone(rig: Rig) -> None:
+    rig.rules = [
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_watches"], "stdout": "1048576\n"},
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_instances"], "stdout": "8192\n"},
+    ] + rig.rules
+    proc = rig.run("ensure_sysctls")
+    assert proc.returncode == 0, proc.stderr
+    assert not (rig.root / "etc" / "90-yadgar-kind.conf").exists()
+    assert not any("-p" in c["argv"] for c in rig.calls("sysctl"))
+
+
+def test_only_a_lower_limit_is_raised(rig: Rig) -> None:
+    rig.rules = [
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_watches"], "stdout": "1048576\n"},
+        {"cmd": "sysctl", "match": ["-n", "fs.inotify.max_user_instances"], "stdout": "128\n"},
+    ] + rig.rules
+    proc = rig.run("ensure_sysctls")
+    assert proc.returncode == 0, proc.stderr
+    conf = (rig.root / "etc" / "90-yadgar-kind.conf").read_text()
+    assert "fs.inotify.max_user_instances = 512" in conf
+    assert "max_user_watches" not in conf, "wrote a limit the host already exceeds"
 
 
 # ─── 3. pinned tools ────────────────────────────────────────────────────────────
@@ -335,8 +383,29 @@ def test_a_wrong_version_is_replaced(rig: Rig) -> None:
     assert (rig.root / "bin" / "kind").read_text() == body
 
 
+def test_the_tools_go_to_a_private_directory_by_default(rig: Rig) -> None:
+    env = rig.env()
+    del env["YADGAR_BIN_DIR"]
+    proc = subprocess.run(["bash", "-c", f'source "{SCRIPT}"; printf "%s" "$BIN_DIR"'],
+                          env=env, capture_output=True, text=True, check=True)
+    assert proc.stdout == "/opt/yadgar-bootstrap/bin"
+    assert "/usr/local/bin" not in SCRIPT.read_text().replace("never /usr/local/bin", "")
+
+
+def test_a_missing_bin_directory_is_created(rig: Rig) -> None:
+    bindir = rig.root / "fresh" / "bin"
+    body = "#!/bin/sh\necho 'kind v0.32.0 go1.26.3 linux/amd64'\n"
+    lock = fake_lock(rig, hashlib.sha256(body.encode()).hexdigest())
+    rig.rules = [{"cmd": "curl", "match": ["kind-linux-amd64"], "o_content": body}] + rig.rules
+    proc = rig.run("ensure_tool kind", YADGAR_TOOLS_LOCK=str(lock), YADGAR_ARCH="amd64", YADGAR_BIN_DIR=str(bindir))
+    assert proc.returncode == 0, proc.stderr
+    assert (bindir / "kind").read_text() == body
+    assert stat.S_IMODE(bindir.stat().st_mode) == 0o755
+
+
 def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
-    rows = [line.split() for line in LOCK.read_text().splitlines() if line and not line.startswith("#")]
+    rows = [line.split() for line in LOCK.read_text().splitlines()
+            if line and not line.startswith("#") and line.split()[0] in PINNED]
     seen = {(r[0], r[2]) for r in rows}
     for tool in PINNED:
         for arch in ("amd64", "arm64"):
@@ -345,6 +414,12 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
         assert r[1] == PINNED[r[0]], f"{r[0]} pinned at {r[1]}"
         assert len(r[3]) == 64 and all(c in "0123456789abcdef" for c in r[3]), r
         assert r[4].startswith("https://"), r
+
+
+def test_the_lock_pins_the_client_once() -> None:
+    rows = [line.split() for line in LOCK.read_text().splitlines()
+            if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
+    assert rows == [["yaadgaar", "0.1.0a8", "pypi"]]
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
@@ -362,6 +437,15 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
         # A FAILED OPERATION FOR ANOTHER REVISION is history, not this run's answer:
         # automated sync starts a new one for the pinned revision.
         (app_json("yadgar", "Failed", revision="0.3.7"), "wait"),
+        # THE OPERATION'S REVISION IN ANOTHER FORM than `targetRevision` (a
+        # resolved digest, a `v` prefix): `status.sync.revision` is what Argo
+        # resolved the target to, and agreeing with it is agreeing with the pin.
+        (json.dumps({**json.loads(app_json("yadgar", "Failed", revision="sha256:abc")),
+                     "status": {**json.loads(app_json("yadgar", "Failed", revision="sha256:abc"))["status"],
+                                "sync": {"status": "Synced", "revision": "sha256:abc"}}}), "failed"),
+        (json.dumps({**json.loads(app_json("yadgar", "Succeeded", revision="sha256:abc")),
+                     "status": {**json.loads(app_json("yadgar", "Succeeded", revision="sha256:abc"))["status"],
+                                "sync": {"status": "Synced", "revision": "sha256:abc"}}}), "ok"),
         (app_json("yadgar", "Succeeded", health="Progressing"), "wait"),
         (app_json("yadgar", "Succeeded", sync="OutOfSync"), "wait"),
         (app_json("yadgar", "Succeeded"), "ok"),
@@ -396,6 +480,8 @@ def test_a_failed_operation_exits_non_zero_naming_the_failed_resources(rig: Rig)
     assert "envoy-gateway-probe" in out
     assert "backoff limit" in out
     assert "retried 6 times" in out
+    assert "target=0.3.8" in out and "operation-revision=0.3.8" in out, "the revision forms were not logged"
+    assert "does not retry it" in out and "patch application yadgar" in out, "no remedy printed"
     assert " iam" not in out, "a resource that synced fine was reported as failing"
     # Never forced: no sync, no patch of `operation`, no terminate.
     for c in rig.calls("kubectl"):
@@ -447,6 +533,14 @@ def test_a_hosts_entry_pointing_elsewhere_is_refused_not_overwritten(rig: Rig) -
     assert hosts.read_text() == "10.0.0.9 gateway.yadgar.internal\n"
 
 
+def test_a_hosts_file_without_a_trailing_newline_is_not_corrupted(rig: Rig) -> None:
+    hosts = rig.root / "etc" / "hosts"
+    hosts.write_text("::1 localhost")
+    proc = rig.run("ensure_hosts_entry gateway.yadgar.internal")
+    assert proc.returncode == 0, proc.stderr
+    assert hosts.read_text() == "::1 localhost\n127.0.0.1 gateway.yadgar.internal\n"
+
+
 def test_a_commented_hosts_entry_does_not_count(rig: Rig) -> None:
     hosts = rig.root / "etc" / "hosts"
     hosts.write_text("# 10.0.0.9 gateway.yadgar.internal\n")
@@ -465,15 +559,32 @@ def new_secrets() -> tuple[str, str]:
     return bootstrap, enrolment
 
 
-def admin_rules(bootstrap: str, enrolment: str, create_code: str = "200", issue_code: str = "200") -> list[dict]:
-    user = "yadgar:user:01a0f403-78c5-7464-bdf4-c534841e5178"
+# VERBATIM FROM GATEWAY v0.9.54, `src/http/authority.rs` `admin_failure`: the one
+# 403 body that means "this admin already holds a credential". The body is the
+# only discriminator; the gateway sends no error code beside it.
+ZERO_CREDENTIAL_REFUSAL = (
+    '{"error":"the bootstrap token may only enrol an administrator who has never held a credential"}'
+)
+
+
+def admin_rules(
+    bootstrap: str,
+    enrolment: str,
+    create_code: str = "200",
+    issue_code: str = "200",
+    install_uid: str = "11111111-aaaa-4bbb-8ccc-000000000001",
+    user: str = "yadgar:user:01a0f403-78c5-7464-bdf4-c534841e5178",
+) -> list[dict]:
     create_body = json.dumps({"user_id": user}) if create_code == "200" else '{"error":"the administrative service is unavailable"}'
     issue_body = (
         json.dumps({"token": enrolment, "enrolment_id": "e1"})
         if issue_code == "200"
-        else '{"error":"the bootstrap token may only enrol an administrator who has never held a credential"}'
+        else ZERO_CREDENTIAL_REFUSAL
     )
     return [
+        # THE INSTALL IDENTITY: the uid of the Secret the PreSync Job mints once
+        # per installation. Before the token rule, which would also match.
+        {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token", "metadata.uid"], "stdout": install_uid},
         {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token"],
          "stdout": base64.b64encode(bootstrap.encode()).decode()},
         {"cmd": "curl", "match": ["/admin/create-user"], "stdout": create_code, "o_content": create_body},
@@ -524,7 +635,8 @@ def test_a_fresh_enrolment_file_skips_the_whole_ceremony(rig: Rig) -> None:
     proc = rig.run("load_examples; ensure_admin")
     assert proc.returncode == 0, proc.stderr
     assert rig.calls("curl") == []
-    assert rig.calls("kubectl") == [], "read the bootstrap token although nothing needed it"
+    reads = [c for c in rig.calls("kubectl") if any(".data.token" in a for a in c["argv"])]
+    assert reads == [], "read the bootstrap token although nothing needed it"
 
 
 def test_a_recorded_admin_without_an_enrolment_is_re_enrolled_not_re_created(rig: Rig) -> None:
@@ -578,6 +690,87 @@ def test_any_other_403_from_issue_enrolment_is_a_failure(rig: Rig) -> None:
     assert "already enrolled" not in proc.stdout
 
 
+def test_the_zero_credential_match_is_the_gateway_body_the_script_names() -> None:
+    text = SCRIPT.read_text()
+    assert "gateway v0.9.54" in text
+    phrase = "may only enrol an administrator who has never held a credential"
+    assert phrase in ZERO_CREDENTIAL_REFUSAL and phrase in text
+
+
+def fresh_install(rig: Rig, bootstrap: str, enrolment: str, uid: str, user: str) -> None:
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=uid, user=user) + [
+        r for r in rig.rules if r["cmd"] not in ("curl",) and "admin-bootstrap-token" not in " ".join(r.get("match", []))
+    ]
+
+
+def test_a_recreated_cluster_gets_a_new_admin_within_the_token_lifetime(rig: Rig) -> None:
+    """`kind delete cluster` and a rerun: the old token names a user that no longer exists."""
+    bootstrap, enrolment = new_secrets()
+    fresh_install(rig, bootstrap, enrolment, "uid-first", "yadgar:user:first")
+    assert rig.run("load_examples; ensure_admin").returncode == 0
+    (rig.state / "client-enrolled").touch()
+
+    bootstrap2, enrolment2 = new_secrets()
+    fresh_install(rig, bootstrap2, enrolment2, "uid-second", "yadgar:user:second")
+    rig.reset_calls()
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
+    assert urls == [f"{GATEWAY}/admin/create-user", f"{GATEWAY}/admin/issue-enrolment"]
+    admin = json.loads((rig.state / "admin.json").read_text())
+    assert admin == {"external_id": "admin", "user_id": "yadgar:user:second", "install_uid": "uid-second"}
+    assert rig.enrolment_file.read_text().strip() == enrolment2
+    # The old install's record, token and client marker are kept aside, not deleted.
+    aside = sorted(p.name for p in rig.state.glob("*.stale-*"))
+    assert [n.split(".stale-")[0] for n in aside] == ["admin.json", "client-enrolled"]
+    old_tokens = list(rig.enrolment_file.parent.glob(rig.enrolment_file.name + ".stale-*"))
+    assert len(old_tokens) == 1 and old_tokens[0].read_text().strip() == enrolment
+    assert stat.S_IMODE(old_tokens[0].stat().st_mode) == 0o600
+    assert not (rig.state / "client-enrolled").exists()
+    assert_absent(rig, proc, bootstrap2, enrolment2, enrolment)
+
+
+def test_a_recreated_cluster_after_the_token_expired_never_enrols_the_dead_user(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    fresh_install(rig, bootstrap, enrolment, "uid-first", "yadgar:user:first")
+    assert rig.run("load_examples; ensure_admin").returncode == 0
+    old = rig.enrolment_file.stat().st_mtime - 25 * 3600
+    os.utime(rig.enrolment_file, (old, old))
+
+    bootstrap2, enrolment2 = new_secrets()
+    fresh_install(rig, bootstrap2, enrolment2, "uid-second", "yadgar:user:second")
+    rig.reset_calls()
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    issued_for = [json.loads(c["data"])["user_id"] for c in rig.calls("curl")
+                  if any("/admin/issue-enrolment" in a for a in c["argv"])]
+    assert issued_for == ["yadgar:user:second"], "enrolled a user from the deleted install"
+
+
+def test_an_enrolment_file_with_no_record_is_not_trusted(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
+    rig.enrolment_file.write_text("left over from somewhere\n")
+    (rig.state / "client-logged-in").touch()
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    kept = list(rig.enrolment_file.parent.glob(rig.enrolment_file.name + ".stale-*"))
+    assert [k.read_text() for k in kept] == ["left over from somewhere\n"], "overwritten rather than set aside"
+    assert not (rig.state / "client-logged-in").exists(), "a client marker outlived the install it described"
+
+
+def test_a_failure_writing_the_enrolment_token_is_not_reported_as_success(rig: Rig) -> None:
+    """issue_enrolment runs with errexit: a failed write must stop the script."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
+    blocker = rig.root / "not-a-dir"
+    blocker.write_text("")
+    proc = rig.run("load_examples; ensure_admin", YADGAR_ENROLMENT_FILE=str(blocker / "token"))
+    assert proc.returncode != 0
+    assert "written to" not in proc.stdout
+
+
 def test_create_user_refused_fails_with_the_way_out_and_is_not_retried(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = admin_rules(bootstrap, enrolment, create_code="503") + rig.rules
@@ -602,6 +795,8 @@ def full_rules(bootstrap: str, enrolment: str) -> list[dict]:
         {"cmd": "kubectl", "match": ["get", "nodes"],
          "stdout": json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},
         {"cmd": "podman", "match": ["port"], "stdout": "127.0.0.1:18443\n"},
+        {"cmd": "helm", "match": ["list"], "stdout": [
+            "[]", json.dumps([{"name": "argocd", "status": "deployed", "chart": "argo-cd-8.6.1"}])]},
         {"cmd": "kubectl", "match": ["deployment", "argocd-server"], "stdout": "quay.io/argoproj/argocd:v3.1.8"},
         {"cmd": "kubectl", "match": ["get", "application", "operators"], "stdout": ops_ok},
         {"cmd": "kubectl", "match": ["get", "application", "yadgar"], "stdout": app_json("yadgar", "Succeeded")},
@@ -638,6 +833,10 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
         if c["argv"][:1] == ["version"]:
             continue
         assert c["argv"][:4] == ["--kubeconfig", kubeconfig, "--kube-context", "kind-yadgar"], c
+    for c in rig.calls("kind"):
+        if c["argv"][:1] == ["version"] or c["argv"][:2] == ["get", "clusters"]:
+            continue
+        assert c["argv"][c["argv"].index("--kubeconfig") + 1] == kubeconfig, c
     applied = [c["argv"][c["argv"].index("-f") + 1] for c in rig.calls("kubectl") if "apply" in c["argv"]]
     assert applied == [
         str(REPO / "example" / "operators-application.yaml"),
@@ -649,6 +848,10 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
     second = rig.main()
     assert second.returncode == 0, second.stdout + second.stderr
     assert not [c for c in rig.calls("kind") if "create" in c["argv"]], "created the cluster again"
+    exports = [c for c in rig.calls("kind") if "export" in c["argv"]]
+    assert exports and all(c["argv"][c["argv"].index("--kubeconfig") + 1] == kubeconfig for c in exports)
+    helm_writes = [c for c in rig.calls("helm") if {"upgrade", "install", "uninstall", "rollback"} & set(c["argv"])]
+    assert helm_writes == [], "wrote a new Argo CD release revision with nothing to change"
     assert rig.calls("apt-get") == []
     assert not [c for c in rig.calls("curl") if "/admin/" in " ".join(c["argv"])], "ran the ceremony again"
     assert not [c for c in rig.calls("curl") if "-o" in c["argv"] and "--cacert" not in c["argv"]], "downloaded again"
@@ -722,3 +925,88 @@ def test_with_client_enrols_and_logs_in_without_printing_the_password(rig: Rig) 
     again = rig.main("--with-client")
     assert again.returncode == 0, again.stdout + again.stderr
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
+
+
+def test_a_stopped_cluster_is_started_not_deleted(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "kind", "match": ["get", "clusters"], "stdout": "yadgar\n"},
+        {"cmd": "kubectl", "match": ["get", "--raw", "/readyz"], "stdout": "", "exit": 1},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main()
+    assert proc.returncode != 0
+    assert "podman start yadgar-control-plane" in proc.stderr
+
+
+def test_changed_argocd_values_are_applied(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "helm", "match": ["list"],
+         "stdout": json.dumps([{"name": "argocd", "status": "deployed", "chart": "argo-cd-8.6.1"}])},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    (rig.state).mkdir(exist_ok=True)
+    (rig.state / "argocd-values.sha256").write_text("0" * 64 + "\n")
+    proc = rig.main()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [c for c in rig.calls("helm") if "upgrade" in c["argv"]], "values changed but no upgrade ran"
+
+
+def test_an_inherited_xtrace_prints_no_secret(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "yaadgaar", "match": ["enrol", "--help"], "stdout": "  --password-stdin\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    (rig.root / "bash_env").write_text("set -x\n")
+    proc = rig.main("--with-client", SHELLOPTS="xtrace", BASH_ENV=str(rig.root / "bash_env"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    password = (rig.state / "client-password").read_text().strip()
+    assert_absent(rig, proc, bootstrap, base64.b64encode(bootstrap.encode()).decode(), enrolment, password)
+
+
+def test_it_runs_from_a_release_tarball_with_no_git(rig: Rig, tmp_path: Path) -> None:
+    unpacked = tmp_path / "chart-0.3.9"
+    unpacked.mkdir()
+    shutil.copytree(REPO / "bootstrap", unpacked / "bootstrap")
+    shutil.copytree(REPO / "example", unpacked / "example")
+    proc = subprocess.run(
+        ["bash", "-c", f'source "{unpacked / "bootstrap" / "kind-up.sh"}"; load_examples; printf "%s" "$GATEWAY_URL"'],
+        env=rig.env(), capture_output=True, text=True, cwd="/",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == GATEWAY
+    assert "git " not in SCRIPT.read_text().replace("git clone", "")
+
+
+def test_with_client_pins_the_client_version(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    (rig.root / "fakebin" / "yaadgaar").unlink()
+    pipx_bin = rig.root / "pipx-bin"
+    pipx_bin.mkdir()
+    (pipx_bin / "yaadgaar").symlink_to(FAKE)
+    rig.rules = [
+        {"cmd": "pipx", "match": ["environment"], "stdout": str(pipx_bin) + "\n"},
+        {"cmd": "yaadgaar", "match": ["enrol", "--help"], "stdout": "  --password-stdin\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert installs == [["install", "yaadgaar==0.1.0a8"]]
+    assert "pipx install yaadgaar==0.1.0a8" in proc.stdout
+
+
+def test_login_is_retried_but_the_single_use_token_is_never_resent(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "yaadgaar", "match": ["enrol", "--help"], "stdout": "  --password-stdin\n"},
+        {"cmd": "yaadgaar", "match": ["login", "--username"], "stdout": "", "exit": 1},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    first = rig.main("--with-client")
+    assert first.returncode != 0, "a failed login was reported as success"
+    assert len([c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]) == 1
+
+    rig.rules = [r for r in rig.rules if not (r["cmd"] == "yaadgaar" and r.get("match") == ["login", "--username"])]
+    rig.reset_calls()
+    second = rig.main("--with-client")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
+    assert len([c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["login"]]) == 1

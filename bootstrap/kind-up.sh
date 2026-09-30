@@ -3,12 +3,23 @@
 #
 #   sudo bootstrap/kind-up.sh [--with-client]
 #
-# Run it from a clone of this repository checked out at a release tag. It turns
-# a Debian or Ubuntu host with podman or docker into a kind cluster running Argo
-# CD, the four operators and the estate, then creates the first administrator
-# and writes their enrolment token to a root-only file. Every step checks first
-# and skips when its work is already done, so a second run changes nothing and a
-# failed run is resumed by running it again.
+# Run it from this repository at a release tag — a clone, or the release
+# tarball, which needs no git:
+#
+#   curl -fsSL https://github.com/yadgarhq/chart/archive/refs/tags/v<ver>.tar.gz | tar xz
+#   sudo ./chart-<ver>/bootstrap/kind-up.sh
+#
+# It turns a Debian or Ubuntu host with podman or docker into a kind cluster
+# running Argo CD, the four operators and the estate, then creates the first
+# administrator and writes their enrolment token to a root-only file. Every step
+# checks first and skips when its work is already done, so a second run changes
+# nothing, and a run that stopped on a host, download or cluster error resumes
+# where it stopped.
+#
+# ONE EXCEPTION: A FAILED ARGO OPERATION IS NOT RESUMED BY RUNNING THIS AGAIN.
+# Argo does not auto-sync a revision whose sync failed, and this script never
+# starts one. It prints the failed resources and the command to start one sync
+# yourself once the cause is fixed.
 #
 # THE EXAMPLE FILES ARE APPLIED AS THEY ARE, never copied into this script:
 # `example/operators-application.yaml`, `example/kind/application.yaml` and
@@ -33,12 +44,18 @@
 #   YADGAR_ADMIN_DISPLAY_NAME   the first admin's display name  (Administrator)
 #   YADGAR_ENROLMENT_FILE       where the enrolment token goes  (/root/yadgar-enrolment.token)
 #   YADGAR_STATE_DIR            kubeconfig, log, admin record   (/var/lib/yadgar-bootstrap)
+#   YADGAR_BIN_DIR              kind, kubectl and helm          (/opt/yadgar-bootstrap/bin)
 #   YADGAR_CA_FILE              the edge CA, world-readable     (/etc/yadgar/edge-ca.crt)
 #   YADGAR_RUNTIME              podman or docker                (podman if present)
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
 
 set -euo pipefail
+# NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
+# or a `BASH_ENV` running `set -x` would print every secret this script holds;
+# `set +x` also rewrites the exported SHELLOPTS any child bash inherits.
+set +x
+unset BASH_ENV ENV
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -62,8 +79,14 @@ LOG_FILE="$STATE_DIR/kind-up.log"
 KUBECONFIG_FILE="$STATE_DIR/kubeconfig"
 ADMIN_RECORD="$STATE_DIR/admin.json"
 CLIENT_PASSWORD_FILE="$STATE_DIR/client-password"
-CLIENT_MARKER="$STATE_DIR/client-enrolled"
-BIN_DIR="${YADGAR_BIN_DIR:-/usr/local/bin}"
+# TWO MARKERS, because the enrolment token is single-use: a login that failed is
+# retried on the next run, and the token is never sent a second time.
+CLIENT_ENROLLED_MARKER="$STATE_DIR/client-enrolled"
+CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
+ARGOCD_VALUES_SHA_FILE="$STATE_DIR/argocd-values.sha256"
+# A DIRECTORY OF ITS OWN: a kind, kubectl or helm the host already has in a
+# shared bin directory is never replaced — never /usr/local/bin.
+BIN_DIR="${YADGAR_BIN_DIR:-/opt/yadgar-bootstrap/bin}"
 TOOLS_LOCK="${YADGAR_TOOLS_LOCK:-$SCRIPT_DIR/tools.lock}"
 SYSCTL_FILE="${YADGAR_SYSCTL_FILE:-/etc/sysctl.d/90-yadgar-kind.conf}"
 HOSTS_FILE="${YADGAR_HOSTS_FILE:-/etc/hosts}"
@@ -77,6 +100,12 @@ ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
 POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"
 PROBE_ATTEMPTS="${YADGAR_PROBE_ATTEMPTS:-12}"
 WITH_CLIENT=0
+
+# THE ONE 403 THAT MEANS "THIS ADMIN ALREADY HOLDS A CREDENTIAL", verbatim from
+# gateway v0.9.54 `src/http/authority.rs` (`admin_failure`). The gateway sends
+# no error code beside it, and answers 403 for other reasons too, so the body
+# is the only discriminator. Re-read it when the pinned gateway moves.
+ZERO_CREDENTIAL_REFUSAL="may only enrol an administrator who has never held a credential"
 
 # An enrolment token lives 24 hours (ADR-0492). A file older than this is
 # re-issued rather than handed back expired.
@@ -189,24 +218,31 @@ detect_runtime() {
 # ─── 2. sysctls ──────────────────────────────────────────────────────────────
 
 # inotify limits kind's node needs for dozens of pods, and forwarding for its
-# network. Persisted in /etc/sysctl.d so a reboot keeps them.
+# network. A limit is only ever RAISED: a host already at or above one keeps its
+# own value, and only the raised keys are persisted in /etc/sysctl.d.
+SYSCTL_KEYS=(fs.inotify.max_user_watches fs.inotify.max_user_instances net.ipv4.ip_forward)
+SYSCTL_MINIMA=(524288 512 1)
+
 ensure_sysctls() {
-  local want
-  want="$(printf '%s\n' \
-    '# Written by yadgar bootstrap/kind-up.sh.' \
-    'fs.inotify.max_user_watches = 524288' \
-    'fs.inotify.max_user_instances = 512' \
-    'net.ipv4.ip_forward = 1')"
-  if [[ -f "$SYSCTL_FILE" && "$(cat "$SYSCTL_FILE")" == "$want" ]] &&
-    [[ "$(sysctl -n fs.inotify.max_user_watches)" == 524288 ]] &&
-    [[ "$(sysctl -n fs.inotify.max_user_instances)" == 512 ]] &&
-    [[ "$(sysctl -n net.ipv4.ip_forward)" == 1 ]]; then
-    log "[2/10] sysctls already set and persisted"
+  local i key min live raise=0 lines=()
+  for i in "${!SYSCTL_KEYS[@]}"; do
+    key="${SYSCTL_KEYS[$i]}"
+    min="${SYSCTL_MINIMA[$i]}"
+    live="$(sysctl -n "$key" 2>/dev/null || true)"
+    if ! [[ "$live" =~ ^[0-9]+$ ]] || ((live < min)); then
+      raise=1
+      lines+=("$key = $min")
+    elif [[ -f "$SYSCTL_FILE" ]] && grep -q "^$key = " "$SYSCTL_FILE"; then
+      lines+=("$key = $min")
+    fi
+  done
+  if ((!raise)); then
+    log "[2/10] sysctls already at or above what kind needs"
     return
   fi
-  log "[2/10] writing $SYSCTL_FILE and applying it"
+  log "[2/10] raising ${lines[*]} in $SYSCTL_FILE"
   mkdir -p "$(dirname "$SYSCTL_FILE")"
-  printf '%s\n' "$want" >"$SYSCTL_FILE"
+  printf '%s\n' '# Written by yadgar bootstrap/kind-up.sh; only limits it had to raise.' "${lines[@]}" >"$SYSCTL_FILE"
   chmod 0644 "$SYSCTL_FILE"
   run sysctl -p "$SYSCTL_FILE"
 }
@@ -248,7 +284,8 @@ ensure_tool() {
     log "[3/10] $tool $version already installed"
     return
   fi
-  log "[3/10] installing $tool $version (found: ${have:-none})"
+  log "[3/10] installing $tool $version into $BIN_DIR (found: ${have:-none})"
+  install -d -m 0755 "$BIN_DIR"
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
   curl -fsSL --retry 3 -o "$work/download" "$url" || {
     rm -rf "$work"
@@ -285,7 +322,7 @@ ensure_cluster() {
     "$BIN_DIR/kind" export kubeconfig --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 ||
       die "kind cluster $CLUSTER_NAME exists but its kubeconfig cannot be exported"
     [[ "$(k get --raw /readyz 2>/dev/null)" == ok ]] ||
-      die "kind cluster $CLUSTER_NAME exists but its API is not ready; inspect it, or delete it with: kind delete cluster --name $CLUSTER_NAME"
+      die "kind cluster $CLUSTER_NAME exists but its API is not ready. After a reboot its node is stopped: $RUNTIME start $CLUSTER_NAME-control-plane, then run this again"
     k get nodes -o json | jq -e '[.items[].status.conditions[] | select(.type == "Ready") | .status == "True"] | all' >/dev/null ||
       die "kind cluster $CLUSTER_NAME exists but a node is not Ready"
     local mapped
@@ -301,10 +338,23 @@ ensure_cluster() {
 
 # ─── 5. Argo CD ──────────────────────────────────────────────────────────────
 
+# Skipped when the release is deployed at the pinned chart and was installed
+# from these exact values; `helm upgrade` otherwise writes a new release revision
+# on every run, changed or not.
 ensure_argocd() {
-  log "[5/10] Argo CD: argo-cd chart $ARGOCD_CHART_VERSION (upgrade --install, a no-op when current)"
-  run h upgrade --install argocd argo-cd --repo "$ARGOCD_CHART_REPO" --version "$ARGOCD_CHART_VERSION" \
-    --namespace argocd --create-namespace -f "$ARGOCD_VALUES_FILE" --wait --timeout 10m
+  local values_sha listed
+  values_sha="$(sha256sum "$ARGOCD_VALUES_FILE" | awk '{ print $1 }')"
+  listed="$(h list --namespace argocd --filter '^argocd$' -o json 2>/dev/null || echo '[]')"
+  if jq -e --arg chart "argo-cd-$ARGOCD_CHART_VERSION" \
+    'length == 1 and .[0].status == "deployed" and .[0].chart == $chart' <<<"$listed" >/dev/null 2>&1 &&
+    [[ -f "$ARGOCD_VALUES_SHA_FILE" && "$(cat "$ARGOCD_VALUES_SHA_FILE")" == "$values_sha" ]]; then
+    log "[5/10] Argo CD already deployed at chart $ARGOCD_CHART_VERSION with these values"
+  else
+    log "[5/10] Argo CD: installing argo-cd chart $ARGOCD_CHART_VERSION"
+    run h upgrade --install argocd argo-cd --repo "$ARGOCD_CHART_REPO" --version "$ARGOCD_CHART_VERSION" \
+      --namespace argocd --create-namespace -f "$ARGOCD_VALUES_FILE" --wait --timeout 10m
+    printf '%s\n' "$values_sha" >"$ARGOCD_VALUES_SHA_FILE"
+  fi
   local image
   image="$(k -n argocd get deployment argocd-server -o jsonpath='{.spec.template.spec.containers[0].image}')"
   [[ "$image" == *":$ARGOCD_APP_VERSION" ]] || die "argocd-server runs $image, expected $ARGOCD_APP_VERSION"
@@ -318,6 +368,10 @@ ensure_argocd() {
 #   wait    anything else: no operation yet, one running or retrying, or the
 #           last one was for another revision (automated sync starts a new one)
 # While Argo retries, the phase reads Running, so Failed is final.
+#
+# THE OPERATION'S REVISION IS CURRENT when it equals `spec.source.targetRevision`
+# OR `status.sync.revision` — what Argo resolved the target to, which may be
+# written in another form than the pin. Both are logged on every poll.
 app_verdict() {
   local doc
   doc="$(cat)"
@@ -327,11 +381,13 @@ app_verdict() {
   fi
   jq -r '
     (.spec.source.targetRevision // "") as $target
+    | (.status.sync.revision // "") as $synced
     | (.status.operationState // {}) as $op
     | ($op.operation.sync.revision // $op.syncResult.revision // "") as $rev
     | ($op.phase // "") as $phase
     | if $phase == "" then "wait"
-      elif $target != "" and $rev != "" and $rev != $target then "wait"
+      elif $rev != "" and ($target != "" or $synced != "")
+           and $rev != $target and $rev != $synced then "wait"
       elif $phase == "Failed" or $phase == "Error" then "failed"
       elif $phase == "Succeeded"
            and .status.sync.status == "Synced"
@@ -350,6 +406,7 @@ print_app_failure() {
   }
   jq -r --arg name "$name" '
     "Application \($name): sync=\(.status.sync.status // "-") health=\(.status.health.status // "-") operation=\(.status.operationState.phase // "-")",
+    "  target=\(.spec.source.targetRevision // "-") sync-revision=\(.status.sync.revision // "-") operation-revision=\(.status.operationState.operation.sync.revision // .status.operationState.syncResult.revision // "-")",
     "  message: \(.status.operationState.message // "-")",
     (.status.operationState.syncResult.resources // [] | .[]
       | select((.status // "") != "Synced" or ((.hookPhase // "") | IN("Failed", "Error")))
@@ -375,6 +432,7 @@ wait_app() {
       failed)
         log "Application $name: operation failed; no sync is forced"
         print_app_failure "$name" "$doc"
+        log "Running this script again does not retry it: Argo does not auto-sync a revision whose sync failed. Fix the cause, then start one sync yourself: KUBECONFIG=$KUBECONFIG_FILE kubectl -n argocd patch application $name --type merge -p '{\"operation\":{\"sync\":{}}}' — and run this script again to wait for it"
         return 1
         ;;
     esac
@@ -385,7 +443,7 @@ wait_app() {
     fi
     local summary="not readable yet"
     if [[ -n "$doc" ]]; then
-      summary="$(jq -r '"sync=\(.status.sync.status // "-") health=\(.status.health.status // "-") operation=\(.status.operationState.phase // "-") \(.status.operationState.message // "")"' <<<"$doc")"
+      summary="$(jq -r '"sync=\(.status.sync.status // "-") health=\(.status.health.status // "-") operation=\(.status.operationState.phase // "-") target=\(.spec.source.targetRevision // "-") sync-revision=\(.status.sync.revision // "-") operation-revision=\(.status.operationState.operation.sync.revision // .status.operationState.syncResult.revision // "-") \(.status.operationState.message // "")"' <<<"$doc")"
     fi
     log "Application $name: $summary"
     sleep "$POLL_SECONDS"
@@ -413,6 +471,9 @@ ensure_hosts_entry() {
   fi
   [[ -z "$existing" ]] || die "$HOSTS_FILE maps $host to $existing; point it at 127.0.0.1 or remove that line"
   log "[8/10] adding 127.0.0.1 $host to $HOSTS_FILE"
+  # A file whose last line has no newline would otherwise gain this entry glued
+  # onto that line, corrupting both.
+  if [[ -s "$HOSTS_FILE" && -n "$(tail -c 1 "$HOSTS_FILE")" ]]; then printf '\n' >>"$HOSTS_FILE"; fi
   printf '127.0.0.1 %s\n' "$host" >>"$HOSTS_FILE"
 }
 
@@ -470,40 +531,60 @@ read_bootstrap_token() {
   printf '%s' "$token"
 }
 
+# THE INSTALLATION'S IDENTITY: the uid of the Secret the estate's PreSync Job
+# mints once per installation and never replaces. A recreated cluster mints a
+# new one, so a record from the old cluster is recognised as someone else's.
+install_uid() {
+  k -n "$ESTATE_NAMESPACE" get secret admin-bootstrap-token -o 'jsonpath={.metadata.uid}'
+}
+
+# Moves files aside with a timestamp; nothing a previous installation left is
+# deleted.
+set_aside() {
+  local stamp f
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  for f in "$@"; do
+    if [[ -e "$f" ]]; then
+      mv "$f" "$f.stale-$stamp"
+      log "[9/10] set aside $f as $f.stale-$stamp"
+    fi
+  done
+}
+
 # Issues an enrolment for the recorded admin and writes the token to a 0600
-# file. Returns 2 when the gateway says the admin already holds a credential —
-# matched on that refusal's own body, because the gateway answers 403 for other
-# reasons too (a refused origin, a refused authority).
+# file. Sets ENROLMENT_OUTCOME to `issued`, or to `enrolled` when the gateway
+# answers with the zero-credential refusal. Called plainly, never under `||` or
+# `if`, so errexit holds inside it.
+ENROLMENT_OUTCOME=""
 issue_enrolment() {
   local user_id="$1" token="$2" work code
+  ENROLMENT_OUTCOME=""
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
   jq -n --arg u "$user_id" '{user_id: $u}' >"$work/body"
   code="$(admin_post issue-enrolment "$work/body" "$work/out" "$token")"
   case "$code" in
     200)
       jq -r '.token // empty' "$work/out" >"$work/token"
-      [[ -s "$work/token" ]] || {
-        rm -rf "$work"
-        die "issue-enrolment answered 200 with no token"
-      }
+      [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
       mkdir -p "$(dirname "$ENROLMENT_FILE")"
       install -m 0600 "$work/token" "$ENROLMENT_FILE"
       rm -rf "$work"
+      ENROLMENT_OUTCOME=issued
       log "[9/10] enrolment token for $ADMIN_EXTERNAL_ID written to $ENROLMENT_FILE (0600, valid 24 hours)"
+      return 0
       ;;
     403)
-      if grep -q 'never held a credential' "$work/out"; then
+      if grep -qF "$ZERO_CREDENTIAL_REFUSAL" "$work/out"; then
         rm -rf "$work"
-        return 2
+        ENROLMENT_OUTCOME=enrolled
+        return 0
       fi
-      ;&
-    *)
-      local answer
-      answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null || true)"
-      rm -rf "$work"
-      die "issue-enrolment answered ${code:-nothing}: ${answer:-no body}"
       ;;
   esac
+  local answer
+  answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null || true)"
+  rm -rf "$work"
+  die "issue-enrolment answered ${code:-nothing}: ${answer:-no body}"
 }
 
 # The first admin, over the gateway's existing routes (ADR-0492, ADR-0655).
@@ -513,20 +594,39 @@ issue_enrolment() {
 # opaque 503 as an outage (gateway v0.9.54, `opaque_status`), and there is no
 # route to look a user up. So the user id is recorded in $ADMIN_RECORD the
 # moment create-user answers 200, and create-user is sent at most once per
-# state directory, never retried.
+# installation, never retried.
 #
-#   enrolment file younger than 23h  → skip; nothing is read or sent
-#   admin recorded, no fresh file    → issue-enrolment for the recorded admin
-#                                      (the bootstrap token may enrol only an
-#                                      admin with zero credentials; a 403 means
-#                                      they already enrolled, and that is done)
-#   nothing recorded                 → create-user, record, issue-enrolment
+# THE RECORD IS TIED TO THE INSTALLATION by `install_uid`. A record, token or
+# client marker from another installation — `kind delete cluster` and a rerun —
+# is set aside, and this installation gets its own admin.
+#
+#   record for this install, token younger than 23h → skip; no token is read
+#   record for this install, no fresh token         → issue-enrolment for it
+#                                                     (the bootstrap token may
+#                                                     enrol only an admin with
+#                                                     zero credentials; that
+#                                                     refusal means done)
+#   no record for this install                      → create-user, record,
+#                                                     issue-enrolment
 ensure_admin() {
-  if [[ -s "$ENROLMENT_FILE" ]] && [[ -n "$(find "$ENROLMENT_FILE" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
-    log "[9/10] $ENROLMENT_FILE already holds a current enrolment token"
+  local uid recorded_uid token user_id recorded_id work code
+  uid="$(install_uid)"
+  [[ -n "$uid" ]] || die "Secret $ESTATE_NAMESPACE/admin-bootstrap-token has no uid; the estate has not minted it"
+  if [[ -s "$ADMIN_RECORD" ]]; then
+    recorded_uid="$(jq -r '.install_uid // empty' "$ADMIN_RECORD")"
+    if [[ "$recorded_uid" != "$uid" ]]; then
+      log "[9/10] $ADMIN_RECORD belongs to another installation (${recorded_uid:-unrecorded}, this one is $uid)"
+      set_aside "$ADMIN_RECORD" "$ENROLMENT_FILE" "$CLIENT_ENROLLED_MARKER" "$CLIENT_LOGGED_IN_MARKER"
+    fi
+  elif [[ -e "$ENROLMENT_FILE" || -e "$CLIENT_ENROLLED_MARKER" || -e "$CLIENT_LOGGED_IN_MARKER" ]]; then
+    log "[9/10] no admin record ties the enrolment token or client markers to this installation"
+    set_aside "$ENROLMENT_FILE" "$CLIENT_ENROLLED_MARKER" "$CLIENT_LOGGED_IN_MARKER"
+  fi
+  if [[ -s "$ADMIN_RECORD" && -s "$ENROLMENT_FILE" ]] &&
+    [[ -n "$(find "$ENROLMENT_FILE" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
+    log "[9/10] $ENROLMENT_FILE already holds a current enrolment token for this installation"
     return
   fi
-  local token user_id recorded_id work code rc=0
   if [[ -s "$ADMIN_RECORD" ]]; then
     recorded_id="$(jq -r '.external_id' "$ADMIN_RECORD")"
     [[ "$recorded_id" == "$ADMIN_EXTERNAL_ID" ]] ||
@@ -550,16 +650,15 @@ ensure_admin() {
     user_id="$(jq -r '.user_id // empty' "$work/out")"
     rm -rf "$work"
     [[ -n "$user_id" ]] || die "create-user answered 200 with no user_id"
-    jq -n --arg e "$ADMIN_EXTERNAL_ID" --arg u "$user_id" '{external_id: $e, user_id: $u}' >"$ADMIN_RECORD.tmp"
+    jq -n --arg e "$ADMIN_EXTERNAL_ID" --arg u "$user_id" --arg i "$uid" \
+      '{external_id: $e, user_id: $u, install_uid: $i}' >"$ADMIN_RECORD.tmp"
     mv "$ADMIN_RECORD.tmp" "$ADMIN_RECORD"
     log "[9/10] created $ADMIN_EXTERNAL_ID as $user_id"
   fi
-  issue_enrolment "$user_id" "$token" || rc=$?
+  issue_enrolment "$user_id" "$token"
   token=""
-  if ((rc == 2)); then
+  if [[ "$ENROLMENT_OUTCOME" == enrolled ]]; then
     log "[9/10] $ADMIN_EXTERNAL_ID already enrolled: they hold a credential, so the bootstrap token may not enrol them again. Log in with that credential"
-  elif ((rc != 0)); then
-    exit "$rc"
   fi
 }
 
@@ -569,15 +668,22 @@ print_next_steps() {
   log "[10/10] done. Next, on the machine you work from:"
   cat <<EOF | tee -a "$LOG_FILE"
 
-  pipx install yaadgaar
+  pipx install yaadgaar==$(yaadgaar_version)
   yaadgaar enrol --token-file $ENROLMENT_FILE --password-stdin < <your-password-file>
   yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <your-password-file>
 
   The enrolment token carries the edge CA. A machine other than this one also
   needs $GATEWAY_HOST to resolve to this host, and port $GATEWAY_PORT, which
   kind publishes on 127.0.0.1 only.
-  The cluster:  KUBECONFIG=$KUBECONFIG_FILE kubectl get applications -n argocd
+  The cluster:  KUBECONFIG=$KUBECONFIG_FILE $BIN_DIR/kubectl get applications -n argocd
+  kind, kubectl and helm are in $BIN_DIR; nothing was put on PATH.
+  After a reboot:  $RUNTIME start $CLUSTER_NAME-control-plane
 EOF
+}
+
+# THE CLIENT'S PIN, the one `yaadgaar` row of tools.lock.
+yaadgaar_version() {
+  awk '$1 == "yaadgaar" && $3 == "pypi" { print $2; exit }' "$TOOLS_LOCK"
 }
 
 yaadgaar_bin() {
@@ -589,7 +695,10 @@ yaadgaar_bin() {
     command -v apt-get >/dev/null 2>&1 || return 1
     run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q pipx >/dev/null
   fi
-  run pipx install yaadgaar >/dev/null
+  local version
+  version="$(yaadgaar_version)"
+  [[ -n "$version" ]] || return 1
+  run pipx install "yaadgaar==$version" >/dev/null
   local dir
   dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")"
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
@@ -598,12 +707,17 @@ yaadgaar_bin() {
 # Opt-in: enrol this machine's root as the first admin with a generated
 # password kept 0600 beside the kubeconfig. Only with a client that reads the
 # password from stdin; an older one is skipped, never driven through a terminal.
+#
+# THE CLIENT'S OUTPUT IS LOGGED, and that was checked rather than assumed: at
+# yadgarhq/yadgar 6076f33 `enrol` prints the gateway, the username and the
+# config directory, and `login` the gateway and directory. Neither prints the
+# token, the password or the credential.
 ensure_client() {
-  if [[ -f "$CLIENT_MARKER" ]]; then
-    log "[10/10] client already enrolled as $ADMIN_EXTERNAL_ID"
+  if [[ -f "$CLIENT_ENROLLED_MARKER" && -f "$CLIENT_LOGGED_IN_MARKER" ]]; then
+    log "[10/10] client already enrolled and logged in as $ADMIN_EXTERNAL_ID"
     return
   fi
-  if [[ ! -s "$ENROLMENT_FILE" ]]; then
+  if [[ ! -f "$CLIENT_ENROLLED_MARKER" && ! -s "$ENROLMENT_FILE" ]]; then
     log "[10/10] --with-client: no enrolment token to redeem; skipped"
     return
   fi
@@ -622,10 +736,14 @@ ensure_client() {
       head -c 24 /dev/urandom | base64 >"$CLIENT_PASSWORD_FILE"
     )
   fi
-  log "[10/10] enrolling $ADMIN_EXTERNAL_ID with yaadgaar; password in $CLIENT_PASSWORD_FILE (0600)"
-  "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
+  if [[ ! -f "$CLIENT_ENROLLED_MARKER" ]]; then
+    log "[10/10] enrolling $ADMIN_EXTERNAL_ID with yaadgaar; password in $CLIENT_PASSWORD_FILE (0600)"
+    "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
+    touch "$CLIENT_ENROLLED_MARKER"
+  fi
+  log "[10/10] logging in as $ADMIN_EXTERNAL_ID"
   "$bin" login --gateway "$GATEWAY_URL" --username "$ADMIN_EXTERNAL_ID" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
-  touch "$CLIENT_MARKER"
+  touch "$CLIENT_LOGGED_IN_MARKER"
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────

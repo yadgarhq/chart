@@ -1,6 +1,8 @@
 # THE THREE HOST TOOLS `kind-up.sh` INSTALLS, PINNED BY VERSION AND SHA-256.
 #
 # One row per tool and architecture:  name  version  arch  sha256  url  [member]
+# and one row for the client `--with-client` installs with pipx:
+#                                     yaadgaar  version  pypi
 # `member` names the file inside a .tar.gz; a row without one is the binary itself.
 #
 # THE CHECKSUMS ARE THE PROJECTS' OWN, read 2026-09-30 from the file each project
@@ -18,3 +20,7 @@ kubectl v1.36.1 amd64 629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b
 kubectl v1.36.1 arm64 59f7ee8e477fae658447607dc3c8790ac17a1b016c01c622c12070e969e2d4e7 https://dl.k8s.io/release/v1.36.1/bin/linux/arm64/kubectl
 helm v4.3.0 amd64 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz linux-amd64/helm
 helm v4.3.0 arm64 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08 https://get.helm.sh/helm-v4.3.0-linux-arm64.tar.gz linux-arm64/helm
+# THE CLIENT, installed as `pipx install yaadgaar==<version>` by --with-client
+# only. 0.1.0a8 is the first release with `--password-stdin` (yadgar#42); an
+# older client is skipped rather than driven through a terminal.
+yaadgaar 0.1.0a8 pypi
