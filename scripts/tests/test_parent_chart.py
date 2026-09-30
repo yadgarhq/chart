@@ -4280,6 +4280,11 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             if member in archive.getnames():
                 defaults = merged({name: values_of(member)}, defaults)
 
+    return undeclared_leaves(values_object, defaults, "no chart in the pinned parent")
+
+
+def undeclared_leaves(values_object: dict, defaults: dict, declarer: str) -> list[str]:
+    """Every leaf of `values_object` whose path `defaults` does not declare. PURE."""
     failures = []
     for path in leaves(values_object):
         node = defaults
@@ -4289,7 +4294,7 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             if node is None:
                 break
             if not isinstance(node, dict) or step not in node:
-                failures.append(f"`{path}`: no chart in the pinned parent declares `{step}` there")
+                failures.append(f"`{path}`: {declarer} declares `{step}` there")
                 break
             node = node[step]
     return failures
@@ -4454,3 +4459,393 @@ def test_a_pre_b6_pin_reddens_the_count_and_names_the_version(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     assert len(documents) == A_PRE_B6_PIN_OBJECTS != EXAMPLE_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
+
+
+# ------------- 10. the operators and kind examples, and every example's retry (ADR-0820)
+#
+# MEASURED 2026-09-30 ON A kind VM, and each constant below is a literal from that
+# run or from a render of the pins it used: `platform` 0.1.19 with the operators
+# example's `valuesObject` synced Healthy with 151 objects, 45 of them CRDs, and
+# `yadgar` 0.3.8 with the kind example's `valuesObject` served the edge on
+# 127.0.0.1:18443. The run also exhausted Argo's default retry budget of 5 while
+# the estate was `Degraded`, which is what the retry gate is for.
+
+OPERATORS_APPLICATION = REPO / "example" / "operators-application.yaml"
+KIND_APPLICATION = REPO / "example" / "kind" / "application.yaml"
+KIND_CONFIG = REPO / "example" / "kind" / "kind-config.yaml"
+EXAMPLE_APPLICATIONS = (EXAMPLE_APPLICATION, OPERATORS_APPLICATION, KIND_APPLICATION)
+PARENT_EXAMPLES = (EXAMPLE_APPLICATION, KIND_APPLICATION)
+PUBLISHED_PLATFORM = "oci://ghcr.io/yadgarhq/charts/platform"
+
+# THE SMALLEST RETRY BUDGET AN EXAMPLE MAY CARRY. Argo's default is 5, and 5 ran
+# out on the VM. `-1` (retry forever) is below it too: an Application that can
+# never go Healthy then retries without end and reports nothing.
+MINIMUM_RETRY_LIMIT = 10
+RETRY_BACKOFF_KEYS = ("duration", "factor", "maxDuration")
+
+OPERATORS_NAMESPACE = "yadgar-operators"
+OPERATORS_VALUES = {"operators": {"create": True, "argoCd": {"create": False}}}
+OPERATORS_SYNC_OPTIONS = {"CreateNamespace=true", "ServerSideApply=true"}
+# `helm template --include-crds` of `platform` 0.1.19 with `OPERATORS_VALUES`,
+# measured 2026-09-30 on helm 4.3.0; the VM's sync applied the same set.
+OPERATORS_OBJECTS = 151
+OPERATORS_CRDS = 45
+# WHAT `operators.create` ALONE ADDS: Argo CD, every object labelled part-of argocd.
+ARGO_CD_OBJECTS = 53
+ARGO_CD_PART_OF = "argocd"
+
+KIND_NODE_IMAGE = (
+    "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+)
+KIND_LISTEN_ADDRESS = "127.0.0.1"
+KIND_EDGE = "edge"
+
+
+def application(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
+def copied(document: dict) -> dict:
+    return yaml.safe_load(yaml.safe_dump(document))
+
+
+def retry_failures(document: dict) -> list[str]:
+    """What is wrong with one Application's `syncPolicy.retry`. PURE."""
+    retry = ((document.get("spec") or {}).get("syncPolicy") or {}).get("retry")
+    if not isinstance(retry, dict):
+        return ["no `spec.syncPolicy.retry`: Argo's default budget of 5 attempts runs out while operators start"]
+    failures = []
+    limit = retry.get("limit")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < MINIMUM_RETRY_LIMIT:
+        failures.append(
+            f"`retry.limit: {limit}` is not a finite budget of at least {MINIMUM_RETRY_LIMIT} "
+            "(-1 retries forever, 5 is the default that ran out)"
+        )
+    backoff = retry.get("backoff") or {}
+    failures += [f"`retry.backoff.{key}` is not set" for key in RETRY_BACKOFF_KEYS if key not in backoff]
+    return failures
+
+
+def test_every_example_application_is_one_the_suite_reads() -> None:
+    """The denominator: an Application added under `example/` without joining the gates reddens here."""
+    found = sorted(
+        path.relative_to(REPO)
+        for path in (REPO / "example").rglob("*.yaml")
+        if (application(path) or {}).get("kind") == "Application"
+    )
+    assert found == sorted(path.relative_to(REPO) for path in EXAMPLE_APPLICATIONS)
+
+
+def test_every_example_application_retries_finitely() -> None:
+    failures = {str(path.relative_to(REPO)): retry_failures(application(path)) for path in EXAMPLE_APPLICATIONS}
+    assert failures == {name: [] for name in failures}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "named"),
+    [
+        (lambda retry: retry.update(limit=-1), "`retry.limit: -1`"),
+        (lambda retry: retry.update(limit=5), "`retry.limit: 5`"),
+        (lambda retry: retry.clear(), "`retry.limit: None`"),
+        (lambda retry: retry.pop("backoff"), "`retry.backoff.duration` is not set"),
+    ],
+    ids=["forever", "argo-default", "emptied", "no-backoff"],
+)
+def test_an_unbounded_or_default_retry_reddens_the_retry_gate(mutation, named: str) -> None:
+    for path in EXAMPLE_APPLICATIONS:
+        document = copied(application(path))
+        mutation(document["spec"]["syncPolicy"]["retry"])
+        failures = retry_failures(document)
+        assert any(named in failure for failure in failures), (path.name, failures)
+
+
+def test_a_missing_retry_reddens_the_retry_gate() -> None:
+    for path in EXAMPLE_APPLICATIONS:
+        document = copied(application(path))
+        del document["spec"]["syncPolicy"]["retry"]
+        assert len(retry_failures(document)) == 1, path.name
+
+
+def parent_pin_failures(documents: dict[str, dict]) -> list[str]:
+    """Every parent example must pin the same published parent. PURE."""
+    pins = {name: document["spec"]["source"]["targetRevision"] for name, document in documents.items()}
+    charts = {name: document["spec"]["source"]["chart"] for name, document in documents.items()}
+    failures = [f"`{name}` installs chart `{chart}`, not `yadgar`" for name, chart in charts.items() if chart != "yadgar"]
+    if len(set(map(str, pins.values()))) != 1:
+        failures.append(f"the parent examples pin different versions: {pins}")
+    return failures
+
+
+def parent_examples() -> dict[str, dict]:
+    return {str(path.relative_to(REPO)): application(path) for path in PARENT_EXAMPLES}
+
+
+def test_every_parent_example_pins_the_same_parent() -> None:
+    assert parent_pin_failures(parent_examples()) == []
+
+
+def test_a_kind_example_left_on_an_older_parent_reddens_the_pin_gate() -> None:
+    documents = {name: copied(document) for name, document in parent_examples().items()}
+    documents["example/kind/application.yaml"]["spec"]["source"]["targetRevision"] = A_PRE_0808_PIN
+    (failure,) = parent_pin_failures(documents)
+    assert "pin different versions" in failure and A_PRE_0808_PIN in failure, failure
+
+
+# ─── the operators example ─────────────────────────────────────────────────────
+
+
+def platform_inside(parent: Path) -> str:
+    """The `platform` version a published parent package carries. Read from the package."""
+    import tarfile
+
+    with tarfile.open(parent, "r:gz") as archive:
+        return str(yaml.safe_load(archive.extractfile("yadgar/charts/platform/Chart.yaml").read())["version"])
+
+
+def operators_pin_failures(operators: dict, platform_version: str) -> list[str]:
+    """The operators example must pin the `platform` its parent example carries. PURE.
+
+    NOT `chart/Chart.yaml`'s `platform` pin, and the difference is measured rather
+    than preferred: `parent_bump.py` in `yadgarhq/actions` rewrites that pin on
+    every `platform` release, straight to `main` with no pull request, and writes
+    no example. A gate on `Chart.yaml` would redden `main` and every open pull
+    request at the next `platform` release. The parent the examples pin is fixed
+    until somebody moves it, and it fixes which `platform` goes with it.
+    """
+    source = operators["spec"]["source"]
+    failures = []
+    if (source.get("repoURL"), source.get("chart")) != ("ghcr.io/yadgarhq/charts", "platform"):
+        failures.append(f"the operators example does not install `platform` from the registry: {source}")
+    if str(source.get("targetRevision")) != platform_version:
+        failures.append(
+            f"the operators example pins platform {source.get('targetRevision')}, and the parent the "
+            f"examples pin carries platform {platform_version}"
+        )
+    return failures
+
+
+def test_the_operators_example_pins_the_platform_its_parent_carries(pinned: Path) -> None:
+    assert operators_pin_failures(application(OPERATORS_APPLICATION), platform_inside(pinned)) == []
+
+
+def test_a_parent_carrying_another_platform_reddens_the_operators_pin(tmp_path: Path) -> None:
+    """THE RED CASE: 0.3.2 carries an older `platform` than the operators example pins."""
+    older = platform_inside(pulled(A_PRE_0808_PIN, tmp_path))
+    (failure,) = operators_pin_failures(application(OPERATORS_APPLICATION), older)
+    assert f"carries platform {older}" in failure, failure
+
+
+def test_the_operators_example_is_the_measured_application() -> None:
+    spec = application(OPERATORS_APPLICATION)["spec"]
+    assert spec["source"]["helm"]["valuesObject"] == OPERATORS_VALUES
+    assert spec["destination"]["namespace"] == OPERATORS_NAMESPACE
+    # `prune: false`: a pruned CRD deletes every object of its kind.
+    assert spec["syncPolicy"]["automated"] == {"prune": False, "selfHeal": True}
+    assert set(spec["syncPolicy"]["syncOptions"]) == OPERATORS_SYNC_OPTIONS
+
+
+@pytest.fixture(scope="module")
+def operators_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The PUBLISHED `platform` at the operators example's pin, which is what Argo installs."""
+    version = str(application(OPERATORS_APPLICATION)["spec"]["source"]["targetRevision"])
+    destination = tmp_path_factory.mktemp("operators")
+    result = helm("pull", PUBLISHED_PLATFORM, "--version", version, "-d", str(destination))
+    assert result.returncode == 0, f"cannot pull {PUBLISHED_PLATFORM} {version}: {result.stderr}"
+    tarball = destination / f"platform-{version}.tgz"
+    assert tarball.is_file(), sorted(path.name for path in destination.iterdir())
+    return tarball
+
+
+def operators_render(chart: Path, values_object: dict, destination: Path) -> list[dict]:
+    values = overlay(destination / "operators-values.yaml", yaml.safe_dump(values_object))
+    return render(str(chart), "-n", OPERATORS_NAMESPACE, "--include-crds", "-f", str(values))
+
+
+def argo_cd_objects(documents: list[dict]) -> list[str]:
+    return [
+        f"{d['kind']}/{d['metadata']['name']}"
+        for d in documents
+        if ((d["metadata"].get("labels") or {}).get("app.kubernetes.io/part-of")) == ARGO_CD_PART_OF
+    ]
+
+
+def test_the_operators_example_installs_the_four_operators_and_no_argo_cd(
+    operators_chart: Path, tmp_path: Path
+) -> None:
+    documents = operators_render(
+        operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
+    )
+    print(f"\noperators: {len(documents)} objects, {kinds(documents)['CustomResourceDefinition']} CRDs")
+    assert len(documents) == OPERATORS_OBJECTS
+    assert kinds(documents)["CustomResourceDefinition"] == OPERATORS_CRDS
+    assert argo_cd_objects(documents) == []
+
+
+def test_operators_create_alone_installs_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the Argo CD half: without `argoCd.create: false`, Argo CD comes too."""
+    documents = operators_render(operators_chart, {"operators": {"create": True}}, tmp_path)
+    assert len(argo_cd_objects(documents)) == ARGO_CD_OBJECTS
+    assert len(documents) == OPERATORS_OBJECTS + ARGO_CD_OBJECTS
+
+
+def platform_declared(chart: Path) -> dict:
+    """`platform`'s default values, plus every path a dependency `condition` reads.
+
+    `operators.argoCd.create` is declared by no `values.yaml`: it is the first path
+    of the `argo-cd` dependency's `condition` in `platform`'s `Chart.yaml`. Helm
+    reads it all the same, so it is a real key.
+    """
+    import tarfile
+
+    with tarfile.open(chart, "r:gz") as archive:
+        defaults = yaml.safe_load(archive.extractfile("platform/values.yaml").read()) or {}
+        metadata = yaml.safe_load(archive.extractfile("platform/Chart.yaml").read())
+    for dependency in metadata.get("dependencies") or []:
+        for path in str(dependency.get("condition") or "").split(","):
+            if path:
+                node: dict = {}
+                *parents, leaf = path.strip().split(".")
+                cursor = node
+                for step in parents:
+                    cursor = cursor.setdefault(step, {})
+                cursor[leaf] = None
+                defaults = merged(node, defaults)
+    return defaults
+
+
+def test_every_operators_example_key_is_one_platform_declares(operators_chart: Path) -> None:
+    values_object = application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"]
+    assert undeclared_leaves(values_object, platform_declared(operators_chart), "platform") == []
+
+
+def test_a_misspelt_argo_cd_key_is_named_and_would_install_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE: `argoCD` is ignored by helm, so Argo CD installs; the gate names it."""
+    values_object = {"operators": {"create": True, "argoCD": {"create": False}}}
+    failures = undeclared_leaves(values_object, platform_declared(operators_chart), "platform")
+    assert len(failures) == 1 and "`operators.argoCD.create`" in failures[0], failures
+    assert len(argo_cd_objects(operators_render(operators_chart, values_object, tmp_path))) == ARGO_CD_OBJECTS
+
+
+# ─── the kind example ──────────────────────────────────────────────────────────
+
+
+def kind_values() -> dict:
+    return application(KIND_APPLICATION)["spec"]["source"]["helm"]["valuesObject"]
+
+
+def kind_mapping_failures(cluster: dict, values_object: dict) -> list[str]:
+    """The kind config and the kind Application must describe one edge. PURE."""
+    from urllib.parse import urlsplit
+
+    failures = []
+    nodes = cluster.get("nodes") or []
+    if [node.get("role") for node in nodes] != ["control-plane"]:
+        return [f"the kind config is not one control-plane node: {nodes}"]
+    (node,) = nodes
+    if node.get("image") != KIND_NODE_IMAGE:
+        failures.append(f"the node image is `{node.get('image')}`, not the measured `{KIND_NODE_IMAGE}`")
+    mappings = node.get("extraPortMappings") or []
+    if len(mappings) != 1:
+        return failures + [f"the kind config maps {len(mappings)} ports, not the one edge port"]
+    (mapping,) = mappings
+    node_port = value_at(values_object, "platform.gatewayListener.envoyProxy.httpsNodePort")
+    enrolment = urlsplit(str(value_at(values_object, "iam.enrolment.gateway")))
+    if mapping.get("containerPort") != node_port:
+        failures.append(f"containerPort {mapping.get('containerPort')} is not httpsNodePort {node_port}")
+    if mapping.get("hostPort") != enrolment.port:
+        failures.append(f"hostPort {mapping.get('hostPort')} is not the enrolment URL's port {enrolment.port}")
+    if mapping.get("listenAddress") != KIND_LISTEN_ADDRESS:
+        failures.append(f"listenAddress {mapping.get('listenAddress')} is not {KIND_LISTEN_ADDRESS}")
+    if enrolment.hostname != value_at(values_object, HOSTNAME_KEY):
+        failures.append(f"the enrolment URL's host {enrolment.hostname} is not `{HOSTNAME_KEY}`")
+    return failures
+
+
+def test_the_kind_config_maps_the_port_the_kind_example_pins() -> None:
+    assert kind_mapping_failures(yaml.safe_load(KIND_CONFIG.read_text()), kind_values()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "named"),
+    [
+        ("hostPort", 18444, "hostPort 18444"),
+        ("containerPort", 30444, "containerPort 30444"),
+        ("listenAddress", "0.0.0.0", "listenAddress 0.0.0.0"),
+    ],
+)
+def test_a_kind_mapping_that_drifts_from_the_example_reddens_the_mapping_gate(field: str, value, named: str) -> None:
+    cluster = yaml.safe_load(KIND_CONFIG.read_text())
+    cluster["nodes"][0]["extraPortMappings"][0][field] = value
+    failures = kind_mapping_failures(cluster, kind_values())
+    assert len(failures) == 1 and named in failures[0], failures
+
+
+def test_an_unpinned_kind_node_image_reddens_the_mapping_gate() -> None:
+    cluster = yaml.safe_load(KIND_CONFIG.read_text())
+    cluster["nodes"][0]["image"] = "kindest/node:v1.36.1"
+    (failure,) = kind_mapping_failures(cluster, kind_values())
+    assert "not the measured" in failure, failure
+
+
+def test_the_kind_example_pins_the_parent_the_suite_pulled(pinned: Path) -> None:
+    """`pinned` is pulled at `application.yaml`'s pin; the kind gates below reuse it."""
+    assert pinned.name == f"yadgar-{application(KIND_APPLICATION)['spec']['source']['targetRevision']}.tgz"
+
+
+def test_every_kind_example_key_is_one_a_chart_declares(pinned: Path) -> None:
+    assert unrecognised_keys(kind_values(), pinned) == []
+
+
+def test_a_misspelt_kind_example_key_reddens_the_recognition_gate(pinned: Path) -> None:
+    values_object = copied(kind_values())
+    proxy = values_object["platform"]["gatewayListener"]["envoyProxy"]
+    proxy["httpsNodePrt"] = proxy.pop("httpsNodePort")
+    failures = unrecognised_keys(values_object, pinned)
+    assert len(failures) == 1 and "`platform.gatewayListener.envoyProxy.httpsNodePrt`" in failures[0], failures
+
+
+def kind_edge_failures(documents: list[dict], values_object: dict) -> list[str]:
+    """What the render must carry for kind's mapping to reach the edge. PURE."""
+    proxies = [d for d in documents if d.get("kind") == "EnvoyProxy" and d["metadata"]["name"] == KIND_EDGE]
+    if len(proxies) != 1:
+        return [f"{len(proxies)} EnvoyProxy objects named `{KIND_EDGE}`"]
+    kubernetes = proxies[0]["spec"]["provider"]["kubernetes"]
+    service = kubernetes.get("envoyService") or {}
+    pod = (kubernetes.get("envoyDeployment") or {}).get("pod") or {}
+    stated = values_object["platform"]["gatewayListener"]["envoyProxy"]
+    failures = []
+    if service.get("type") != "NodePort":
+        failures.append(f"the edge Service type renders `{service.get('type')}`, not NodePort")
+    ports = (((service.get("patch") or {}).get("value") or {}).get("spec") or {}).get("ports")
+    if ports != [{"port": 443, "nodePort": stated["httpsNodePort"]}]:
+        failures.append(f"the edge Service patch renders ports {ports}, not 443 on node port {stated['httpsNodePort']}")
+    if pod.get("nodeSelector") != stated["pod"]["nodeSelector"]:
+        failures.append(f"the Envoy pods render nodeSelector {pod.get('nodeSelector')}")
+    if pod.get("tolerations") != stated["pod"]["tolerations"]:
+        failures.append(f"the Envoy pods render tolerations {pod.get('tolerations')}")
+    host = value_at(values_object, HOSTNAME_KEY)
+    sites = hostname_sites(documents)
+    expected = {**derived_from(host), "iam.enrolment.gateway": value_at(values_object, "iam.enrolment.gateway")}
+    failures += [f"`{key}` renders {sites[key]!r}, not {expected[key]!r}" for key in expected if sites[key] != expected[key]]
+    return failures
+
+
+def test_the_kind_example_renders_a_node_port_edge_and_the_enrolment_port(pinned: Path, tmp_path: Path) -> None:
+    result = example_render(pinned, kind_values(), tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert kind_edge_failures(documents, kind_values()) == []
+    assert len(documents) == EXAMPLE_PIN_OBJECTS
+    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS))
+
+
+def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_path: Path) -> None:
+    """THE RED CASE: `application.yaml`'s render has none of what kind needs."""
+    result = example_render(pinned, example_source()["helm"]["valuesObject"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    failures = kind_edge_failures(documents, kind_values())
+    assert any("not NodePort" in failure for failure in failures), failures
+    assert any("node port 30443" in failure for failure in failures), failures
+    assert any("nodeSelector" in failure for failure in failures), failures
+    assert any("`iam.enrolment.gateway`" in failure for failure in failures), failures

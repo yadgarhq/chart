@@ -1,0 +1,71 @@
+# THE FOUR OPERATORS `application.yaml` NEEDS, AS AN APPLICATION OF THEIR OWN.
+# Sync this one first. `application.yaml` beside it installs no operator — its
+# parent refuses `platform.operators.*` outright (ADR-0787) — and its render checks
+# refuse a cluster that lacks cert-manager, Envoy Gateway, mariadb-operator or KEDA.
+#
+# WHAT IT INSTALLS: the `platform` chart with its `operators` half on and nothing
+# else, measured 2026-09-30 on a kind VM against platform 0.1.19 — cert-manager,
+# Envoy Gateway, mariadb-operator and KEDA with their CRDs, 151 objects, 45 CRDs,
+# Synced/Healthy in 2m15s. The chart's other toggles (`internalCA`,
+# `gatewayListener`, `valkey`, ...) keep `platform`'s own defaults, which are all
+# false: the estate's half of `platform` comes in through `application.yaml`.
+#
+# ARGO CD IS OFF, because it is the thing reading this file. `operators.create`
+# alone also installs Argo CD (53 more objects); a second Argo CD beside the one
+# you already run is never what you want. The key is not in `platform`'s
+# `values.yaml`: it is the `condition` on the `argo-cd` dependency in
+# `platform`'s `Chart.yaml`, and a typo in it installs Argo CD rather than
+# failing. `scripts/tests/test_parent_chart.py` names such a typo.
+#
+# THE PIN MOVES WITH `application.yaml`, NEVER ON ITS OWN. `targetRevision` below
+# is the `platform` version the parent `application.yaml` pins carries inside it
+# (`yadgar/charts/platform`), so the operators and the estate come from the same
+# release. The suite pulls that parent and holds the two equal. Bump both in one
+# commit.
+#
+# THIS FILE IS A REFERENCE, NOT A LIVE MANIFEST. Nothing in this repository syncs
+# it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: operators
+  # ARGO'S namespace, not the workload's.
+  namespace: argocd
+spec:
+  # CHANGE THIS if your Argo uses a project other than `default`.
+  project: default
+  source:
+    # SCHEME-LESS `repoURL` WITH `chart:`, the same form as `application.yaml`.
+    repoURL: ghcr.io/yadgarhq/charts
+    chart: platform
+    # BARE SEMVER. The `platform` version inside the parent `application.yaml`
+    # pins (0.3.8 carries 0.1.19).
+    targetRevision: 0.1.19
+    helm:
+      valuesObject:
+        operators:
+          create: true
+          argoCd:
+            create: false
+  destination:
+    server: https://kubernetes.default.svc
+    # ENVOY GATEWAY'S CONTROLLER NAMESPACE, and so also where the edge's Envoy
+    # pods and their Service land once `application.yaml` syncs.
+    namespace: yadgar-operators
+  syncPolicy:
+    # `prune: false`: an operator's CRDs own every custom resource in the cluster.
+    # A pruned CRD deletes each object of its kind, the estate's included.
+    automated: { prune: false, selfHeal: true }
+    # `ServerSideApply=true`: four of these CRDs exceed the 256 KiB annotation
+    # a client-side apply writes, and the apply is refused.
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+    # A FINITE RETRY THAT OUTLASTS OPERATOR START-UP. KEDA's pods restart while its
+    # webhook bootstraps, and Argo's default budget is 5 attempts. Never `-1`: an
+    # Application that can never go Healthy then retries forever and says so
+    # nowhere.
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

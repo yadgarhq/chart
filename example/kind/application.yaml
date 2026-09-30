@@ -1,0 +1,96 @@
+# `../application.yaml` FOR A kind CLUSTER, where no load-balancer controller
+# exists. Create the cluster from `kind-config.yaml` beside this file, install
+# Argo CD, sync `../operators-application.yaml`, then sync this one.
+#
+# MEASURED 2026-09-30 on a kind VM against 0.3.8: every workload up, and
+# `curl --cacert <edge CA> https://gateway.yadgar.internal:18443/` answered from
+# the host. Read `../application.yaml` for everything this file shares with it —
+# the `ignoreDifferences` block, the scheme-less `repoURL`, the one namespace.
+# Only the edge differs.
+#
+# ─── what `valuesObject` holds ───────────────────────────────────────────────
+#
+#   1. THE HOSTNAME, `gateway.yadgar.internal`, the chart's own built-in. Point
+#      it at 127.0.0.1 in `/etc/hosts`.
+#   2. THE ENROLMENT URL WITH ITS PORT. `global.hostname` derives
+#      `https://<hostname>` with no port, and the edge answers on the host at
+#      18443, so `iam.enrolment.gateway` is set here. This is the one case
+#      `../application.yaml` names where a per-chart key beside `global.hostname`
+#      is right: the host is the same, only the port differs.
+#   3. THE EDGE AS A NodePort, pinned to 30443 — `kind-config.yaml` maps that
+#      node port to 127.0.0.1:18443. An unpinned node port is allocated at random
+#      and the mapping then points at nothing.
+#   4. THE ENVOY PODS ON THE CONTROL-PLANE NODE, the one node kind creates, with
+#      the toleration for its taint.
+#
+# NO `edgeTLS.issuerRef`. The edge certificate is issued by the installation's
+# own internal CA, which is right for a cluster on one machine. Trust it with
+# the `ca.crt` of Secret `gateway-tls` in namespace `yadgar`; an enrolment token
+# also carries that CA.
+#
+# TWO THINGS STAY RED ON THIS CLUSTER AT 0.3.8, measured, and neither is a fault
+# of this file:
+#
+#   - PROMETHEUS. The modules' ScaledObjects query
+#     `prometheus-server.observability`, and neither Application installs it.
+#     Without it every ScaledObject reports `TriggerError` and this Application
+#     stays `Degraded`.
+#   - THE PostSync `envoy-gateway-probe` Job fails at its 300 s bound. Its probe
+#     Gateway reuses EnvoyProxy `edge`, so its Service asks for node port 30443
+#     too, which the real edge Service already holds. The estate itself is
+#     `Healthy`; the sync operation reports `Failed`. Setting
+#     `platform.preflight.probes.envoyGateway: false` removes that probe.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yadgar
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ghcr.io/yadgarhq/charts
+    chart: yadgar
+    # THE SAME PIN AS `../application.yaml`. The suite holds the two equal.
+    targetRevision: 0.3.8
+    helm:
+      valuesObject:
+        global:
+          hostname: gateway.yadgar.internal
+        iam:
+          enrolment:
+            # THE HOST PORT IN `kind-config.yaml`.
+            gateway: "https://gateway.yadgar.internal:18443"
+        platform:
+          gatewayListener:
+            envoyProxy:
+              serviceType: NodePort
+              # THE CONTAINER PORT IN `kind-config.yaml`.
+              httpsNodePort: 30443
+              pod:
+                nodeSelector:
+                  node-role.kubernetes.io/control-plane: ""
+                tolerations:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+                    effect: NoSchedule
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: yadgar
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+    # A FINITE RETRY THAT OUTLASTS OPERATOR AND DATABASE START-UP. Measured: with
+    # Argo's default of 5 attempts the budget ran out while the Application was
+    # still `Degraded`, and a hand-started sync was the only way on. Never `-1`.
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    - group: k8s.mariadb.com
+      kind: MariaDB
+      jsonPointers:
+        - /spec/rootPasswordSecretKeyRef/generate
+        - /spec/passwordSecretKeyRef/generate

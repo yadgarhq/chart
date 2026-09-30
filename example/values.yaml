@@ -30,7 +30,7 @@
 # prints the parent's own file, which is almost empty by design — render the
 # version you pinned instead, and read the children's values from it:
 #
-#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.5
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.8
 #
 # ─── what happens if you set something no child declares ─────────────────────
 #
@@ -48,7 +48,7 @@
 # read the object you meant to change.
 #
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
-#     --version 0.3.5 -f values.yaml | less
+#     --version 0.3.8 -f values.yaml | less
 #
 # ─── rendering this file OFFLINE needs four flags ────────────────────────────
 #

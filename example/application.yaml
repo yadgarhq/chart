@@ -13,7 +13,9 @@
 # FOUR OPERATORS MUST ALREADY RUN IN THE CLUSTER: cert-manager, Envoy Gateway,
 # mariadb-operator and KEDA. The chart installs none of them. Without one, the
 # sync fails at a render check that names the missing operator, before any object
-# is applied.
+# is applied. `operators-application.yaml` beside this file installs all four;
+# sync it first. On a kind cluster use `kind/application.yaml` instead of this
+# file.
 #
 # THIS FILE IS A REFERENCE, NOT A LIVE MANIFEST. Nothing in this repository syncs
 # it. `scripts/tests/test_parent_chart.py` pulls the pinned version from the
@@ -56,7 +58,7 @@
 # is accepted and silently ignored — `config` is the one child that refuses a
 # typo by name. Render before you sync:
 #
-#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.5 \
+#   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version 0.3.8 \
 #     -f values.yaml | less
 #
 # TO RUN YOUR OWN PLATFORM LAYER, add `platform.enabled: false` and
@@ -101,10 +103,12 @@ spec:
     repoURL: ghcr.io/yadgarhq/charts
     chart: yadgar
     # EDIT THIS, and bump it deliberately. This is the line an upgrade moves.
-    # BARE SEMVER, no leading `v`: the git tag is `v0.3.5`, the chart version
-    # `0.3.5`. 0.3.5 is the first release whose platform, gateway and iam read
-    # `global.hostname` (ADR-0808).
-    targetRevision: 0.3.5
+    # BARE SEMVER, no leading `v`: the git tag is `v0.3.8`, the chart version
+    # `0.3.8`. 0.3.5 was the first release whose platform, gateway and iam read
+    # `global.hostname` (ADR-0808). `kind/application.yaml` pins the same
+    # version, and `operators-application.yaml` pins the `platform` this version
+    # carries; move all three in one commit.
+    targetRevision: 0.3.8
     helm:
       valuesObject:
         # YOUR HOSTNAME, once. Replace `yadgar.example.com`.
@@ -130,6 +134,17 @@ spec:
   syncPolicy:
     automated: { prune: true, selfHeal: true }
     syncOptions: [CreateNamespace=true]
+    # A FINITE RETRY THAT OUTLASTS OPERATOR AND DATABASE START-UP. Measured
+    # 2026-09-30 on kind: with Argo's default of 5 attempts the budget ran out
+    # while the Application was still `Degraded`, and a hand-started sync was the
+    # only way on. Never `-1`: an Application that can never go Healthy then
+    # retries forever and says so nowhere.
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
 
   # KEEP THIS BLOCK WHILE ANY `*-db.database.create` IS TRUE — and the chart's
   # defaults set all three. It is not decoration and it is not about drift you can
