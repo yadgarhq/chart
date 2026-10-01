@@ -8,6 +8,18 @@ configs:
     # NO TLS ON THE API SERVER. Nothing outside the cluster reaches it: the
     # script talks to the Kubernetes API, never to Argo's own.
     server.insecure: true
+    # END A SYNC THAT NEVER ENDS (ledger 1208). v3.1.8's default, "0", never
+    # times out, so a PreSync hook Job whose image cannot be pulled holds its
+    # operation Running for ever and `retry` never fires. After this many seconds
+    # from the operation's start the controller deletes its running hooks and
+    # marks it Failed, and the Application reads Failed instead of Syncing.
+    # The clock covers the WHOLE operation, retries and backoff included
+    # (`controller/appcontroller.go:1420`, v3.1.8), so the value must outlast the
+    # longest chain the examples' retry gate allows: 1200 s of backoff plus one
+    # 300 s hook bound for each of 7 attempts, 3300 s. The longest operation
+    # measured (v0.3.15) took 4m12s. `scripts/tests/test_argocd_values.py`
+    # derives that floor from the gate and fails a value below it.
+    controller.sync.timeout.seconds: "3600"
   cm:
     # POLL THE REGISTRY EVERY MINUTE rather than every three, so a first sync
     # starts promptly after `kubectl apply`.
