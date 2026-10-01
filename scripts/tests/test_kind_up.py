@@ -791,6 +791,12 @@ def full_rules(bootstrap: str, enrolment: str) -> list[dict]:
     ops_ok = app_json("operators", "Succeeded", revision="0.1.19", target="0.1.19")
     return admin_rules(bootstrap, enrolment) + [
         {"cmd": "kind", "match": ["get", "clusters"], "stdout": ["", "yadgar\n"]},
+        {"cmd": "kind", "match": ["export", "kubeconfig"], "write_arg": "--kubeconfig",
+         "write_content": "apiVersion: v1\nkind: Config\n"},
+        # `kubectl diff` exits 1 when the live object differs (first run: absent)
+        # and 0 when it matches (every later run).
+        {"cmd": "kubectl", "match": [" diff -f ", "operators-application.yaml"], "exit": [1, 0]},
+        {"cmd": "kubectl", "match": [" diff -f ", "kind/application.yaml"], "exit": [1, 0]},
         {"cmd": "kubectl", "match": ["get", "--raw", "/readyz"], "stdout": "ok"},
         {"cmd": "kubectl", "match": ["get", "nodes"],
          "stdout": json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},
@@ -836,7 +842,7 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
     for c in rig.calls("kind"):
         if c["argv"][:1] == ["version"] or c["argv"][:2] == ["get", "clusters"]:
             continue
-        assert c["argv"][c["argv"].index("--kubeconfig") + 1] == kubeconfig, c
+        assert c["argv"][c["argv"].index("--kubeconfig") + 1] in (kubeconfig, kubeconfig + ".new"), c
     applied = [c["argv"][c["argv"].index("-f") + 1] for c in rig.calls("kubectl") if "apply" in c["argv"]]
     assert applied == [
         str(REPO / "example" / "operators-application.yaml"),
@@ -844,12 +850,26 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
     ]
     assert_absent(rig, first, bootstrap, base64.b64encode(bootstrap.encode()).decode(), enrolment)
 
+    ca_before = ca_file.stat()
+    kubeconfig_file = rig.state / "kubeconfig"
+    kubeconfig_file.write_text("apiVersion: v1\nkind: Config\n")
+    kc_before = kubeconfig_file.stat()
+
     rig.reset_calls()
     second = rig.main()
     assert second.returncode == 0, second.stdout + second.stderr
+    # WRITE-FREE: no apply when `kubectl diff` finds nothing, and the CA and the
+    # kubeconfig are not rewritten with the content they already hold.
+    assert not [c for c in rig.calls("kubectl") if "apply" in c["argv"]], "applied an unchanged Application"
+    assert second.stdout.count("unchanged") >= 4, second.stdout
+    for before, path in ((ca_before, ca_file), (kc_before, kubeconfig_file)):
+        after = path.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns), f"{path} rewritten"
     assert not [c for c in rig.calls("kind") if "create" in c["argv"]], "created the cluster again"
     exports = [c for c in rig.calls("kind") if "export" in c["argv"]]
-    assert exports and all(c["argv"][c["argv"].index("--kubeconfig") + 1] == kubeconfig for c in exports)
+    assert exports and all(
+        c["argv"][c["argv"].index("--kubeconfig") + 1] in (kubeconfig, kubeconfig + ".new") for c in exports
+    )
     helm_writes = [c for c in rig.calls("helm") if {"upgrade", "install", "uninstall", "rollback"} & set(c["argv"])]
     assert helm_writes == [], "wrote a new Argo CD release revision with nothing to change"
     assert rig.calls("apt-get") == []
@@ -1010,3 +1030,95 @@ def test_login_is_retried_but_the_single_use_token_is_never_resent(rig: Rig) -> 
     assert second.returncode == 0, second.stdout + second.stderr
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
     assert len([c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["login"]]) == 1
+
+
+def test_a_changed_application_is_applied_and_the_difference_logged(rig: Rig) -> None:
+    rig.rules = [
+        {"cmd": "kubectl", "match": [" diff -f "], "exit": 1,
+         "stdout": "-      prune: false\n+      prune: true\n"},
+        {"cmd": "kubectl", "match": ["get", "application", "operators"],
+         "stdout": app_json("operators", "Succeeded", revision="0.1.21", target="0.1.21")},
+    ] + rig.rules
+    proc = rig.run(f'load_examples; ensure_application 6 "$OPERATORS_APP_FILE" operators 0')
+    assert proc.returncode == 0, proc.stderr
+    assert [c for c in rig.calls("kubectl") if "apply" in c["argv"]]
+    assert "prune: false" in rig.log.read_text(), "the differing field was not logged"
+
+
+def test_a_diff_that_errors_falls_back_to_apply(rig: Rig) -> None:
+    rig.rules = [
+        {"cmd": "kubectl", "match": [" diff -f "], "exit": 2, "stderr": "error: something\n"},
+        {"cmd": "kubectl", "match": ["get", "application", "operators"],
+         "stdout": app_json("operators", "Succeeded", revision="0.1.21", target="0.1.21")},
+    ] + rig.rules
+    proc = rig.run(f'load_examples; ensure_application 6 "$OPERATORS_APP_FILE" operators 0')
+    assert proc.returncode == 0, proc.stderr
+    assert [c for c in rig.calls("kubectl") if "apply" in c["argv"]]
+
+
+def test_a_changed_kubeconfig_is_replaced(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "kind", "match": ["get", "clusters"], "stdout": "yadgar\n"},
+        {"cmd": "kind", "match": ["export", "kubeconfig"], "write_arg": "--kubeconfig",
+         "write_content": "apiVersion: v1\nkind: Config\n# new port\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    rig.state.mkdir(exist_ok=True)
+    (rig.state / "kubeconfig").write_text("apiVersion: v1\nkind: Config\n")
+    proc = rig.run("load_examples; detect_runtime; ensure_cluster")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (rig.state / "kubeconfig").read_text().endswith("# new port\n")
+    assert stat.S_IMODE((rig.state / "kubeconfig").stat().st_mode) == 0o600
+    assert not (rig.state / "kubeconfig.new").exists()
+
+
+def test_retries_inside_one_operation_are_logged(rig: Rig) -> None:
+    def retrying(n: int, message: str) -> str:
+        doc = json.loads(app_json("operators", "Running", health="Progressing", revision="0.1.21", target="0.1.21",
+                                  message=message))
+        doc["status"]["operationState"]["retryCount"] = n
+        return json.dumps(doc)
+
+    done = json.loads(app_json("operators", "Succeeded", revision="0.1.21", target="0.1.21"))
+    done["status"]["operationState"]["retryCount"] = 2
+    rig.rules = [
+        {"cmd": "kubectl", "match": ["get", "application", "operators"], "stdout": [
+            retrying(1, "one or more synchronization tasks completed unsuccessfully. Retrying attempt #1 at 10:46PM."),
+            retrying(2, "one or more synchronization tasks completed unsuccessfully. Retrying attempt #2 at 10:47PM."),
+            json.dumps(done),
+        ]},
+    ] + rig.rules
+    proc = rig.run("load_examples; wait_app operators 60")
+    assert proc.returncode == 0, proc.stderr
+    assert "retries=1" in proc.stdout and "Retrying attempt #1" in proc.stdout
+    assert "retries=2" in proc.stdout and "Retrying attempt #2" in proc.stdout
+    assert "Succeeded after 2 retries" in proc.stdout
+
+
+def test_the_header_says_argo_may_retry_within_the_first_operation() -> None:
+    assert "first operation succeeds (Argo may retry within it)" in SCRIPT.read_text()
+
+
+def test_a_clock_far_behind_the_network_is_warned_about(rig: Rig) -> None:
+    rig.rules = [
+        {"cmd": "curl", "match": ["-I"], "stdout": "HTTP/2 200\r\ndate: Wed, 01 Jan 2031 00:00:00 GMT\r\n\r\n"},
+    ] + rig.rules
+    proc = rig.run("check_clock")
+    assert proc.returncode == 0, proc.stderr
+    assert "clock" in proc.stdout and "behind" in proc.stdout
+
+
+def test_no_network_answer_says_nothing_about_the_clock(rig: Rig) -> None:
+    proc = rig.run("check_clock")
+    assert proc.returncode == 0, proc.stderr
+    assert "behind" not in proc.stdout
+
+
+def test_a_clock_in_step_with_the_network_says_nothing(rig: Rig) -> None:
+    import email.utils  # noqa: PLC0415
+
+    now = email.utils.formatdate(usegmt=True)
+    rig.rules = [{"cmd": "curl", "match": ["-I"], "stdout": f"HTTP/2 200\r\ndate: {now}\r\n\r\n"}] + rig.rules
+    proc = rig.run("check_clock")
+    assert proc.returncode == 0, proc.stderr
+    assert "behind" not in proc.stdout

@@ -16,9 +16,10 @@ WHAT IT DOES, per call:
    stdout or the log.
 2. Finds the first rule in `$FAKE_DIR/rules.json` whose `cmd` equals this name
    and whose every `match` substring occurs in the joined argv.
-3. Writes the rule's `stdout` (a string, or a list consumed one entry per call,
-   the last repeating), writes `o_content` to the path after `-o` if both exist,
-   and exits with `exit` (default 0).
+3. Writes the rule's `stdout`, writes `o_content` to the path after `-o` if both
+   exist, writes `write_content` to the path after the flag `write_arg` names,
+   and exits with `exit` (default 0). `stdout` and `exit` may each be a list,
+   consumed one entry per call to that rule, the last repeating.
 
 No rule matches: exit 0 with no output. The tests assert on `calls.jsonl`, so an
 unexpected call is caught there rather than by the fake refusing it.
@@ -61,17 +62,23 @@ def main() -> int:
             continue
         if not all(m in joined for m in rule.get("match", [])):
             continue
-        out = rule.get("stdout", "")
-        if isinstance(out, list):
-            counter = fake_dir / f"counter-{index}"
-            n = int(counter.read_text()) if counter.exists() else 0
-            counter.write_text(str(n + 1))
-            out = out[min(n, len(out) - 1)]
+        counter = fake_dir / f"counter-{index}"
+        n = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(n + 1))
+
+        def nth(value):
+            return value[min(n, len(value) - 1)] if isinstance(value, list) else value
+
+        out = nth(rule.get("stdout", ""))
         if "o_content" in rule and "-o" in argv:
             Path(argv[argv.index("-o") + 1]).write_text(rule["o_content"], encoding="utf-8")
+        # `write_arg`: write `write_content` to the path after that flag, the way
+        # `kind export kubeconfig --kubeconfig <path>` writes its file.
+        if "write_arg" in rule and rule["write_arg"] in argv:
+            Path(argv[argv.index(rule["write_arg"]) + 1]).write_text(rule["write_content"], encoding="utf-8")
         sys.stdout.write(out)
         sys.stderr.write(rule.get("stderr", ""))
-        return int(rule.get("exit", 0))
+        return int(nth(rule.get("exit", 0)))
     return 0
 
 

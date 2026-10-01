@@ -25,10 +25,15 @@
 # `example/operators-application.yaml`, `example/kind/application.yaml` and
 # `example/kind/kind-config.yaml`. Their pins are the pins, in one place.
 #
-# THE ARGO APPLICATIONS MUST SUCCEED ON THEIR FIRST SYNC. The script waits for
-# `Synced`, `Healthy` and operation `Succeeded`, and never starts, forces or
-# terminates a sync. A failed operation exits non-zero with the failing
-# resources named.
+# THE ARGO APPLICATIONS MUST SUCCEED ON THEIR FIRST SYNC, which means their
+# first operation succeeds (Argo may retry within it). It waits for `Synced`, `Healthy`
+# and operation `Succeeded`, logs each retry Argo makes inside that operation,
+# and never starts, forces or terminates a sync. A failed operation exits
+# non-zero with the failing resources named.
+#
+# A SECOND RUN WRITES NOTHING that has not changed: an Application is applied
+# only when `kubectl diff` finds a difference, and the edge CA and the
+# kubeconfig are replaced only when their content differs.
 #
 # NO SECRET IS EVER PRINTED OR PASSED AS AN ARGUMENT. The bootstrap token goes to
 # `curl` on stdin; the enrolment token and the client password go only to 0600
@@ -148,6 +153,20 @@ run() {
   "$@" 2>&1 | tee -a "$LOG_FILE"
 }
 
+# Moves $1 over $2 when their content differs, else deletes $1. Prints
+# `unchanged` or `written`. Mode and ownership are $1's.
+replace_if_changed() {
+  local new="$1" target="$2"
+  if [[ -f "$target" ]] &&
+    [[ "$(sha256sum <"$new" | awk '{ print $1 }')" == "$(sha256sum <"$target" | awk '{ print $1 }')" ]]; then
+    rm -f "$new"
+    echo unchanged
+  else
+    mv -f "$new" "$target"
+    echo written
+  fi
+}
+
 # ─── the kind cluster, and nothing else ──────────────────────────────────────
 
 k() { "$BIN_DIR/kubectl" --kubeconfig "$KUBECONFIG_FILE" --context "kind-$CLUSTER_NAME" "$@"; }
@@ -221,6 +240,23 @@ detect_runtime() {
   [[ "$RUNTIME" == podman || "$RUNTIME" == docker ]] || die "YADGAR_RUNTIME must be podman or docker, not $RUNTIME"
   if [[ "$RUNTIME" == podman ]]; then export KIND_EXPERIMENTAL_PROVIDER=podman; fi
   log "[1/10] container runtime: $RUNTIME"
+}
+
+# A GUEST CLOCK FAR BEHIND makes every TLS certificate look not yet valid, and
+# reads as download and cluster failures far from the cause. A VM restored from
+# a snapshot starts with the snapshot's time until it syncs. So compare with
+# the Date header of the host the tools come from, and warn — never fail: no
+# network answer, no warning.
+check_clock() {
+  local header remote now
+  header="$(curl -fsS -I --max-time 10 https://dl.k8s.io/ 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "date:" { $1 = ""; print; exit }' || true)"
+  [[ -n "$header" ]] || return 0
+  remote="$(date -u -d "$header" +%s 2>/dev/null || true)"
+  [[ -n "$remote" ]] || return 0
+  now="$(date -u +%s)"
+  if ((remote - now > 300)); then
+    log "[1/10] WARNING: this host's clock is $(((remote - now) / 60)) minutes behind dl.k8s.io; TLS will fail until it syncs (timedatectl)"
+  fi
 }
 
 # ─── 2. sysctls ──────────────────────────────────────────────────────────────
@@ -325,10 +361,19 @@ ensure_tool() {
 # never deleted: it may hold someone's work.
 ensure_cluster() {
   umask 077
-  touch "$KUBECONFIG_FILE"
+  # Created 0600 before kind writes into it; never touched again, so a rerun
+  # leaves its mtime alone.
+  [[ -e "$KUBECONFIG_FILE" ]] || : >"$KUBECONFIG_FILE"
   if "$BIN_DIR/kind" get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
-    "$BIN_DIR/kind" export kubeconfig --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1 ||
+    # Exported beside the kubeconfig and moved over it only when it differs, so
+    # a rerun does not rewrite it.
+    rm -f "$KUBECONFIG_FILE.new"
+    touch "$KUBECONFIG_FILE.new"
+    "$BIN_DIR/kind" export kubeconfig --name "$CLUSTER_NAME" --kubeconfig "$KUBECONFIG_FILE.new" >/dev/null 2>&1 || {
+      rm -f "$KUBECONFIG_FILE.new"
       die "kind cluster $CLUSTER_NAME exists but its kubeconfig cannot be exported"
+    }
+    log "[4/10] kubeconfig $KUBECONFIG_FILE $(replace_if_changed "$KUBECONFIG_FILE.new" "$KUBECONFIG_FILE")"
     [[ "$(k get --raw /readyz 2>/dev/null)" == ok ]] ||
       die "kind cluster $CLUSTER_NAME exists but its API is not ready. After a reboot its node is stopped: $RUNTIME start $CLUSTER_NAME-control-plane, then run this again"
     k get nodes -o json | jq -e '[.items[].status.conditions[] | select(.type == "Ready") | .status == "True"] | all' >/dev/null ||
@@ -434,7 +479,7 @@ wait_app() {
     verdict="$(app_verdict <<<"$doc")"
     case "$verdict" in
       ok)
-        log "Application $name: Synced, Healthy, operation Succeeded"
+        log "Application $name: Synced, Healthy, operation Succeeded after $(jq -r '.status.operationState.retryCount // 0' <<<"$doc") retries"
         return 0
         ;;
       failed)
@@ -451,17 +496,31 @@ wait_app() {
     fi
     local summary="not readable yet"
     if [[ -n "$doc" ]]; then
-      summary="$(jq -r '"sync=\(.status.sync.status // "-") health=\(.status.health.status // "-") operation=\(.status.operationState.phase // "-") target=\(.spec.source.targetRevision // "-") sync-revision=\(.status.sync.revision // "-") operation-revision=\(.status.operationState.operation.sync.revision // .status.operationState.syncResult.revision // "-") \(.status.operationState.message // "")"' <<<"$doc")"
+      summary="$(jq -r '"sync=\(.status.sync.status // "-") health=\(.status.health.status // "-") operation=\(.status.operationState.phase // "-") retries=\(.status.operationState.retryCount // 0) target=\(.spec.source.targetRevision // "-") sync-revision=\(.status.sync.revision // "-") operation-revision=\(.status.operationState.operation.sync.revision // .status.operationState.syncResult.revision // "-") \(.status.operationState.message // "")"' <<<"$doc")"
     fi
     log "Application $name: $summary"
     sleep "$POLL_SECONDS"
   done
 }
 
+# Applied only when `kubectl diff` (a server-side dry run against the live
+# object) finds a difference, which is logged so the field is named. A diff
+# that errors falls back to the apply, which is idempotent either way.
 ensure_application() {
-  local step="$1" file="$2" name="$3" timeout="$4"
-  log "[$step/10] applying $file"
-  run k apply -f "$file"
+  local step="$1" file="$2" name="$3" timeout="$4" rc=0 diff_out
+  diff_out="$(k diff -f "$file" 2>&1)" || rc=$?
+  case "$rc" in
+    0) log "[$step/10] Application $name unchanged; not applied" ;;
+    1)
+      log "[$step/10] Application $name differs from $file:"
+      printf '%s\n' "$diff_out" | tee -a "$LOG_FILE"
+      run k apply -f "$file"
+      ;;
+    *)
+      log "[$step/10] kubectl diff could not compare $name (exit $rc): $diff_out"
+      run k apply -f "$file"
+      ;;
+  esac
   log "[$step/10] waiting up to ${timeout}s for $name"
   wait_app "$name" "$timeout" || die "Application $name did not succeed on its first sync"
 }
@@ -498,9 +557,8 @@ ensure_edge_ca() {
   # 0755 explicitly: the script runs under umask 077, and a 0644 file in a
   # 0700 directory is readable by root alone.
   install -d -m 0755 "$(dirname "$CA_FILE")"
-  install -m 0644 "$tmp" "$CA_FILE"
-  rm -f "$tmp"
-  log "[8/10] edge CA written to $CA_FILE"
+  chmod 0644 "$tmp"
+  log "[8/10] edge CA $CA_FILE $(replace_if_changed "$tmp" "$CA_FILE")"
 }
 
 # The gateway answers GET / with 405 "MCP uses POST": TLS, the hostname, the
@@ -782,6 +840,7 @@ main() {
   log "kind-up: cluster $CLUSTER_NAME, edge $GATEWAY_URL, log $LOG_FILE"
 
   ensure_packages
+  check_clock
   detect_runtime
   ensure_sysctls
   ensure_tool kind
