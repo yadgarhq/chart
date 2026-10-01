@@ -244,10 +244,19 @@ def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
 #
 # SO THE VALUE MUST OUTLAST THE LONGEST LEGITIMATE OPERATION, retries included,
 # or it cuts off a chain the retry gate allows. The gate allows up to
-# RETRY_WINDOW_SECONDS[1] of backoff, and every attempt may run both of the
-# estate's polling hooks to their bound (ATTEMPT_ALLOWANCE_SECONDS below). With
-# `limit: 6`: 1200 + 7 x 420 = 4140 s. 4200 s clears that. The longest operation
-# measured on the v0.3.15 VM run took 4m12s with 2 retries.
+# RETRY_WINDOW_SECONDS[1] of backoff, and every attempt may run the estate's
+# hook Jobs to the bounds `platform` documents (ATTEMPT_ALLOWANCE_SECONDS below).
+# With `limit: 6`: 1200 + 7 x 2955 = 21885 s. 22200 s (6.2 h) clears that. Max
+# ruled 2026-10-01: keep the documented margins now, tighten through per-hook
+# deadlines later (ledger 1224). The longest operation measured on the v0.3.15
+# VM run took 4m12s with 2 retries, so the floor is a sum of ceilings, not a
+# measurement.
+#
+# THE RETRY WAITS that RETRY_WINDOW_SECONDS bounds are k = 1..limit, not
+# k = 0..limit-1: `:1485` increments `RetryCount` before the wait that gates the
+# retry is computed at `:1401`. Measured on the v0.3.15 VM run (15s x2): 30 s
+# before retry 1, 60 s before retry 2. `retry_window` in `test_parent_chart.py`
+# computes the same.
 #
 # AND IT MUST FIT A GO INT32. The controller reads the env var with
 # `env.ParseNumFromEnv(..., 0, 0, math.MaxInt32)`
@@ -258,25 +267,39 @@ def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
 SYNC_TIMEOUT_KEY = "controller.sync.timeout.seconds"
 MAX_INT32 = 2_147_483_647
 
-# THE HOOK TIME ONE ATTEMPT MAY LEGITIMATELY SPEND, from the hooks themselves:
-# the published `yadgar` chart at the kind example's pin (0.3.16), rendered with
-# that example's `valuesObject`, carries two polling hook Jobs:
-#   `preflight`            PreSync   `TIMEOUT_SECONDS=120` in its script
-#   `envoy-gateway-probe`  PostSync  `TIMEOUT_SECONDS=300` in its script
-# A retry re-runs both. No rendered hook Job sets `activeDeadlineSeconds`, so
-# these are script bounds, not pod bounds: a pod that never starts (the 1208
-# ImagePullBackOff) is bounded only by the sync timeout this file sets. Update
-# these when either script bound changes.
-PRESYNC_HOOK_SECONDS = 120
-POSTSYNC_HOOK_SECONDS = 300
-ATTEMPT_ALLOWANCE_SECONDS = PRESYNC_HOOK_SECONDS + POSTSYNC_HOOK_SECONDS
+# THE HOOK TIME ONE ATTEMPT MAY LEGITIMATELY SPEND. The kind example installs
+# `yadgar`, which embeds `platform` 0.1.21 (`chart/Chart.yaml`). Rendered with
+# the example's `valuesObject`, every attempt runs four hook Jobs from that
+# subchart, none with `activeDeadlineSeconds`. The bounds are the ones
+# `yadgarhq/platform@v0.1.21 chart/values.yaml` documents:
+#   `preflight` (PreSync, hook-weight -7): `timeoutSeconds: 120` (L857), and "worst
+#     case with every probe on is eight 120s loops plus the same 300s margin"
+#     (L1035-1036).
+PREFLIGHT_SECONDS = 8 * 120 + 300
+#   `envoy-gateway-probe` (PostSync, hook-weight -7): `timeoutSeconds: 300`
+#     (L1043), "three times this number" (L1026-1030), and "the composed bound is
+#     900s, and the documented `--timeout 25m` leaves 600s over it for
+#     scheduling, image pull and request time" (L1033-1035).
+PROBE_SECONDS = 3 * 300 + 600
+#   `bootstrap-secrets` and `admin-bootstrap-token` (PreSync, both hook-weight
+#     -5) run IN PARALLEL. Each is one curl with no timeout and `backoffLimit: 4`.
+#     MEASURED, NOT BOUNDED: 3 s each on kind-yadgar (2026-10-01, both 08:09:39 ->
+#     08:09:42, the same platform 0.1.21 templates). Their bound is the Job's pod
+#     backoff (10 + 20 + 40 + 80 s) plus 5 attempts of 3x the measured 3 s. The
+#     two are equal; the larger is taken.
+BOOTSTRAP_JOB_SECONDS = (10 + 20 + 40 + 80) + 5 * 3 * 3
+# Script bounds, not pod bounds: a pod that never starts (the 1208
+# ImagePullBackOff) is bounded only by the sync timeout this file sets. A KNOWN
+# LIMITATION: these numbers are copied from the lines cited, and nothing here
+# re-reads them. Update them when the platform pin or a hook bound changes.
+ATTEMPT_ALLOWANCE_SECONDS = PREFLIGHT_SECONDS + PROBE_SECONDS + max(BOOTSTRAP_JOB_SECONDS, BOOTSTRAP_JOB_SECONDS)
 
 
 def _values() -> dict:
     return yaml.safe_load(VALUES.read_text())
 
 
-def sync_timeout_floor() -> int:
+def sync_timeout_floor(documents: list[dict] | None = None) -> int:
     """The shortest timeout that cuts off no chain the retry gate allows. PURE-ish.
 
     Read from the gate itself, so widening the window or raising a `limit`
@@ -284,10 +307,9 @@ def sync_timeout_floor() -> int:
     """
     import test_parent_chart as parent
 
-    attempts = 1 + max(
-        int(parent.application(path)["spec"]["syncPolicy"]["retry"]["limit"])
-        for path in parent.EXAMPLE_APPLICATIONS
-    )
+    if documents is None:
+        documents = [parent.application(path) for path in parent.EXAMPLE_APPLICATIONS]
+    attempts = 1 + max(int(d["spec"]["syncPolicy"]["retry"]["limit"]) for d in documents)
     return parent.RETRY_WINDOW_SECONDS[1] + attempts * ATTEMPT_ALLOWANCE_SECONDS
 
 
@@ -316,9 +338,32 @@ def test_the_sync_timeout_outlasts_every_retry_chain_the_gate_allows() -> None:
     assert sync_timeout_failures(_values()) == []
 
 
-def test_the_floor_is_the_gate_ceiling_plus_both_hook_bounds_per_attempt() -> None:
-    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 120 + 300 s.
-    assert sync_timeout_floor() == 1200 + 7 * (120 + 300)
+def test_the_per_attempt_allowance_is_the_documented_bounds() -> None:
+    assert (PREFLIGHT_SECONDS, PROBE_SECONDS, BOOTSTRAP_JOB_SECONDS) == (1260, 1500, 195)
+    assert ATTEMPT_ALLOWANCE_SECONDS == 2955
+
+
+def test_the_floor_is_the_gate_ceiling_plus_the_allowance_per_attempt() -> None:
+    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 2955 s.
+    assert sync_timeout_floor() == 1200 + 7 * 2955 == 21885
+
+
+def test_a_higher_example_limit_raises_the_floor() -> None:
+    # Mutation: one more retry in any example is one more attempt in the floor.
+    import test_parent_chart as parent
+
+    documents = [parent.application(path) for path in parent.EXAMPLE_APPLICATIONS]
+    documents[0]["spec"]["syncPolicy"]["retry"]["limit"] = 7
+    assert sync_timeout_floor(documents) == 1200 + 8 * 2955
+
+
+def test_the_retry_waits_are_the_measured_sequence() -> None:
+    # An independent table: the v0.3.15 VM run measured 30 s and 60 s before
+    # retries 1 and 2 (15s x2); the rest follow and cap at 5m.
+    import test_parent_chart as parent
+
+    retry = {"limit": 6, "backoff": {"duration": "15s", "factor": 2, "maxDuration": "5m"}}
+    assert parent.retry_window(retry) == 30 + 60 + 120 + 240 + 300 + 300
 
 
 @pytest.mark.parametrize(
@@ -327,14 +372,14 @@ def test_the_floor_is_the_gate_ceiling_plus_both_hook_bounds_per_attempt() -> No
         (None, "has no"),
         ("0", "disables"),
         ("900", "below"),
-        ("3600", "below"),
-        ("4139", "below"),
+        ("4200", "below"),
+        ("21884", "below"),
         ("2147483648", "MaxInt32"),
         ("3000000000", "MaxInt32"),
-        (4200, "not a quoted"),
+        (22200, "not a quoted"),
         ("1h", "not a quoted"),
     ],
-    ids=["missing", "zero", "900", "old-3600", "one-under-floor", "maxint32-plus-1", "3e9", "unquoted", "go-duration"],
+    ids=["missing", "zero", "900", "old-4200", "one-under-floor", "maxint32-plus-1", "3e9", "unquoted", "go-duration"],
 )
 def test_a_bad_sync_timeout_reddens(value, named: str) -> None:
     values = yaml.safe_load(yaml.safe_dump(_values()))

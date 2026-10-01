@@ -107,16 +107,20 @@ RUNTIME="${YADGAR_RUNTIME:-}"
 #              first sync and KEDA's webhook restarts sit well inside.
 #   estate     65 min (3900 s): the same 1500 s plus the 1050 s window, plus
 #              1350 s for the attempts themselves. That is NOT 7 attempts at
-#              the hooks' bounds: 7 x (120 s preflight + 300 s probe) is 2940 s,
-#              and 1500 + 1050 + 2940 = 5490 s.
-# THESE WAITS ARE SHORTER THAN ARGO'S OWN END OF AN OPERATION (ledger 1208).
-# `argocd-values.yaml` sets `controller.sync.timeout.seconds` to 4200. Argo
-# counts it from the operation's start, retries included, and once it has passed
-# every later retry is terminated on its next reconcile, so a hung operation
-# reads Failed by 4200 s plus at most the 1050 s window. Either wait here can run
-# out first. The script then reports "timed out" with the operation's state, and
-# Argo still ends the operation afterwards. A wait here can also cut off an
-# operation Argo is still retrying, if that operation outlives the wait.
+#              the hooks' documented bounds: each attempt may spend 2955 s
+#              (`argocd-values.yaml`), so 1500 + 1050 + 7 x 2955 = 23235 s.
+# THESE WAITS ARE FAR SHORTER THAN ARGO'S OWN END OF AN OPERATION (ledger 1208),
+# AND THE GAP IS DELIBERATE. `argocd-values.yaml` sets
+# `controller.sync.timeout.seconds` to 22200 (6.2 h). Argo counts it from the
+# operation's start, retries included, and once it has passed every later retry
+# is terminated on its next reconcile, so a hung operation reads Failed by
+# 22200 s plus at most the 1050 s window. Both waits here run out long before
+# that. The script then reports "timed out" with the operation's state, and Argo
+# still ends the operation hours later. A wait here can also cut off an
+# operation Argo is still retrying, if that operation outlives the wait. The
+# waits stay as they are: a terminal held for six hours is worse than a
+# "timed out" that names the operation's state. Per-hook deadlines (ledger
+# 1224) shrink Argo's number, not these.
 OPERATORS_TIMEOUT="${YADGAR_OPERATORS_TIMEOUT:-1500}"
 ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
 POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"

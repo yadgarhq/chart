@@ -16,12 +16,16 @@ configs:
     # The clock covers the WHOLE operation, retries and backoff included
     # (`controller/appcontroller.go:1420-1424` and `:1429`, v3.1.8), so the value
     # must outlast the longest chain the examples' retry gate allows: 1200 s of
-    # backoff plus, for each of 7 attempts, the preflight's 120 s and the
-    # envoy-gateway probe's 300 s script bounds: 4140 s. The longest operation
-    # measured (v0.3.15) took 4m12s. Argo reads it as an int32 and treats a larger
-    # value as 0. `scripts/tests/test_argocd_values.py` derives the floor and
-    # checks both bounds. `kind-up.sh`'s waits are shorter: see ESTATE_TIMEOUT.
-    controller.sync.timeout.seconds: "4200"
+    # backoff plus 7 attempts, each of which may run the hook bounds `platform`
+    # 0.1.21 documents. Those are the preflight's eight 120 s loops plus 300 s,
+    # the envoy-gateway probe's three 300 s loops plus 600 s, and the two
+    # parallel bootstrap Jobs' pod backoff: 2955 s per attempt, 21885 s in all.
+    # 22200 s (6.2 h) clears it. Max ruled 2026-10-01: keep the documented
+    # margins now, tighten through per-hook deadlines later (ledger 1224). Argo
+    # reads the value as an int32 and treats a larger one as 0.
+    # `scripts/tests/test_argocd_values.py` derives the floor and checks both
+    # bounds. `kind-up.sh`'s waits are far shorter: see ESTATE_TIMEOUT.
+    controller.sync.timeout.seconds: "22200"
   cm:
     # POLL THE REGISTRY EVERY MINUTE rather than every three, so a first sync
     # starts promptly after `kubectl apply`.
