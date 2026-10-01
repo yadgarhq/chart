@@ -115,6 +115,61 @@ configs:
       hs.status = "Healthy"
       hs.message = "CRD is healthy"
       return hs
+    # THE MariaDB HEALTH CHECK FOR ONE OPERATOR CACHE RACE, ON v3.1.8 (ledger
+    # 1205). mariadb-operator 26.6.0 creates the `<name>-mariadb-sys-global-priv`
+    # Grant itself and reads it back at once from its informer cache
+    # (`internal/controller/mariadb_controller.go:911-912`). A cache that lags the
+    # create returns NotFound. The error is wrapped with `%v`, so the phase-skip
+    # check for NotFound misses it, and every phase error is written as
+    # `Ready=False, reason=Failed` (`:249-251`). v3.1.8's built-in script reads
+    # `reason=Failed` as Degraded, and a Degraded task fails the running sync. On
+    # 2026-10-01 this cost the `yadgar` sync two retries in one run of four; the
+    # Grant and Ready=True followed in the same second. The chart does not render
+    # this Grant, so no sync wave can order it.
+    # So this is upstream's file plus one hunk, marked NOT UPSTREAM: exactly that
+    # message, for this MariaDB's own Grant, reads as Progressing. Every other
+    # `reason=Failed` stays Degraded, and so does this message if the operator
+    # ever changes its wording. If the Grant really stays missing, the MariaDB
+    # reads Progressing instead of Degraded; only something that deletes an
+    # operator-owned object gets there. `scripts/tests/test_argocd_values.py`
+    # pins the bytes and checks that only the hunk differs from upstream. Delete
+    # this key when the operator reads that Grant uncached or wraps the error
+    # with `%w`.
+    resource.customizations.health.k8s.mariadb.com_MariaDB: |
+      local health_status = {}
+
+      if obj.status ~= nil and obj.status.conditions ~= nil then
+
+          for i, condition in ipairs(obj.status.conditions) do
+
+              health_status.message = condition.message
+
+              if condition.status == "False" then
+                  if condition.reason == "Failed" then
+                      -- NOT UPSTREAM (yadgarhq/chart, ledger 1205): mariadb-operator 26.6.0
+                      -- reads the mariadb.sys Grant it has just created from a lagging cache.
+                      -- That one NotFound, for this MariaDB's own Grant, reads Progressing.
+                      if condition.type == "Ready" and obj.metadata.name ~= nil and condition.message ==
+                          'Error reconciling SQL: error getting mariadb.sys Grant: Grant.k8s.mariadb.com "'
+                          .. obj.metadata.name .. '-mariadb-sys-global-priv" not found' then
+                          health_status.status = "Progressing"
+                          return health_status
+                      end
+                      health_status.status = "Degraded"
+                      return health_status
+                  end
+                  health_status.status = "Progressing"
+                  return health_status
+              end
+          end
+
+          health_status.status = "Healthy"
+          return health_status
+      end
+
+      health_status.status = "Progressing"
+      health_status.message = "No status info available"
+      return health_status
 # NO SSO AND NO NOTIFICATIONS: one machine, one operator.
 dex:
   enabled: false
