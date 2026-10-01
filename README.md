@@ -11,7 +11,7 @@ ADR-0706; this repository is authorised by ADR-0723).
 source:
   repoURL: ghcr.io/yadgarhq/charts
   chart: yadgar
-  targetRevision: 0.3.5
+  targetRevision: X.Y.Z # the newest release; example/application.yaml pins it
   helm:
     valuesObject:
       global:
@@ -36,6 +36,8 @@ chart/values.yaml         the whole-estate defaults, and why each key is stated 
 chart/ci/api-versions.txt the four operator API versions the defaults need offline
 chart/templates/          one partial that renders nothing, and it says why
 example/application.yaml  what you commit to your own repository
+example/operators-application.yaml  the four operators it needs; sync it first
+example/kind/             the same install on a kind cluster: NodePort edge, kind config
 example/values.yaml       how you set a module's knob from your own repository
 ```
 

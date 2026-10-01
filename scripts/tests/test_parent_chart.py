@@ -74,6 +74,7 @@ Run: python3 -m pytest scripts/tests/ -q
 from __future__ import annotations
 
 import collections
+import os
 import re
 import shutil
 import subprocess
@@ -356,16 +357,25 @@ LADDER = {
 # denominator is read off the RENDER by `unpaired_probes`, because a count of the
 # pairs this file iterates agrees with this file whatever the estate does. This
 # constant is what reddens if somebody adds a pair and forgets the number.
-AGREEMENT_PAIRS_AT_R5 = 3
+#
+# FOUR SINCE ADR-0820. `platform` 0.1.21 added a `prometheus` arm to the same
+# pre-install `preflight` Job, off unless stated like `keda`, and this parent
+# states it true beside the modules' `autoscaling.enabled`. It pairs with the
+# same toggle `keda` does: a ScaledObject needs both KEDA and the Prometheus it
+# queries.
+AGREEMENT_PAIRS_AT_R5 = 4
 
 # The operator each probe names in the rendered script, and the kind whose
 # presence in the same render is the other half of the pair.
-PROBE_OPERATOR = {"certManager": "cert-manager", "keda": "keda", "mariadb": "mariadb-operator"}
-PROBE_KIND = {"certManager": "Certificate", "keda": "ScaledObject", "mariadb": "MariaDB"}
+PROBE_OPERATOR = {
+    "certManager": "cert-manager", "keda": "keda", "mariadb": "mariadb-operator", "prometheus": "prometheus",
+}
+PROBE_KIND = {"certManager": "Certificate", "keda": "ScaledObject", "mariadb": "MariaDB", "prometheus": "ScaledObject"}
 PROBE_TOGGLE = {
     "certManager": "platform.internalCA.create, platform.certificates.create or platform.edgeTLS.create",
     "keda": "autoscaling.enabled in the module charts",
     "mariadb": "database.create in the three `-db` charts",
+    "prometheus": "autoscaling.enabled in the module charts",
 }
 
 PROBE_LIST = re.compile(r'^PROBES="(?P<probes>[^"]*)"$', re.MULTILINE)
@@ -823,6 +833,15 @@ NESTED_SUBCHART_MEMBERS = [
     "yadgar/charts/platform/charts/keda/Chart.yaml",
     "yadgar/charts/platform/charts/mariadb-operator/Chart.yaml",
     "yadgar/charts/platform/charts/mariadb-operator/charts/mariadb-operator-crds/Chart.yaml",
+    # PROMETHEUS JOINED AT `platform` 0.1.21 (ADR-0820), behind
+    # `operators.prometheus.create,operators.create` like the other operators. The
+    # prometheus chart vendors its own four subcharts; `platform` turns all four
+    # off, and they are packaged all the same.
+    "yadgar/charts/platform/charts/prometheus/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/alertmanager/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/kube-state-metrics/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/prometheus-node-exporter/Chart.yaml",
+    "yadgar/charts/platform/charts/prometheus/charts/prometheus-pushgateway/Chart.yaml",
 ]
 
 
@@ -2090,7 +2109,72 @@ PAIR_OFF_END = {
     ),
     "mariadb": "platform:\n  preflight:\n    probes:\n      mariadb: false\n"
     + "".join(f"{module}:\n  database:\n    create: false\n" for module in DATABASE_MODULES),
+    "prometheus": "platform:\n  preflight:\n    probes:\n      prometheus: false\n"
+    + "".join(
+        f"{module}:\n  autoscaling:\n    enabled: false\n"
+        for module in AUTOSCALING_MODULES
+    ),
 }
+
+
+# ── the Prometheus the preflight probes is the one every ScaledObject queries ──
+#
+# ADR-0780's shape: two charts each carry one half of an agreement no single chart
+# can see. `platform`'s preflight probes `preflight.prometheus.address`, and each
+# of the seven module charts points its ScaledObject at its own
+# `autoscaling.prometheusAddress`. Both default to the same URL today; an adopter
+# who moves one and not the other gets a probe that passes against a server no
+# ScaledObject asks. Read off the RENDER, the script and the triggers.
+
+PROMETHEUS_ADDRESS_LINE = re.compile(r"^PROMETHEUS_ADDRESS='(?P<address>[^']*)'$", re.MULTILINE)
+
+
+def prometheus_address_failures(documents: list[dict]) -> list[str]:
+    """The preflight's Prometheus address and every ScaledObject's must be one. PURE."""
+    jobs = [d for d in documents if d.get("kind") == "Job" and d["metadata"]["name"] == "preflight"]
+    if len(jobs) != 1:
+        return [f"{len(jobs)} `preflight` Jobs render"]
+    script = "\n".join(jobs[0]["spec"]["template"]["spec"]["containers"][0]["args"])
+    found = PROMETHEUS_ADDRESS_LINE.search(script)
+    if found is None:
+        return ["the preflight script carries no PROMETHEUS_ADDRESS, so the prometheus arm is off"]
+    probed = found.group("address")
+    queried = {
+        d["metadata"]["name"]: [t["metadata"].get("serverAddress") for t in d["spec"]["triggers"] if t.get("type") == "prometheus"]
+        for d in documents
+        if d.get("kind") == "ScaledObject"
+    }
+    failures = []
+    if sorted(queried) != sorted(AUTOSCALING_MODULES):
+        failures.append(f"ScaledObjects render for {sorted(queried)}, not the seven modules")
+    failures += [
+        f"`{name}` queries {addresses} and the preflight probes {probed}"
+        for name, addresses in sorted(queried.items())
+        if addresses != [probed]
+    ]
+    return failures
+
+
+def test_the_preflight_probes_the_prometheus_every_scaled_object_queries() -> None:
+    assert prometheus_address_failures(adopter_render()) == []
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        ("gateway:\n  autoscaling:\n    prometheusAddress: http://prometheus.elsewhere:9090\n", "`gateway` queries"),
+        (
+            "platform:\n  preflight:\n    prometheus:\n      address: http://prometheus.elsewhere:9090\n",
+            "the preflight probes http://prometheus.elsewhere:9090",
+        ),
+        ("platform:\n  preflight:\n    probes:\n      prometheus: false\n", "the prometheus arm is off"),
+    ],
+    ids=["one-module-moved", "the-probe-moved", "the-arm-off"],
+)
+def test_a_prometheus_address_that_disagrees_reddens_the_address_gate(tmp_path: Path, body: str, named: str) -> None:
+    documents = adopter_render("-f", str(overlay(tmp_path / "prometheus.yaml", body)))
+    failures = prometheus_address_failures(documents)
+    assert failures and all(named in failure for failure in failures), failures
 
 
 def pair_failures(probe: str, declared: list[str], objects: int, expected: bool) -> list[str]:
@@ -4192,10 +4276,13 @@ PUBLISHED_CHART = "oci://ghcr.io/yadgarhq/charts/yadgar"
 # pin is a deliberate change, gated by the render below.
 EXAMPLE_PIN_FLOOR = (0, 3, 1)
 
-# WHAT THE PINNED PARENT RENDERS WITH THE EXAMPLE'S `valuesObject`, a LITERAL like
-# `ADOPTER_OBJECTS` and K1 at that version. Measured 2026-09-27 on helm 3.18.4 and
-# 4.3.0 against the published 0.3.5: 81 objects.
-EXAMPLE_PIN_OBJECTS = 81
+# WHAT "THE WHOLE ESTATE" MEANS AT ANY PIN, as properties rather than a count. The
+# release tooling moves the example's pin at every tag (ADR-0820), so a literal
+# count measured at one pin would redden `main` at the next release that adds an
+# object. At every pin the example's render must equal the pinned parent's own
+# defaults, object for object, and those defaults must carry the platform layer,
+# autoscaling and the databases: a kind from each.
+WHOLE_ESTATE_KINDS = ("Gateway", "EnvoyProxy", "Certificate", "ScaledObject", "MariaDB", "Job")
 
 # THE ESTATE'S HOSTNAME IS ONE KEY (ADR-0808). The example states `global.hostname`
 # and nothing else for it; platform, gateway and iam derive the five keys below
@@ -4280,6 +4367,11 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             if member in archive.getnames():
                 defaults = merged({name: values_of(member)}, defaults)
 
+    return undeclared_leaves(values_object, defaults, "no chart in the pinned parent")
+
+
+def undeclared_leaves(values_object: dict, defaults: dict, declarer: str) -> list[str]:
+    """Every leaf of `values_object` whose path `defaults` does not declare. PURE."""
     failures = []
     for path in leaves(values_object):
         node = defaults
@@ -4289,15 +4381,137 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             if node is None:
                 break
             if not isinstance(node, dict) or step not in node:
-                failures.append(f"`{path}`: no chart in the pinned parent declares `{step}` there")
+                failures.append(f"`{path}`: {declarer} declares `{step}` there")
                 break
             node = node[step]
     return failures
 
 
+# THE PUSH THAT STAMPS A PIN RUNS BEFORE THAT PIN IS PUBLISHED. The release tooling
+# writes `vN` into the examples in the commit the tag `vN` points at (ADR-0820), and
+# the tag's release job publishes `vN` after that commit's push validation has
+# started. Whether HEAD is tagged is not a usable test: the tag ref is created after
+# the stamp commit, and a checkout can come first. What IS stable is the registry:
+# a pin STRICTLY NEWER than every version GHCR holds for the chart is a version
+# being cut, and `ci-release.yaml`'s post-publish job pulls it once it exists.
+# A pin that is published-or-older and cannot be pulled, and any unpublished pin
+# on a pull request, fail.
+GHCR = "https://ghcr.io"
+PARENT_REPOSITORY = "yadgarhq/charts/yadgar"
+
+
+def published_versions(repository: str = PARENT_REPOSITORY) -> list[str]:
+    """Every tag GHCR holds for `repository`, read anonymously from the OCI tags list."""
+    import json
+    import urllib.request
+
+    scope = f"{GHCR}/token?scope=repository:{repository}:pull"
+    token = json.load(urllib.request.urlopen(scope, timeout=30))["token"]
+    request = urllib.request.Request(
+        f"{GHCR}/v2/{repository}/tags/list?n=10000", headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert "next" not in (response.headers.get("Link") or ""), "the tags list is paginated; read every page"
+        return json.load(response)["tags"]
+
+
+def semver(version: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def being_cut(version: str, event: str, published: list[str]) -> bool:
+    """`version` is newer than every published one, and this is no pull request. PURE."""
+    if event == "pull_request" or semver(version) is None:
+        return False
+    ordered = [semver(tag) for tag in published if semver(tag) is not None]
+    assert ordered, f"GHCR lists no semver version at all: {published[:10]}"
+    return semver(version) > max(ordered)
+
+
+def parent_at(version: str, destination: Path, event: str | None = None, published: list[str] | None = None) -> Path:
+    """The published parent at `version`, or HEAD's chart packaged AS `version` while it is being cut.
+
+    NOT A SKIP, and nothing is weaker for it. The artifact the tag publishes is
+    `helm package chart -u --version <tag>` of the tagged commit, which is what this
+    packages, and every gate then runs against it.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    result = helm("pull", PUBLISHED_CHART, "--version", version, "-d", str(destination))
+    if result.returncode == 0:
+        return destination / f"yadgar-{version}.tgz"
+    event = os.environ.get("GITHUB_EVENT_NAME", "") if event is None else event
+    published = published_versions() if published is None else published
+    assert being_cut(version, event, published), (
+        f"cannot pull {PUBLISHED_CHART} {version}, and it is not a version being cut: "
+        f"event {event!r}, newest published {max(published, key=lambda tag: semver(tag) or (-1,))}. "
+        f"{result.stderr}"
+    )
+    print(f"\n{PUBLISHED_CHART} {version} is newer than every published version; rendering HEAD packaged as it")
+    workspace = destination / "head"
+    shutil.copytree(CHART, workspace / "chart")
+    made = helm("package", "chart", "-u", "--version", version, "--app-version", version, cwd=workspace)
+    assert made.returncode == 0, made.stderr
+    tarball = workspace / f"yadgar-{version}.tgz"
+    assert tarball.is_file(), sorted(path.name for path in workspace.iterdir())
+    return tarball
+
+
 @pytest.fixture(scope="module")
 def pinned(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return pulled(str(example_source()["targetRevision"]), tmp_path_factory.mktemp("pinned"))
+    return parent_at(str(example_source()["targetRevision"]), tmp_path_factory.mktemp("pinned"))
+
+
+AN_UNPUBLISHED_VERSION = "99.99.99"
+AN_UNPUBLISHED_OLDER_VERSION = "0.0.99"
+# A registry listing with a signature tag in it, and `0.3.10` so a LEXICAL maximum
+# (`0.3.8`) would call `0.3.9` newer than everything. Semver says it is not.
+A_LISTING = ["0.1.0", "0.3.8", "0.3.10", "sha256-abc.sig"]
+
+
+@pytest.mark.parametrize(
+    ("version", "event", "cut"),
+    [
+        (AN_UNPUBLISHED_VERSION, "push", True),
+        (AN_UNPUBLISHED_VERSION, "", True),
+        (AN_UNPUBLISHED_VERSION, "pull_request", False),
+        (AN_UNPUBLISHED_OLDER_VERSION, "push", False),
+        ("0.3.9", "push", False),
+        ("0.3.10", "push", False),
+        ("0.3.11", "push", True),
+    ],
+    ids=[
+        "newer-on-push", "newer-locally", "never-on-a-pull-request", "unpublished-but-older",
+        "lexically-newer-only", "the-newest-itself", "the-next-patch",
+    ],
+)
+def test_only_a_version_newer_than_every_published_one_is_being_cut(version: str, event: str, cut: bool) -> None:
+    assert being_cut(version, event, A_LISTING) is cut
+
+
+def test_the_registry_lists_the_published_parent() -> None:
+    """The query the fallback rests on answers, and holds a version the examples may pin."""
+    published = published_versions()
+    assert "0.3.8" in published, published[-5:]
+    assert not being_cut("0.3.8", "push", published)
+
+
+@pytest.mark.parametrize(
+    ("version", "event"),
+    [(AN_UNPUBLISHED_OLDER_VERSION, "push"), (AN_UNPUBLISHED_VERSION, "pull_request")],
+    ids=["unpublished-older-pin", "pull-request"],
+)
+def test_an_unpublished_pin_that_is_not_being_cut_fails(tmp_path: Path, version: str, event: str) -> None:
+    """THE RED CASES: an unpublished pin older than the newest release, and any on a pull request."""
+    with pytest.raises(AssertionError, match=f"{version}, and it is not a version being cut"):
+        parent_at(version, tmp_path, event, A_LISTING)
+
+
+def test_a_version_being_cut_renders_from_head(tmp_path: Path) -> None:
+    """On the stamp commit the pin is HEAD's chart packaged as that version, and it renders."""
+    tarball = parent_at(AN_UNPUBLISHED_VERSION, tmp_path, "push", A_LISTING)
+    assert tarball.name == f"yadgar-{AN_UNPUBLISHED_VERSION}.tgz"
+    assert set(WHOLE_ESTATE_KINDS) <= set(kinds(render(str(tarball), *API_VERSIONS)))
 
 
 def test_the_example_pins_a_published_parent_at_or_above_the_floor() -> None:
@@ -4318,10 +4532,10 @@ def test_the_example_installs_the_whole_estate_at_its_pin(pinned: Path, tmp_path
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     print(f"\nB7: {source['targetRevision']} with the example's valuesObject renders {len(documents)} objects")
-    assert len(documents) == EXAMPLE_PIN_OBJECTS
     assert identities(documents) == identities(render(str(pinned), *API_VERSIONS)), (
         "the example's valuesObject changed which objects the pinned parent renders"
     )
+    assert [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)] == []
 
 
 def hostname_sites(documents: list[dict]) -> dict[str, object]:
@@ -4417,11 +4631,16 @@ def test_the_global_form_renders_byte_equal_to_the_five_key_form(pinned: Path, t
     assert one.stdout == five.stdout
 
 
-def test_a_pre_0808_pin_reddens_the_derivation(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def pre_0808(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return pulled(A_PRE_0808_PIN, tmp_path_factory.mktemp("pre-0808"))
+
+
+def test_a_pre_0808_pin_reddens_the_derivation(pre_0808: Path, tmp_path: Path) -> None:
     """THE RED CASE: at 0.3.2 no child reads `global`, so every site keeps the built-in."""
     values_object = example_source()["helm"]["valuesObject"]
     host = value_at(values_object, HOSTNAME_KEY)
-    tarball = pulled(A_PRE_0808_PIN, tmp_path / "old")
+    tarball = pre_0808
     (tmp_path / "render").mkdir()
     result = example_render(tarball, values_object, tmp_path / "render")
     assert result.returncode == 0, result.stderr
@@ -4447,10 +4666,712 @@ def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> No
     assert len(failures) == 1 and "`global.hostnme`" in failures[0], failures
 
 
-def test_a_pre_b6_pin_reddens_the_count_and_names_the_version(tmp_path: Path) -> None:
+def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
     """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone."""
     tarball = pulled(A_PRE_B6_PIN, tmp_path / "old")
     result = example_render(tarball, example_source()["helm"]["valuesObject"], tmp_path)
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
-    assert len(documents) == A_PRE_B6_PIN_OBJECTS != EXAMPLE_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
+    assert len(documents) == A_PRE_B6_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
+    missing = [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]
+    assert {"Gateway", "EnvoyProxy", "MariaDB"} <= set(missing), missing
+
+
+# ------------- 10. the operators and kind examples, and every example's retry (ADR-0820)
+#
+# MEASURED 2026-09-30 ON A kind VM, and each constant below is a literal from that
+# run or from a render of the pins it used: `platform` 0.1.19 with the operators
+# example's `valuesObject` synced Healthy with 151 objects, 45 of them CRDs, and
+# `yadgar` 0.3.8 with the kind example's `valuesObject` served the edge on
+# 127.0.0.1:18443. The run also exhausted Argo's default retry budget of 5 while
+# the estate was `Degraded`, which is what the retry gate is for.
+
+OPERATORS_APPLICATION = REPO / "example" / "operators-application.yaml"
+KIND_APPLICATION = REPO / "example" / "kind" / "application.yaml"
+KIND_CONFIG = REPO / "example" / "kind" / "kind-config.yaml"
+EXAMPLE_APPLICATIONS = (EXAMPLE_APPLICATION, OPERATORS_APPLICATION, KIND_APPLICATION)
+PUBLISHED_PLATFORM = "oci://ghcr.io/yadgarhq/charts/platform"
+ARGO_KINDS = {"Application", "ApplicationSet"}
+
+# THE RETRY WINDOW EVERY EXAMPLE MUST FALL INSIDE: the sum of the waits Argo takes
+# before each retry. Below 5 minutes, operators and databases are still starting
+# when the budget runs out; the VM exhausted Argo's default (5 retries, 5s x2,
+# max 3m: 310 s) that way. Above 20 minutes, the Application is locked in its
+# retry loop for longer than anybody waits: a new revision cannot sync while an
+# operation is retrying, so a fix pushed during the window waits for it to end.
+# `-1` (retry forever) never ends at all.
+RETRY_WINDOW_SECONDS = (5 * 60, 20 * 60)
+RETRY_BACKOFF_KEYS = ("duration", "factor", "maxDuration")
+GO_DURATION = re.compile(r"(\d+(?:\.\d+)?)(h|m|s)")
+GO_UNIT_SECONDS = {"h": 3600, "m": 60, "s": 1}
+
+OPERATORS_NAMESPACE = "yadgar-operators"
+OPERATORS_VALUES = {"operators": {"create": True, "argoCd": {"create": False}}}
+OPERATORS_SYNC_OPTIONS = {"CreateNamespace=true", "ServerSideApply=true"}
+# WHAT THE OPERATORS EXAMPLE INSTALLS, as properties that hold at any `platform`
+# pin, because the release tooling moves that pin whenever `platform` releases
+# (ADR-0820). Measured 2026-09-30 at 0.1.19 for the record: 151 objects, 45 CRDs,
+# and 53 more (Argo CD) with `operators.create` alone. Every object comes from one
+# of the four operator subcharts or `platform`'s vendored CRDs, each of the four
+# contributes, and the CRDs serve every API version the parent declares it needs.
+# READ OFF `platform`'s `Chart.yaml` AT THE PIN: every dependency whose
+# `condition` names `operators.create`, Argo CD excepted. Not a literal, so the
+# operator that arrives with a `platform` release is expected the moment it is
+# pinned. At 0.1.21: cert-manager, gateway-helm, keda, mariadb-operator and
+# prometheus.
+CRDS_DIRECTORY = "crds/"
+# WHAT `platform`'s OWN TEMPLATES MAY ADD TO THE OPERATORS: the CRDs it vendors, and
+# a Namespace an operator lands in (`observability`, for Prometheus — Argo creates
+# only the Application's own destination namespace).
+PLATFORM_OWN_KINDS = {"CustomResourceDefinition", "Namespace"}
+ARGO_CD_SOURCE = "argo-cd"
+# WHERE THE MODULES' ScaledObjects LOOK FOR PROMETHEUS by default, and so where the
+# operators Application must put it: Service `prometheus-server` in
+# `observability`. Asserted against the module charts' own default below.
+PROMETHEUS_SERVICE = ("prometheus-server", "observability")
+ARGO_CD_PART_OF = "argocd"
+
+# THE ENTRY `application.yaml` EXPLAINS, and every parent example must carry it
+# unchanged: the chart's defaults create three MariaDB CRs, and without both
+# pointers Argo and mariadb-operator revert each other forever.
+MARIADB_IGNORE_DIFFERENCES = {
+    "group": "k8s.mariadb.com",
+    "kind": "MariaDB",
+    "jsonPointers": ["/spec/rootPasswordSecretKeyRef/generate", "/spec/passwordSecretKeyRef/generate"],
+}
+
+KIND_NODE_IMAGE = (
+    "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+)
+KIND_LISTEN_ADDRESS = "127.0.0.1"
+KIND_EDGE = "edge"
+
+
+def application(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
+def copied(document: dict) -> dict:
+    return yaml.safe_load(yaml.safe_dump(document))
+
+
+def argo_documents_under(root: Path) -> list[str]:
+    """Every file under `root` holding an Argo Application or ApplicationSet, relative. PURE-ish."""
+    found = []
+    for path in sorted(root.rglob("*.y*ml")):
+        documents = [d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)]
+        if any(d.get("kind") in ARGO_KINDS for d in documents):
+            found.append(str(path.relative_to(root)))
+    return found
+
+
+def test_every_example_application_is_one_the_suite_reads() -> None:
+    """The denominator: an Application added under `example/` without joining the gates reddens here."""
+    assert argo_documents_under(REPO / "example") == sorted(
+        str(path.relative_to(REPO / "example")) for path in EXAMPLE_APPLICATIONS
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [("extra.yml", "Application"), ("extra.yaml", "ApplicationSet")],
+    ids=["yml-suffix", "application-set"],
+)
+def test_an_unread_example_reddens_the_denominator(tmp_path: Path, name: str, kind: str) -> None:
+    copy = tmp_path / "example"
+    shutil.copytree(REPO / "example", copy)
+    (copy / name).write_text(yaml.safe_dump({"apiVersion": "argoproj.io/v1alpha1", "kind": kind}))
+    assert name in argo_documents_under(copy)
+
+
+def go_seconds(value) -> float:
+    """Argo's `parseStringToDuration`: a bare integer is seconds, else a Go duration. PURE."""
+    text = str(value)
+    if re.fullmatch(r"-?\d+", text):
+        return float(text)
+    parts = GO_DURATION.findall(text)
+    assert parts and "".join(f"{n}{u}" for n, u in parts) == text, f"not a Go duration: {text!r}"
+    return sum(float(number) * GO_UNIT_SECONDS[unit] for number, unit in parts)
+
+
+def retry_window(retry: dict) -> float:
+    """Total seconds Argo waits across every retry, computed as Argo v3.1.8 does. PURE.
+
+    `controller/appcontroller.go` increments `RetryCount` when it schedules a retry
+    and then waits `NextRetryAt(finishedAt, RetryCount)` before running it, and
+    `RetryStrategy.NextRetryAt` waits `duration * factor^count`, capped at
+    `maxDuration`. So retry k of `limit` waits `min(maxDuration, duration *
+    factor^k)` for k = 1..limit — the FIRST retry already waits `duration * factor`.
+    """
+    backoff = retry["backoff"]
+    duration, factor, ceiling = go_seconds(backoff["duration"]), int(backoff["factor"]), go_seconds(backoff["maxDuration"])
+    total, wait = 0.0, float(duration)
+    for _ in range(int(retry["limit"])):
+        # `duration * factor^count`, one factor per retry; the cap stops the growth.
+        wait = min(ceiling, wait * factor) if ceiling > 0 else wait * factor
+        total += wait
+        if total > RETRY_WINDOW_SECONDS[1] * 1000:
+            break  # far outside the window already; a limit of 100000 need not be summed
+    return total
+
+
+def retry_failures(document: dict) -> list[str]:
+    """What is wrong with one Application's `syncPolicy.retry`. PURE."""
+    retry = ((document.get("spec") or {}).get("syncPolicy") or {}).get("retry")
+    if not isinstance(retry, dict):
+        return ["no `spec.syncPolicy.retry`: Argo's default window of 310 s runs out while operators start"]
+    limit = retry.get("limit")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return [f"`retry.limit: {limit}` is not a finite, positive budget (-1 retries forever)"]
+    missing = [f"`retry.backoff.{key}` is not set" for key in RETRY_BACKOFF_KEYS if key not in (retry.get("backoff") or {})]
+    if missing:
+        return missing
+    window = retry_window(retry)
+    low, high = RETRY_WINDOW_SECONDS
+    if not low <= window <= high:
+        return [f"the retry window is {window:.0f} s, outside {low}..{high} s"]
+    return []
+
+
+def test_every_example_application_retries_inside_the_window() -> None:
+    failures = {str(path.relative_to(REPO)): retry_failures(application(path)) for path in EXAMPLE_APPLICATIONS}
+    assert failures == {name: [] for name in failures}
+
+
+def test_the_retry_window_is_argos_arithmetic() -> None:
+    """Hand-computed against NextRetryAt: 30, 60, 120, 240, 300, 300."""
+    retry = {"limit": 6, "backoff": {"duration": "15s", "factor": 2, "maxDuration": "5m"}}
+    assert retry_window(retry) == 30 + 60 + 120 + 240 + 300 + 300
+    # Argo's own default (limit 5, 5s x2, max 3m) is the window the VM exhausted.
+    assert retry_window({"limit": 5, "backoff": {"duration": "5s", "factor": 2, "maxDuration": "3m"}}) == 310
+    assert go_seconds("1h30m") == 5400 and go_seconds("45") == 45
+
+
+@pytest.mark.parametrize(
+    ("mutation", "named"),
+    [
+        (lambda retry: retry.update(limit=-1), "`retry.limit: -1`"),
+        (lambda retry: retry.update(limit=100000), "outside"),
+        (lambda retry: retry["backoff"].update(maxDuration="24h"), "outside"),
+        (lambda retry: retry["backoff"].update(duration="1h"), "outside"),
+        (lambda retry: retry.update(limit=1), "outside"),
+        (lambda retry: retry.clear(), "`retry.limit: None`"),
+        (lambda retry: retry.pop("backoff"), "`retry.backoff.duration` is not set"),
+    ],
+    ids=["forever", "limit-100000", "max-24h", "duration-1h", "too-short", "emptied", "no-backoff"],
+)
+def test_a_retry_outside_the_window_reddens_the_retry_gate(mutation, named: str) -> None:
+    for path in EXAMPLE_APPLICATIONS:
+        document = copied(application(path))
+        mutation(document["spec"]["syncPolicy"]["retry"])
+        failures = retry_failures(document)
+        assert len(failures) >= 1 and named in failures[0], (path.name, failures)
+
+
+def test_a_missing_retry_reddens_the_retry_gate() -> None:
+    for path in EXAMPLE_APPLICATIONS:
+        document = copied(application(path))
+        del document["spec"]["syncPolicy"]["retry"]
+        assert len(retry_failures(document)) == 1, path.name
+
+
+# ─── every parent example: derived, not listed ────────────────────────────────
+
+
+def parent_examples_of(documents: dict[str, dict]) -> dict[str, dict]:
+    """The examples that install the parent, by what they install. PURE."""
+    return {name: d for name, d in documents.items() if d["spec"]["source"].get("chart") == "yadgar"}
+
+
+def example_documents() -> dict[str, dict]:
+    return {str(path.relative_to(REPO)): application(path) for path in EXAMPLE_APPLICATIONS}
+
+
+def parent_examples() -> dict[str, dict]:
+    return parent_examples_of(example_documents())
+
+
+def parent_pin_failures(documents: dict[str, dict]) -> list[str]:
+    """Every parent example must pin the same published parent. PURE."""
+    pins = {name: str(document["spec"]["source"]["targetRevision"]) for name, document in documents.items()}
+    if len(set(pins.values())) != 1:
+        return [f"the parent examples pin different versions: {pins}"]
+    return []
+
+
+def ignore_differences_failures(name: str, document: dict) -> list[str]:
+    """One parent example must carry the MariaDB entry unchanged. PURE."""
+    if MARIADB_IGNORE_DIFFERENCES in ((document.get("spec") or {}).get("ignoreDifferences") or []):
+        return []
+    return [f"`{name}` does not carry the MariaDB ignoreDifferences entry with both /generate pointers"]
+
+
+def parent_example_failures(documents: dict[str, dict], tarball: Path, destination: Path) -> list[str]:
+    """Every gate a parent example must pass, for each of them. Renders with helm."""
+    failures = parent_pin_failures(documents)
+    expected = identities(render(str(tarball), *API_VERSIONS))
+    for index, (name, document) in enumerate(sorted(documents.items())):
+        failures += ignore_differences_failures(name, document)
+        values_object = document["spec"]["source"]["helm"]["valuesObject"]
+        failures += [f"`{name}`: {failure}" for failure in unrecognised_keys(values_object, tarball)]
+        (destination / str(index)).mkdir(parents=True, exist_ok=True)
+        result = example_render(tarball, values_object, destination / str(index))
+        if result.returncode != 0:
+            failures.append(f"`{name}` does not render: {result.stderr}")
+            continue
+        documents_rendered = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+        if identities(documents_rendered) != expected:
+            failures.append(f"`{name}` renders a different object set from the pinned parent's defaults")
+    return failures
+
+
+def test_the_parent_examples_are_derived_from_what_they_install() -> None:
+    assert sorted(parent_examples()) == ["example/application.yaml", "example/kind/application.yaml"]
+
+
+def test_every_parent_example_passes_every_parent_gate(pinned: Path, tmp_path: Path) -> None:
+    assert parent_example_failures(parent_examples(), pinned, tmp_path) == []
+
+
+A_NEW_PARENT_EXAMPLE = "example/new/application.yaml"
+
+
+def with_new_parent_example(change) -> dict[str, dict]:
+    """The examples plus a new yadgar Application, a copy of the kind one with `change` applied."""
+    documents = example_documents()
+    new = copied(documents["example/kind/application.yaml"])
+    change(new)
+    documents[A_NEW_PARENT_EXAMPLE] = new
+    return documents
+
+
+def misspell_node_port(document: dict) -> None:
+    proxy = document["spec"]["source"]["helm"]["valuesObject"]["platform"]["gatewayListener"]["envoyProxy"]
+    proxy["httpsNodePrt"] = proxy.pop("httpsNodePort")
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        (lambda d: d["spec"]["source"].update(targetRevision=A_PRE_0808_PIN), "pin different versions"),
+        (misspell_node_port, "`platform.gatewayListener.envoyProxy.httpsNodePrt`"),
+        (lambda d: d["spec"]["ignoreDifferences"][0]["jsonPointers"].pop(), "ignoreDifferences"),
+        (lambda d: d["spec"]["source"]["helm"]["valuesObject"].update(platform={"enabled": False}), "different object set"),
+    ],
+    ids=["pin", "key", "ignore-differences", "render"],
+)
+def test_a_new_parent_example_meets_every_parent_gate(pinned: Path, tmp_path: Path, change, named: str) -> None:
+    """THE RED CASE: a yadgar Application the scan finds is a parent example with no list to join."""
+    documents = parent_examples_of(with_new_parent_example(change))
+    assert A_NEW_PARENT_EXAMPLE in documents
+    failures = parent_example_failures(documents, pinned, tmp_path)
+    assert len(failures) == 1 and named in failures[0], failures
+    assert "pin different versions" in failures[0] or A_NEW_PARENT_EXAMPLE in failures[0], failures
+
+
+# ─── no prose states a version the release tooling will not move ──────────────
+#
+# THE STAMP REWRITES `targetRevision:` KEYS AND NOTHING ELSE (`example_pins.py` in
+# `yadgarhq/actions`, ADR-0820): "prose that names a version is not rewritten". So
+# a command or sentence here that names the current pin is stale at the next tag.
+# Prose says `<your targetRevision>` or `X.Y.Z` instead. A dated measurement record
+# ("measured 2026-09-30 against 0.3.8") is history and stays true, and this gate
+# does not read it.
+
+PROSE_FILES = (REPO / "README.md", *sorted((REPO / "example").rglob("*.y*ml")))
+PROSE_PIN = re.compile(r"(--version\s+v?\d+\.\d+\.\d+|targetRevision:\s*v?\d+\.\d+\.\d+|`v\d+\.\d+\.\d+`)")
+STAMPED = {"example/application.yaml", "example/kind/application.yaml", "example/operators-application.yaml"}
+
+
+def prose_pin_failures(texts: dict[str, str]) -> list[str]:
+    """Every version stated where the stamp will not rewrite it. PURE.
+
+    A `targetRevision:` key on a non-comment line of a stamped example is the one
+    place a version may stand; everything else is prose.
+    """
+    failures = []
+    for name, text in texts.items():
+        for number, line in enumerate(text.splitlines(), start=1):
+            code = name in STAMPED and not line.lstrip().startswith("#")
+            for match in PROSE_PIN.finditer(line):
+                if code and match.group(0).startswith("targetRevision:") and "#" not in line[: match.start()]:
+                    continue
+                failures.append(f"{name}:{number} states `{match.group(0)}`, which no release moves")
+    return failures
+
+
+def prose_texts() -> dict[str, str]:
+    return {str(path.relative_to(REPO)): path.read_text() for path in PROSE_FILES}
+
+
+def test_no_prose_states_a_version_the_stamp_will_not_move() -> None:
+    assert prose_pin_failures(prose_texts()) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("README.md", "  targetRevision: 0.3.8\n"),
+        ("example/values.yaml", "#   helm template yadgar chart --version 0.3.8\n"),
+        ("example/application.yaml", "    # the git tag is `v0.3.8`\n"),
+    ],
+    ids=["readme-snippet", "helm-command", "tag-in-a-comment"],
+)
+def test_a_stated_version_reddens_the_prose_gate(name: str, line: str) -> None:
+    texts = prose_texts()
+    texts[name] = texts[name] + line
+    (failure,) = prose_pin_failures(texts)
+    assert failure.startswith(f"{name}:"), failure
+
+
+# ─── the operators example ─────────────────────────────────────────────────────
+
+
+def platform_inside(parent: Path) -> str:
+    """The `platform` version a published parent package carries. Read from the package."""
+    import tarfile
+
+    with tarfile.open(parent, "r:gz") as archive:
+        return str(yaml.safe_load(archive.extractfile("yadgar/charts/platform/Chart.yaml").read())["version"])
+
+
+def operators_pin_failures(operators: dict, platform_version: str) -> list[str]:
+    """The operators example must pin the `platform` its parent example carries. PURE.
+
+    NOT `chart/Chart.yaml`'s `platform` pin, and the difference is measured rather
+    than preferred: `parent_bump.py` in `yadgarhq/actions` rewrites that pin on
+    every `platform` release, straight to `main` with no pull request, and writes
+    no example. A gate on `Chart.yaml` would redden `main` and every open pull
+    request at the next `platform` release. The parent the examples pin is fixed
+    until somebody moves it, and it fixes which `platform` goes with it.
+    """
+    source = operators["spec"]["source"]
+    failures = []
+    if (source.get("repoURL"), source.get("chart")) != ("ghcr.io/yadgarhq/charts", "platform"):
+        failures.append(f"the operators example does not install `platform` from the registry: {source}")
+    if str(source.get("targetRevision")) != platform_version:
+        failures.append(
+            f"the operators example pins platform {source.get('targetRevision')}, and the parent the "
+            f"examples pin carries platform {platform_version}"
+        )
+    return failures
+
+
+def test_the_operators_example_pins_the_platform_its_parent_carries(pinned: Path) -> None:
+    assert operators_pin_failures(application(OPERATORS_APPLICATION), platform_inside(pinned)) == []
+
+
+def test_a_parent_carrying_another_platform_reddens_the_operators_pin(pre_0808: Path) -> None:
+    """THE RED CASE: 0.3.2 carries an older `platform` than the operators example pins."""
+    older = platform_inside(pre_0808)
+    (failure,) = operators_pin_failures(application(OPERATORS_APPLICATION), older)
+    assert f"carries platform {older}" in failure, failure
+
+
+def test_the_operators_example_is_the_measured_application() -> None:
+    spec = application(OPERATORS_APPLICATION)["spec"]
+    assert spec["source"]["helm"]["valuesObject"] == OPERATORS_VALUES
+    assert spec["destination"]["namespace"] == OPERATORS_NAMESPACE
+    # `prune: false`: a pruned CRD deletes every object of its kind.
+    assert spec["syncPolicy"]["automated"] == {"prune": False, "selfHeal": True}
+    assert set(spec["syncPolicy"]["syncOptions"]) == OPERATORS_SYNC_OPTIONS
+
+
+@pytest.fixture(scope="module")
+def operators_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The PUBLISHED `platform` at the operators example's pin, which is what Argo installs."""
+    version = str(application(OPERATORS_APPLICATION)["spec"]["source"]["targetRevision"])
+    destination = tmp_path_factory.mktemp("operators")
+    result = helm("pull", PUBLISHED_PLATFORM, "--version", version, "-d", str(destination))
+    assert result.returncode == 0, f"cannot pull {PUBLISHED_PLATFORM} {version}: {result.stderr}"
+    tarball = destination / f"platform-{version}.tgz"
+    assert tarball.is_file(), sorted(path.name for path in destination.iterdir())
+    return tarball
+
+
+def operators_render(chart: Path, values_object: dict, destination: Path) -> list[dict]:
+    return [document for _, document in operators_sources(chart, values_object, destination)]
+
+
+def operators_sources(chart: Path, values_object: dict, destination: Path) -> list[tuple[str, dict]]:
+    """Each rendered object with the chart it came from: a subchart name, or a platform template."""
+    values = overlay(destination / "operators-values.yaml", yaml.safe_dump(values_object))
+    result = helm("template", "operators", str(chart), "-n", OPERATORS_NAMESPACE, "--include-crds", "-f", str(values))
+    assert result.returncode == 0, result.stderr
+    found = []
+    for chunk in result.stdout.split("\n---\n"):
+        source = re.search(r"^# Source: platform/(charts/(?P<chart>[^/]+)|(?P<template>templates/[^/\n]+))", chunk, re.M)
+        for document in yaml.safe_load_all(chunk):
+            if isinstance(document, dict) and document.get("apiVersion"):
+                # A CRD from a chart's `crds/` directory carries no `# Source:` line.
+                # Only a CRD may lack one.
+                if source is None:
+                    assert document["kind"] == "CustomResourceDefinition", chunk[:200]
+                    found.append((CRDS_DIRECTORY, document))
+                else:
+                    found.append((source.group("chart") or source.group("template"), document))
+    return found
+
+
+def operator_charts(chart: Path) -> set[str]:
+    """The operator subcharts `platform` declares at this version, Argo CD excepted."""
+    import tarfile
+
+    with tarfile.open(chart, "r:gz") as archive:
+        metadata = yaml.safe_load(archive.extractfile("platform/Chart.yaml").read())
+    return {
+        dependency["name"]
+        for dependency in metadata.get("dependencies") or []
+        if "operators.create" in str(dependency.get("condition") or "").split(",")
+        and dependency["name"] != ARGO_CD_SOURCE
+    }
+
+
+def operators_failures(found: list[tuple[str, dict]], operators: set[str]) -> list[str]:
+    """What the operators render must be, at any `platform` pin. PURE."""
+    failures = []
+    sources = {source for source, _ in found}
+    stray = sorted(
+        {
+            source for source, d in found
+            if source not in operators | {CRDS_DIRECTORY}
+            and not (source.startswith("templates/") and d["kind"] in PLATFORM_OWN_KINDS)
+        }
+    )
+    if stray:
+        failures.append(f"objects come from outside the operators: {stray}")
+    absent = sorted(operators - sources)
+    if absent:
+        failures.append(f"no object comes from {absent}")
+    served = {
+        f"{d['spec']['group']}/{version['name']}"
+        for _, d in found
+        if d["kind"] == "CustomResourceDefinition"
+        for version in d["spec"]["versions"]
+        if version.get("served")
+    }
+    unserved = [api for api in DECLARED_API_VERSIONS if api not in served]
+    if unserved:
+        failures.append(f"no CRD serves {unserved}, which the parent declares it needs")
+    argo = argo_cd_objects([d for _, d in found]) + [
+        d["metadata"]["name"] for _, d in found
+        if d["kind"] == "CustomResourceDefinition" and d["spec"]["group"] == "argoproj.io"
+    ]
+    if argo:
+        failures.append(f"{len(argo)} Argo CD objects render")
+    return failures
+
+
+def argo_cd_objects(documents: list[dict]) -> list[str]:
+    return [
+        f"{d['kind']}/{d['metadata']['name']}"
+        for d in documents
+        if ((d["metadata"].get("labels") or {}).get("app.kubernetes.io/part-of")) == ARGO_CD_PART_OF
+    ]
+
+
+def test_the_operators_example_installs_the_operators_and_no_argo_cd(
+    operators_chart: Path, tmp_path: Path
+) -> None:
+    found = operators_sources(
+        operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
+    )
+    print(f"\noperators: {len(found)} objects, {kinds([d for _, d in found])['CustomResourceDefinition']} CRDs")
+    assert operators_failures(found, operator_charts(operators_chart)) == []
+
+
+def test_operators_create_alone_installs_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the Argo CD half: without `argoCd.create: false`, Argo CD comes too."""
+    failures = operators_failures(
+        operators_sources(operators_chart, {"operators": {"create": True}}, tmp_path), operator_charts(operators_chart)
+    )
+    assert len(failures) == 2, failures
+    assert f"'{ARGO_CD_SOURCE}'" in failures[0] and "Argo CD objects render" in failures[1], failures
+
+
+def test_the_operators_example_installs_prometheus_where_the_modules_query_it(
+    operators_chart: Path, pinned: Path, tmp_path: Path
+) -> None:
+    """The Service the modules' default address names exists in the operators render."""
+    import tarfile
+
+    found = operators_sources(
+        operators_chart, application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"], tmp_path
+    )
+    services = [(d["metadata"]["name"], d["metadata"].get("namespace")) for _, d in found if d["kind"] == "Service"]
+    assert PROMETHEUS_SERVICE in services, services
+    name, namespace = PROMETHEUS_SERVICE
+    with tarfile.open(pinned, "r:gz") as archive:
+        for module in AUTOSCALING_MODULES:
+            values = yaml.safe_load(archive.extractfile(f"yadgar/charts/{module}/values.yaml").read())
+            assert values["autoscaling"]["prometheusAddress"] == f"http://{name}.{namespace}.svc.cluster.local", module
+
+
+def test_prometheus_off_leaves_the_modules_nothing_to_query(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the Service: `operators.prometheus.create: false` removes it."""
+    values_object = merged({"operators": {"prometheus": {"create": False}}}, OPERATORS_VALUES)
+    found = operators_sources(operators_chart, values_object, tmp_path)
+    services = [(d["metadata"]["name"], d["metadata"].get("namespace")) for _, d in found if d["kind"] == "Service"]
+    assert PROMETHEUS_SERVICE not in services
+    assert any("['prometheus']" in f for f in operators_failures(found, operator_charts(operators_chart)))
+
+
+def test_an_operator_left_out_reddens_the_operators_gate(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE for the other half: without KEDA, its source and its API version are missing."""
+    values_object = merged({"operators": {"keda": {"create": False}}}, OPERATORS_VALUES)
+    failures = operators_failures(operators_sources(operators_chart, values_object, tmp_path), operator_charts(operators_chart))
+    assert any("['keda']" in failure for failure in failures), failures
+
+
+def platform_declared(chart: Path) -> dict:
+    """`platform`'s default values, plus every path a dependency `condition` reads.
+
+    `operators.argoCd.create` is declared by no `values.yaml`: it is the first path
+    of the `argo-cd` dependency's `condition` in `platform`'s `Chart.yaml`. Helm
+    reads it all the same, so it is a real key.
+    """
+    import tarfile
+
+    with tarfile.open(chart, "r:gz") as archive:
+        defaults = yaml.safe_load(archive.extractfile("platform/values.yaml").read()) or {}
+        metadata = yaml.safe_load(archive.extractfile("platform/Chart.yaml").read())
+    for dependency in metadata.get("dependencies") or []:
+        for path in str(dependency.get("condition") or "").split(","):
+            if path:
+                node: dict = {}
+                *parents, leaf = path.strip().split(".")
+                cursor = node
+                for step in parents:
+                    cursor = cursor.setdefault(step, {})
+                cursor[leaf] = None
+                defaults = merged(node, defaults)
+    return defaults
+
+
+def test_every_operators_example_key_is_one_platform_declares(operators_chart: Path) -> None:
+    values_object = application(OPERATORS_APPLICATION)["spec"]["source"]["helm"]["valuesObject"]
+    assert undeclared_leaves(values_object, platform_declared(operators_chart), "platform") == []
+
+
+def test_a_misspelt_argo_cd_key_is_named_and_would_install_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE: `argoCD` is ignored by helm, so Argo CD installs; the gate names it."""
+    values_object = {"operators": {"create": True, "argoCD": {"create": False}}}
+    failures = undeclared_leaves(values_object, platform_declared(operators_chart), "platform")
+    assert len(failures) == 1 and "`operators.argoCD.create`" in failures[0], failures
+    assert argo_cd_objects(operators_render(operators_chart, values_object, tmp_path)) != []
+
+
+# ─── the kind example ──────────────────────────────────────────────────────────
+
+
+def kind_values() -> dict:
+    return application(KIND_APPLICATION)["spec"]["source"]["helm"]["valuesObject"]
+
+
+def kind_mapping_failures(cluster: dict, values_object: dict) -> list[str]:
+    """The kind config and the kind Application must describe one edge. PURE."""
+    from urllib.parse import urlsplit
+
+    failures = []
+    nodes = cluster.get("nodes") or []
+    if [node.get("role") for node in nodes] != ["control-plane"]:
+        return [f"the kind config is not one control-plane node: {nodes}"]
+    (node,) = nodes
+    if node.get("image") != KIND_NODE_IMAGE:
+        failures.append(f"the node image is `{node.get('image')}`, not the measured `{KIND_NODE_IMAGE}`")
+    mappings = node.get("extraPortMappings") or []
+    if len(mappings) != 1:
+        return failures + [f"the kind config maps {len(mappings)} ports, not the one edge port"]
+    (mapping,) = mappings
+    node_port = value_at(values_object, "platform.gatewayListener.envoyProxy.httpsNodePort")
+    enrolment = urlsplit(str(value_at(values_object, "iam.enrolment.gateway")))
+    if mapping.get("containerPort") != node_port:
+        failures.append(f"containerPort {mapping.get('containerPort')} is not httpsNodePort {node_port}")
+    if mapping.get("hostPort") != enrolment.port:
+        failures.append(f"hostPort {mapping.get('hostPort')} is not the enrolment URL's port {enrolment.port}")
+    if mapping.get("listenAddress") != KIND_LISTEN_ADDRESS:
+        failures.append(f"listenAddress {mapping.get('listenAddress')} is not {KIND_LISTEN_ADDRESS}")
+    if enrolment.hostname != value_at(values_object, HOSTNAME_KEY):
+        failures.append(f"the enrolment URL's host {enrolment.hostname} is not `{HOSTNAME_KEY}`")
+    return failures
+
+
+def test_the_kind_config_maps_the_port_the_kind_example_pins() -> None:
+    assert kind_mapping_failures(yaml.safe_load(KIND_CONFIG.read_text()), kind_values()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "named"),
+    [
+        ("hostPort", 18444, "hostPort 18444"),
+        ("containerPort", 30444, "containerPort 30444"),
+        ("listenAddress", "0.0.0.0", "listenAddress 0.0.0.0"),
+    ],
+)
+def test_a_kind_mapping_that_drifts_from_the_example_reddens_the_mapping_gate(field: str, value, named: str) -> None:
+    cluster = yaml.safe_load(KIND_CONFIG.read_text())
+    cluster["nodes"][0]["extraPortMappings"][0][field] = value
+    failures = kind_mapping_failures(cluster, kind_values())
+    assert len(failures) == 1 and named in failures[0], failures
+
+
+def test_an_unpinned_kind_node_image_reddens_the_mapping_gate() -> None:
+    cluster = yaml.safe_load(KIND_CONFIG.read_text())
+    cluster["nodes"][0]["image"] = "kindest/node:v1.36.1"
+    (failure,) = kind_mapping_failures(cluster, kind_values())
+    assert "not the measured" in failure, failure
+
+
+def kind_edge_failures(documents: list[dict], values_object: dict) -> list[str]:
+    """What the render must carry for kind's mapping to reach the edge. PURE."""
+    proxies = [d for d in documents if d.get("kind") == "EnvoyProxy" and d["metadata"]["name"] == KIND_EDGE]
+    if len(proxies) != 1:
+        return [f"{len(proxies)} EnvoyProxy objects named `{KIND_EDGE}`"]
+    kubernetes = proxies[0]["spec"]["provider"]["kubernetes"]
+    service = kubernetes.get("envoyService") or {}
+    pod = (kubernetes.get("envoyDeployment") or {}).get("pod") or {}
+    stated = values_object["platform"]["gatewayListener"]["envoyProxy"]
+    failures = []
+    if service.get("type") != "NodePort":
+        failures.append(f"the edge Service type renders `{service.get('type')}`, not NodePort")
+    ports = (((service.get("patch") or {}).get("value") or {}).get("spec") or {}).get("ports")
+    if ports != [{"port": 443, "nodePort": stated["httpsNodePort"]}]:
+        failures.append(f"the edge Service patch renders ports {ports}, not 443 on node port {stated['httpsNodePort']}")
+    if pod.get("nodeSelector") != stated["pod"]["nodeSelector"]:
+        failures.append(f"the Envoy pods render nodeSelector {pod.get('nodeSelector')}")
+    if pod.get("tolerations") != stated["pod"]["tolerations"]:
+        failures.append(f"the Envoy pods render tolerations {pod.get('tolerations')}")
+    host = value_at(values_object, HOSTNAME_KEY)
+    sites = hostname_sites(documents)
+    expected = {**derived_from(host), "iam.enrolment.gateway": value_at(values_object, "iam.enrolment.gateway")}
+    failures += [f"`{key}` renders {sites[key]!r}, not {expected[key]!r}" for key in expected if sites[key] != expected[key]]
+    return failures
+
+
+def test_the_kind_example_renders_a_node_port_edge_and_the_enrolment_port(pinned: Path, tmp_path: Path) -> None:
+    result = example_render(pinned, kind_values(), tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert kind_edge_failures(documents, kind_values()) == []
+    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS))
+
+
+def test_the_kind_example_on_heads_chart_probes_prometheus(packaged: Path, tmp_path: Path) -> None:
+    """HEAD's defaults, which the next tag publishes, turn the preflight's prometheus arm on."""
+    result = example_render(packaged, kind_values(), tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert "prometheus" in probes_declared(documents)
+    assert prometheus_address_failures(documents) == []
+
+
+def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_path: Path) -> None:
+    """THE RED CASE: `application.yaml`'s render has none of what kind needs."""
+    result = example_render(pinned, example_source()["helm"]["valuesObject"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    failures = kind_edge_failures(documents, kind_values())
+    assert any("not NodePort" in failure for failure in failures), failures
+    assert any("node port 30443" in failure for failure in failures), failures
+    assert any("nodeSelector" in failure for failure in failures), failures
+    assert any("`iam.enrolment.gateway`" in failure for failure in failures), failures

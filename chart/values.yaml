@@ -152,12 +152,18 @@ platform:
     iamKeys:
       create: true
   preflight:
-    # THE TWO PROBES NOTHING CAN INFER. `platform` renders neither a ScaledObject
-    # nor a MariaDB CR — the module charts do — so these two default false in
+    # THE THREE PROBES NOTHING CAN INFER. `platform` renders neither a ScaledObject
+    # nor a MariaDB CR — the module charts do — so these three default false in
     # `platform` and are set here, beside the toggles below that render them.
+    # `prometheus` (ADR-0820) pairs with `autoscaling.enabled` as `keda` does: a
+    # ScaledObject needs KEDA and the Prometheus it queries, and without that
+    # Prometheus every ScaledObject reports `TriggerError` and the install stays
+    # `Degraded`. The probe asks `preflight.prometheus.address`, which must equal
+    # every module's `autoscaling.prometheusAddress`; the suite holds them equal.
     probes:
       keda: true
       mariadb: true
+      prometheus: true
 
 iam:
   autoscaling:
