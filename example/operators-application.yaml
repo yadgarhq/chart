@@ -55,9 +55,15 @@ spec:
     # pods and their Service land once `application.yaml` syncs.
     namespace: yadgar-operators
   syncPolicy:
-    # `prune: false`: an operator's CRDs own every custom resource in the cluster.
-    # A pruned CRD deletes each object of its kind, the estate's included.
-    automated: { prune: false, selfHeal: true }
+    # `prune` OMITTED, NOT WRITTEN `false`. An operator's CRDs own every custom
+    # resource in the cluster, and a pruned CRD deletes each object of its kind,
+    # the estate's included — pruning MUST stay off. Argo's own default is
+    # already false, and that matters here: Argo CD 3.1.8 drops an explicit
+    # `prune: false` from the live object on write (measured 2026-10-01), so a
+    # written `false` comes back as absent and `kubectl diff` sees `+ prune:
+    # false` on every later `bootstrap/kind-up.sh` rerun. Omitting the key makes
+    # a rerun a true no-op instead.
+    automated: { selfHeal: true }
     # `ServerSideApply=true`: four of these CRDs exceed the 256 KiB annotation
     # a client-side apply writes, and the apply is refused.
     syncOptions: [CreateNamespace=true, ServerSideApply=true]
