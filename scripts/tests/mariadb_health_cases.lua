@@ -94,6 +94,48 @@ local cases = {
     want = "Degraded",
   },
 
+  {
+    name = "Grant not found, no metadata",
+    obj = { status = { conditions = { ready("False", "Failed", GRANT_NOT_FOUND) } } },
+    want = "Degraded",
+  },
+  {
+    -- Exact comparison: a trailing period is another message.
+    name = "Grant not found with a trailing period",
+    obj = mariadb("task-db-mariadb", { ready("False", "Failed", GRANT_NOT_FOUND .. ".") }),
+    want = "Degraded",
+  },
+  {
+    -- The second race this hunk does NOT cover: the cache still lags on the
+    -- next reconcile, so the Create returns AlreadyExists. Stays Degraded.
+    name = "mariadb.sys Grant already exists (second race)",
+    obj = mariadb("task-db-mariadb", {
+      ready("False", "Failed", "Error reconciling SQL: error reconciling mariadb.sys user auth: "
+        .. "error reconciling Grant: grants.k8s.mariadb.com "
+        .. '"task-db-mariadb-mariadb-sys-global-priv" already exists'),
+    }),
+    want = "Degraded",
+  },
+  {
+    -- Mixed order: a True condition first, then the race on Ready.
+    name = "True condition, then Grant not found on Ready",
+    obj = mariadb("task-db-mariadb", {
+      { type = "Initialized", status = "True", reason = "Initialized", message = "Initialized" },
+      ready("False", "Failed", GRANT_NOT_FOUND),
+    }),
+    want = "Progressing",
+  },
+  {
+    -- Upstream returns on the FIRST False condition; a terminal error that
+    -- comes first stays Degraded even when Ready carries the race.
+    name = "terminal False condition first, then the race on Ready",
+    obj = mariadb("task-db-mariadb", {
+      { type = "Updated", status = "False", reason = "Failed", message = "Error updating" },
+      ready("False", "Failed", GRANT_NOT_FOUND),
+    }),
+    want = "Degraded",
+  },
+
   -- Upstream's six testdata cases, status blocks and expected messages as in
   -- argo-cd v3.1.8 resource_customizations/k8s.mariadb.com/MariaDB/
   -- (health_test.yaml and testdata/*.yaml).

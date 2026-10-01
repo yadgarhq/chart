@@ -110,7 +110,8 @@ MARIADB_DIVERGENCE = (
     "                -- NOT UPSTREAM (yadgarhq/chart, ledger 1205): mariadb-operator 26.6.0\n"
     "                -- reads the mariadb.sys Grant it has just created from a lagging cache.\n"
     "                -- That one NotFound, for this MariaDB's own Grant, reads Progressing.\n"
-    '                if condition.type == "Ready" and obj.metadata.name ~= nil and condition.message ==\n'
+    '                if condition.type == "Ready" and obj.metadata ~= nil and obj.metadata.name ~= nil\n'
+    "                    and condition.message ==\n"
     "                    'Error reconciling SQL: error getting mariadb.sys Grant: Grant.k8s.mariadb.com \"'\n"
     "                    .. obj.metadata.name .. '-mariadb-sys-global-priv\" not found' then\n"
     '                    health_status.status = "Progressing"\n'
@@ -119,7 +120,7 @@ MARIADB_DIVERGENCE = (
 )
 
 # sha256 of the MariaDB override itself (trailing newline stripped).
-MARIADB_OVERRIDE_SHA256 = "1f92f8d1d8c3147168f24412554f9f71b1746cbebe1f2472ed22a914d8327565"
+MARIADB_OVERRIDE_SHA256 = "bfb8b75f83de320c71f42f36b78dbcef318e4662d78c536f7d13239d79643d3c"
 
 
 def _override(key: str = KEY) -> str:

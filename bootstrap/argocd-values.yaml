@@ -129,9 +129,10 @@ configs:
     # So this is upstream's file plus one hunk, marked NOT UPSTREAM: exactly that
     # message, for this MariaDB's own Grant, reads as Progressing. Every other
     # `reason=Failed` stays Degraded, and so does this message if the operator
-    # ever changes its wording. If the Grant really stays missing, the MariaDB
-    # reads Progressing instead of Degraded; only something that deletes an
-    # operator-owned object gets there. `scripts/tests/test_argocd_values.py`
+    # ever changes its wording. This message cannot persist: the next reconcile
+    # either recreates the Grant or reads it. A second race is NOT covered: a
+    # cache that still lags on the next reconcile makes the Create return
+    # AlreadyExists, which stays Degraded. `scripts/tests/test_argocd_values.py`
     # pins the bytes and checks that only the hunk differs from upstream. Delete
     # this key when the operator reads that Grant uncached or wraps the error
     # with `%w`.
@@ -149,7 +150,8 @@ configs:
                       -- NOT UPSTREAM (yadgarhq/chart, ledger 1205): mariadb-operator 26.6.0
                       -- reads the mariadb.sys Grant it has just created from a lagging cache.
                       -- That one NotFound, for this MariaDB's own Grant, reads Progressing.
-                      if condition.type == "Ready" and obj.metadata.name ~= nil and condition.message ==
+                      if condition.type == "Ready" and obj.metadata ~= nil and obj.metadata.name ~= nil
+                          and condition.message ==
                           'Error reconciling SQL: error getting mariadb.sys Grant: Grant.k8s.mariadb.com "'
                           .. obj.metadata.name .. '-mariadb-sys-global-priv" not found' then
                           health_status.status = "Progressing"
