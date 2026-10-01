@@ -189,15 +189,32 @@ platform:
     # subchart cannot read. So these three are FALSE in `platform`, and this
     # chart's defaults set them true because `autoscaling.enabled` and
     # `database.create` are true further down. `prometheus` checks the server the
-    # ScaledObjects query (`platform.preflight.prometheus.address`); if you point
-    # the modules' `autoscaling.prometheusAddress` elsewhere, point it there too. `probes.certManager` is left UNSET on purpose: its tie
-    # resolves it from the three `create` toggles above.
+    # ScaledObjects query.
+    #
+    # A PROMETHEUS OF YOUR OWN AT ANOTHER ADDRESS needs the same URL in TWO
+    # places: `platform.preflight.prometheus.address` here, AND
+    # `autoscaling.prometheusAddress` in every one of the seven modules below.
+    # Either one alone leaves the probe and the ScaledObjects looking at
+    # different servers.
+    #
+    # THE PROMETHEUS PROBE RUNS AS A PreSync HOOK ON EVERY SYNC, from parent
+    # 0.3.11 on. Upgrading an estate from an earlier release, sync
+    # `operators-application.yaml` at platform 0.1.21 or later FIRST, so the
+    # server it probes exists; or set `probes.prometheus` false.
+    #
+    # `probes.certManager` is left UNSET on purpose: its tie resolves it from the
+    # three `create` toggles above.
     probes:
       keda: true
       mariadb: true
       prometheus: true
 
 # ═══ THE MODULES ══════════════════════════════════════════════════════════════
+
+# THE SEVEN AUTOSCALED MODULES. `autoscaling.enabled` renders a KEDA ScaledObject
+# that queries Prometheus; set it false in any module you do not autoscale, and
+# set `platform.preflight.probes.keda` AND `platform.preflight.probes.prometheus`
+# false with the last one.
 
 gateway:
   adminBootstrap:

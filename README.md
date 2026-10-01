@@ -39,6 +39,7 @@ example/application.yaml  what you commit to your own repository
 example/operators-application.yaml  the four operators it needs; sync it first
 example/kind/             the same install on a kind cluster: NodePort edge, kind config
 example/values.yaml       how you set a module's knob from your own repository
+bootstrap/kind-up.sh      one command from a clean Debian/Ubuntu host to a first admin on kind
 ```
 
 `chart/charts/` and `chart/Chart.lock` are not in that list, and not in the
@@ -63,6 +64,35 @@ accepted and silently ignored. `config` is the exception — its schema is close
 every level, so a typo under `config:` is refused by name. Closing the gap for the
 other seven belongs in those seven charts, not in a file here that would own their
 interfaces from outside them.
+
+## One machine, one command
+
+`bootstrap/kind-up.sh` installs the whole estate on a kind cluster on the machine it
+runs on, and creates the first administrator (ADR-0820). Fetch this repository at a
+release tag — the published chart package does not carry `bootstrap/` or
+`example/`. A fresh Debian cloud image has no git, so take the release tarball with
+curl, and run the script as root:
+
+```sh
+curl -fsSL https://github.com/yadgarhq/chart/archive/refs/tags/v<version>.tar.gz | tar xz
+sudo ./chart-<version>/bootstrap/kind-up.sh   # add --with-client to enrol this machine too
+```
+
+It needs a Debian or Ubuntu host with podman or docker. In order, it raises the
+inotify and forwarding sysctls where they are lower than kind needs, installs kind,
+kubectl and helm into `/opt/yadgar-bootstrap/bin` at the versions and sha256 sums in
+`bootstrap/tools.lock`, creates the cluster from `example/kind/kind-config.yaml`,
+installs Argo CD, applies `example/operators-application.yaml` and then
+`example/kind/application.yaml`, waits for each to succeed on its first sync, adds
+the gateway hostname to `/etc/hosts`, and checks the edge answers. Then it creates
+the first admin and writes their enrolment token to `/root/yadgar-enrolment.token`
+(0600). Each step checks before it acts, so running it again changes nothing and
+resumes a run that stopped. The one exception is a failed Argo sync: Argo does not
+retry it on its own, so the script prints the failed resources and the command that
+starts one sync once the cause is fixed. It never forces a sync, it never prints a
+secret, and it only addresses the kind cluster, through a kubeconfig of its own in
+`/var/lib/yadgar-bootstrap`. The header of the script lists the environment
+variables that change its defaults.
 
 ## What the defaults install
 
@@ -124,7 +154,20 @@ say — except `platform.operators.create`, which this chart refuses on every pa
 nothing mints it, and the gateway exits at boot on a named Secret it cannot read.
 The chart does not refuse a forgotten clear — the render succeeds. Turn off
 `autoscaling.enabled` and `database.create` in the modules whose KEDA or
-mariadb-operator you do not run.
+mariadb-operator you do not run. With the last `autoscaling.enabled` off, also set
+`platform.preflight.probes.keda` and `platform.preflight.probes.prometheus` false;
+with the last `database.create` off, `platform.preflight.probes.mariadb` false.
+
+**A Prometheus of your own at another address** needs the same URL in two places:
+`platform.preflight.prometheus.address`, and `autoscaling.prometheusAddress` in
+every one of the seven autoscaled modules. Either one alone leaves the preflight
+probe and the ScaledObjects looking at different servers.
+
+**Upgrading from a release before 0.3.11.** From 0.3.11 the preflight probes
+Prometheus, and the preflight runs as a PreSync hook on every sync, so an estate
+whose operators predate platform 0.1.21 fails its next sync on the probe. Sync
+`example/operators-application.yaml` at platform 0.1.21 or later first, then the
+estate; or set `platform.preflight.probes.prometheus` false.
 
 ## The subcharts are resolved at release time, not committed
 
