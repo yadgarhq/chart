@@ -40,6 +40,18 @@ gopher-lua. CI has no Lua runtime, so it runs locally only:
     python3 scripts/tests/test_argocd_values.py > /tmp/crd-health.lua
     nix shell nixpkgs#lua5_1 -c lua scripts/tests/crd_health_cases.lua /tmp/crd-health.lua
 
+THE MariaDB OVERRIDE (ledger 1205) follows the same shape. mariadb-operator
+26.6.0 creates its `<name>-mariadb-sys-global-priv` Grant and reads it back from a
+lagging informer cache, so one reconcile can write `Ready=False, reason=Failed`
+with a Grant NotFound message. v3.1.8's built-in MariaDB script reads every
+`reason=Failed` as Degraded, which fails the running sync. The override is
+upstream's script plus one hunk (`MARIADB_DIVERGENCE`): exactly that message, for
+the MariaDB's own Grant, reads as Progressing. `mariadb_health_cases.lua` checks
+the behaviour, locally only:
+
+    python3 scripts/tests/test_argocd_values.py mariadb > /tmp/mariadb-health.lua
+    nix shell nixpkgs#lua5_1 -c lua scripts/tests/mariadb_health_cases.lua /tmp/mariadb-health.lua
+
 Run: python3 -m pytest scripts/tests/test_argocd_values.py -q
 """
 
@@ -83,12 +95,40 @@ DIVERGENCE = (
 OVERRIDE_SHA256 = "8068309e805a854cff23a2ea6dbde011b3d257ff33430fe46ee6c9d5423d7adf"
 
 
-def _override() -> str:
+MARIADB_KEY = "resource.customizations.health.k8s.mariadb.com_MariaDB"
+
+# sha256 of `resource_customizations/k8s.mariadb.com/MariaDB/health.lua` at
+# argoproj/argo-cd v3.1.8 (becb020064fe9be5381bf6e5818ff8587ca8f377), trailing
+# newline stripped. The raw file's own sha256 is 0840fdce034dc6f6d6a48b597fe4fa36
+# 88ede1e59ca48ec4f5cf66f6d36b47bd. The file has not changed since 440fbac12b74
+# (#17995, 2024-05-08); master holds the same bytes on 2026-10-01.
+MARIADB_UPSTREAM_SHA256 = "de3a0bcfeb4d5e91308af0b29e1a18e3fe9282fe1d8612fa28379f08690b20c5"
+
+# The ONLY lines the MariaDB override adds to upstream's script. Each must occur
+# exactly once. With them removed, the script must hash to MARIADB_UPSTREAM_SHA256.
+MARIADB_DIVERGENCE = (
+    "                -- NOT UPSTREAM (yadgarhq/chart, ledger 1205): mariadb-operator 26.6.0\n"
+    "                -- reads the mariadb.sys Grant it has just created from a lagging cache.\n"
+    "                -- That one NotFound, for this MariaDB's own Grant, reads Progressing.\n"
+    '                if condition.type == "Ready" and obj.metadata ~= nil and obj.metadata.name ~= nil\n'
+    "                    and condition.message ==\n"
+    "                    'Error reconciling SQL: error getting mariadb.sys Grant: Grant.k8s.mariadb.com \"'\n"
+    "                    .. obj.metadata.name .. '-mariadb-sys-global-priv\" not found' then\n"
+    '                    health_status.status = "Progressing"\n'
+    "                    return health_status\n"
+    "                end\n",
+)
+
+# sha256 of the MariaDB override itself (trailing newline stripped).
+MARIADB_OVERRIDE_SHA256 = "bfb8b75f83de320c71f42f36b78dbcef318e4662d78c536f7d13239d79643d3c"
+
+
+def _override(key: str = KEY) -> str:
     values = yaml.safe_load(VALUES.read_text())
     cm = values.get("configs", {}).get("cm", {})
-    assert KEY in cm, f"argocd-values.yaml configs.cm has no {KEY!r}"
-    script = cm[KEY]
-    assert isinstance(script, str), f"{KEY} must be a Lua string, got {type(script)}"
+    assert key in cm, f"argocd-values.yaml configs.cm has no {key!r}"
+    script = cm[key]
+    assert isinstance(script, str), f"{key} must be a Lua string, got {type(script)}"
     return script
 
 
@@ -138,6 +178,46 @@ def test_no_established_condition_reads_as_progressing_not_degraded() -> None:
     )
 
 
+def test_the_mariadb_health_override_is_pinned() -> None:
+    assert _sha256(_override(MARIADB_KEY)) == MARIADB_OVERRIDE_SHA256, (
+        "the MariaDB health override changed; update MARIADB_OVERRIDE_SHA256 only "
+        "after the Lua cases in mariadb_health_cases.lua pass"
+    )
+
+
+def test_the_mariadb_override_is_upstream_plus_only_the_documented_hunk() -> None:
+    script = _override(MARIADB_KEY)
+    for hunk in MARIADB_DIVERGENCE:
+        assert script.count(hunk) == 1, f"divergence hunk not found once:\n{hunk}"
+        script = script.replace(hunk, "", 1)
+    assert _sha256(script) == MARIADB_UPSTREAM_SHA256, (
+        "with the documented hunk removed, the MariaDB override is not argo-cd "
+        "v3.1.8's health.lua"
+    )
+
+
+def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
+    # The digests above pin this. This states WHY in a failure message.
+    script = _override(MARIADB_KEY)
+    failed = script.split('if condition.reason == "Failed" then\n', 1)[1]
+    # The exception comes first inside the Failed branch, and Degraded follows it.
+    assert failed.lstrip().startswith("-- NOT UPSTREAM")
+    exception = failed.split("then\n", 1)[0]
+    # An exact comparison on the Ready condition, built from this object's name:
+    # no Lua pattern, no substring match, no other condition type.
+    assert 'condition.type == "Ready"' in exception
+    assert "condition.message ==" in exception
+    assert "obj.metadata.name .. '-mariadb-sys-global-priv\" not found'" in exception
+    assert "string.find" not in script and "string.match" not in script
+    assert failed.index('health_status.status = "Progressing"') < failed.index(
+        'health_status.status = "Degraded"'
+    )
+
+
 if __name__ == "__main__":
-    # Prints the override for crd_health_cases.lua; see the module docstring.
-    sys.stdout.write(_override())
+    # Prints the CRD override for crd_health_cases.lua, or with the argument
+    # `mariadb` the MariaDB override for mariadb_health_cases.lua; see the module
+    # docstring.
+    sys.stdout.write(
+        _override(MARIADB_KEY if sys.argv[1:] == ["mariadb"] else KEY)
+    )
