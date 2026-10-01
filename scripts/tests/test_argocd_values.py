@@ -245,8 +245,9 @@ def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
 # SO THE VALUE MUST OUTLAST THE LONGEST LEGITIMATE OPERATION, retries included,
 # or it cuts off a chain the retry gate allows. The gate allows up to
 # RETRY_WINDOW_SECONDS[1] of backoff, and every attempt may run the estate's
-# hook Jobs to the bounds `platform` documents (ATTEMPT_ALLOWANCE_SECONDS below).
-# With `limit: 6`: 1200 + 7 x 2955 = 21885 s. 22200 s (6.2 h) clears that. Max
+# hook Jobs to the ceilings `platform` documents and wait for Sync-phase health
+# (ATTEMPT_ALLOWANCE_SECONDS below). With `limit: 6`: 1200 + 7 x 3225 = 23775 s.
+# 24000 s (6.7 h) clears that. Max
 # ruled 2026-10-01: keep the documented margins now, tighten through per-hook
 # deadlines later (ledger 1224). The longest operation measured on the v0.3.15
 # VM run took 4m12s with 2 retries, so the floor is a sum of ceilings, not a
@@ -267,32 +268,52 @@ def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
 SYNC_TIMEOUT_KEY = "controller.sync.timeout.seconds"
 MAX_INT32 = 2_147_483_647
 
-# THE HOOK TIME ONE ATTEMPT MAY LEGITIMATELY SPEND. The kind example installs
+# THE TIME ONE ATTEMPT MAY LEGITIMATELY SPEND. The kind example installs
 # `yadgar`, which embeds `platform` 0.1.21 (`chart/Chart.yaml`). Rendered with
 # the example's `valuesObject`, every attempt runs four hook Jobs from that
-# subchart, none with `activeDeadlineSeconds`. The bounds are the ones
-# `yadgarhq/platform@v0.1.21 chart/values.yaml` documents:
+# subchart, none with `activeDeadlineSeconds`. The preflight and the probe carry
+# the ceilings `yadgarhq/platform@v0.1.21 chart/values.yaml` documents. They are
+# DOCUMENTED CEILINGS, NOT BOUNDS: each loop is bounded, but every `request()`
+# in both scripts is a curl with no `--max-time`, so request time is unbounded.
 #   `preflight` (PreSync, hook-weight -7): `timeoutSeconds: 120` (L857), and "worst
 #     case with every probe on is eight 120s loops plus the same 300s margin"
 #     (L1035-1036).
 PREFLIGHT_SECONDS = 8 * 120 + 300
 #   `envoy-gateway-probe` (PostSync, hook-weight -7): `timeoutSeconds: 300`
-#     (L1043), "three times this number" (L1026-1030), and "the composed bound is
-#     900s, and the documented `--timeout 25m` leaves 600s over it for
-#     scheduling, image pull and request time" (L1033-1035).
+#     (L1043). The values say three loops (L1026-1030) and "the composed bound
+#     is 900s, and the documented `--timeout 25m` leaves 600s over it for
+#     scheduling, image pull and request time" (L1033-1035). The script
+#     (`chart/templates/envoy-gateway-probe.yaml`) runs FOUR: `remove` of the
+#     Gateway, `create` of the EnvoyProxy (which calls `remove` first), `create`
+#     of the Gateway (which calls `remove` of the Gateway again), and `await`.
+#     The fourth is the second `remove` of a Gateway the first one already
+#     deleted, so on the legitimate path it returns at once (~0 s). The values'
+#     900 + 600 is kept.
 PROBE_SECONDS = 3 * 300 + 600
 #   `bootstrap-secrets` and `admin-bootstrap-token` (PreSync, both hook-weight
-#     -5) run IN PARALLEL. Each is one curl with no timeout and `backoffLimit: 4`.
-#     MEASURED, NOT BOUNDED: 3 s each on kind-yadgar (2026-10-01, both 08:09:39 ->
-#     08:09:42, the same platform 0.1.21 templates). Their bound is the Job's pod
-#     backoff (10 + 20 + 40 + 80 s) plus 5 attempts of 3x the measured 3 s. The
-#     two are equal; the larger is taken.
+#     -5) run IN PARALLEL. bootstrap-secrets makes three requests
+#     (valkey-password, nats-auth, nats-auth-gateway), admin-bootstrap-token its
+#     own; no curl has a timeout, each Job has `backoffLimit: 4` and no deadline.
+#     MEASURED, NOT BOUNDED: 3 s each, all requests included, on kind-yadgar
+#     (2026-10-01, both 08:09:39 -> 08:09:42, the same platform 0.1.21
+#     templates). The allowance is the Job's pod backoff (10 + 20 + 40 + 80 s)
+#     plus 5 attempts of 3x the measured 3 s. The two Jobs share it.
 BOOTSTRAP_JOB_SECONDS = (10 + 20 + 40 + 80) + 5 * 3 * 3
-# Script bounds, not pod bounds: a pod that never starts (the 1208
-# ImagePullBackOff) is bounded only by the sync timeout this file sets. A KNOWN
-# LIMITATION: these numbers are copied from the lines cited, and nothing here
-# re-reads them. Update them when the platform pin or a hook bound changes.
-ATTEMPT_ALLOWANCE_SECONDS = PREFLIGHT_SECONDS + PROBE_SECONDS + max(BOOTSTRAP_JOB_SECONDS, BOOTSTRAP_JOB_SECONDS)
+#   SYNC-PHASE HEALTH. The sync is multi-step (it has Pre- and PostSync hooks;
+#     gitops-engine `pkg/sync/sync_tasks.go:274` at e48120133eec), so each
+#     attempt also waits for its Sync-phase resources to be Healthy before
+#     PostSync runs (`pkg/sync/sync_context.go:494-501`). Nothing bounds that
+#     wait: no Deployment sets `progressDeadlineSeconds` (Kubernetes' default is
+#     600 s), and the nats StatefulSet and the MariaDBs have no deadline.
+#     MEASURED, NOT BOUNDED: the v0.3.15 VM run's attempt 0 finished its
+#     preflight at 09:53:55 and failed at 09:55:31 still "waiting for healthy
+#     state of apps/Deployment/iam-db", so at least 90 s; 3x that.
+SYNC_HEALTH_SECONDS = 90 * 3
+# A pod that never starts (the 1208 ImagePullBackOff) is bounded only by the
+# sync timeout this file sets. A KNOWN LIMITATION: these numbers are copied from
+# the lines cited, and nothing here re-reads them. Update them when the platform
+# pin or a hook bound changes.
+ATTEMPT_ALLOWANCE_SECONDS = PREFLIGHT_SECONDS + PROBE_SECONDS + BOOTSTRAP_JOB_SECONDS + SYNC_HEALTH_SECONDS
 
 
 def _values() -> dict:
@@ -339,13 +360,13 @@ def test_the_sync_timeout_outlasts_every_retry_chain_the_gate_allows() -> None:
 
 
 def test_the_per_attempt_allowance_is_the_documented_bounds() -> None:
-    assert (PREFLIGHT_SECONDS, PROBE_SECONDS, BOOTSTRAP_JOB_SECONDS) == (1260, 1500, 195)
-    assert ATTEMPT_ALLOWANCE_SECONDS == 2955
+    assert (PREFLIGHT_SECONDS, PROBE_SECONDS, BOOTSTRAP_JOB_SECONDS, SYNC_HEALTH_SECONDS) == (1260, 1500, 195, 270)
+    assert ATTEMPT_ALLOWANCE_SECONDS == 3225
 
 
 def test_the_floor_is_the_gate_ceiling_plus_the_allowance_per_attempt() -> None:
-    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 2955 s.
-    assert sync_timeout_floor() == 1200 + 7 * 2955 == 21885
+    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 3225 s.
+    assert sync_timeout_floor() == 1200 + 7 * 3225 == 23775
 
 
 def test_a_higher_example_limit_raises_the_floor() -> None:
@@ -354,7 +375,7 @@ def test_a_higher_example_limit_raises_the_floor() -> None:
 
     documents = [parent.application(path) for path in parent.EXAMPLE_APPLICATIONS]
     documents[0]["spec"]["syncPolicy"]["retry"]["limit"] = 7
-    assert sync_timeout_floor(documents) == 1200 + 8 * 2955
+    assert sync_timeout_floor(documents) == 1200 + 8 * 3225
 
 
 def test_the_retry_waits_are_the_measured_sequence() -> None:
@@ -373,13 +394,14 @@ def test_the_retry_waits_are_the_measured_sequence() -> None:
         ("0", "disables"),
         ("900", "below"),
         ("4200", "below"),
-        ("21884", "below"),
+        ("22200", "below"),
+        ("23774", "below"),
         ("2147483648", "MaxInt32"),
         ("3000000000", "MaxInt32"),
-        (22200, "not a quoted"),
+        (24000, "not a quoted"),
         ("1h", "not a quoted"),
     ],
-    ids=["missing", "zero", "900", "old-4200", "one-under-floor", "maxint32-plus-1", "3e9", "unquoted", "go-duration"],
+    ids=["missing", "zero", "900", "old-4200", "old-22200", "one-under-floor", "maxint32-plus-1", "3e9", "unquoted", "go-duration"],
 )
 def test_a_bad_sync_timeout_reddens(value, named: str) -> None:
     values = yaml.safe_load(yaml.safe_dump(_values()))
