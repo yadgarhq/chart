@@ -5068,13 +5068,34 @@ def test_a_parent_carrying_another_platform_reddens_the_operators_pin(pre_0808: 
     assert f"carries platform {older}" in failure, failure
 
 
+def operators_prune_failures(automated: dict) -> list[str]:
+    """`prune` must stay absent or false: a pruned CRD deletes every object of its kind. PURE.
+
+    NOT an equality on the literal key, because Argo CD 3.1.8 drops an explicit
+    `prune: false` from the live object on write (measured 2026-10-01): a gate
+    that demanded the key be present would redden on the cluster's own object.
+    """
+    if automated.get("prune", False) is not False:
+        return [f"operators' automated sync prunes: {automated}"]
+    return []
+
+
 def test_the_operators_example_is_the_measured_application() -> None:
     spec = application(OPERATORS_APPLICATION)["spec"]
     assert spec["source"]["helm"]["valuesObject"] == OPERATORS_VALUES
     assert spec["destination"]["namespace"] == OPERATORS_NAMESPACE
-    # `prune: false`: a pruned CRD deletes every object of its kind.
-    assert spec["syncPolicy"]["automated"] == {"prune": False, "selfHeal": True}
+    automated = spec["syncPolicy"]["automated"]
+    assert operators_prune_failures(automated) == []
+    assert automated.get("selfHeal") is True
     assert set(spec["syncPolicy"]["syncOptions"]) == OPERATORS_SYNC_OPTIONS
+
+
+def test_a_pruning_automated_sync_reddens_the_operators_gate() -> None:
+    """THE RED CASE: `prune: true` must fail, never silently pass."""
+    (failure,) = operators_prune_failures({"prune": True, "selfHeal": True})
+    assert "prunes" in failure, failure
+    assert operators_prune_failures({"prune": False, "selfHeal": True}) == []
+    assert operators_prune_failures({"selfHeal": True}) == []
 
 
 @pytest.fixture(scope="module")
