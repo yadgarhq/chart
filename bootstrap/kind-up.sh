@@ -155,14 +155,19 @@ run() {
 
 # Moves $1 over $2 when their content differs, else deletes $1. Prints
 # `unchanged` or `written`. Mode and ownership are $1's.
+#
+# RUN IN A COMMAND SUBSTITUTION, where errexit does not reach without
+# `inherit_errexit`: every step returns its own failure, and each caller
+# captures the result into a variable — whose assignment does carry the status —
+# before it logs it.
 replace_if_changed() {
   local new="$1" target="$2"
   if [[ -f "$target" ]] &&
     [[ "$(sha256sum <"$new" | awk '{ print $1 }')" == "$(sha256sum <"$target" | awk '{ print $1 }')" ]]; then
-    rm -f "$new"
+    rm -f "$new" || return 1
     echo unchanged
   else
-    mv -f "$new" "$target"
+    mv -f "$new" "$target" || return 1
     echo written
   fi
 }
@@ -249,7 +254,10 @@ detect_runtime() {
 # network answer, no warning.
 check_clock() {
   local header remote now
-  header="$(curl -fsS -I --max-time 10 https://dl.k8s.io/ 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "date:" { $1 = ""; print; exit }' || true)"
+  # `-k`: the skew this looks for puts the clock before the certificate's
+  # notBefore, and a verifying request would then fail silently. Only the Date
+  # header is read, and nothing is sent.
+  header="$(curl -k -fsS -I --max-time 10 https://dl.k8s.io/ 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "date:" { $1 = ""; print; exit }' || true)"
   [[ -n "$header" ]] || return 0
   remote="$(date -u -d "$header" +%s 2>/dev/null || true)"
   [[ -n "$remote" ]] || return 0
@@ -373,7 +381,9 @@ ensure_cluster() {
       rm -f "$KUBECONFIG_FILE.new"
       die "kind cluster $CLUSTER_NAME exists but its kubeconfig cannot be exported"
     }
-    log "[4/10] kubeconfig $KUBECONFIG_FILE $(replace_if_changed "$KUBECONFIG_FILE.new" "$KUBECONFIG_FILE")"
+    local result
+    result="$(replace_if_changed "$KUBECONFIG_FILE.new" "$KUBECONFIG_FILE")"
+    log "[4/10] kubeconfig $KUBECONFIG_FILE $result"
     [[ "$(k get --raw /readyz 2>/dev/null)" == ok ]] ||
       die "kind cluster $CLUSTER_NAME exists but its API is not ready. After a reboot its node is stopped: $RUNTIME start $CLUSTER_NAME-control-plane, then run this again"
     k get nodes -o json | jq -e '[.items[].status.conditions[] | select(.type == "Ready") | .status == "True"] | all' >/dev/null ||
@@ -558,7 +568,9 @@ ensure_edge_ca() {
   # 0700 directory is readable by root alone.
   install -d -m 0755 "$(dirname "$CA_FILE")"
   chmod 0644 "$tmp"
-  log "[8/10] edge CA $CA_FILE $(replace_if_changed "$tmp" "$CA_FILE")"
+  local result
+  result="$(replace_if_changed "$tmp" "$CA_FILE")"
+  log "[8/10] edge CA $CA_FILE $result"
 }
 
 # The gateway answers GET / with 405 "MCP uses POST": TLS, the hostname, the
@@ -839,8 +851,8 @@ main() {
   load_examples
   log "kind-up: cluster $CLUSTER_NAME, edge $GATEWAY_URL, log $LOG_FILE"
 
-  ensure_packages
   check_clock
+  ensure_packages
   detect_runtime
   ensure_sysctls
   ensure_tool kind

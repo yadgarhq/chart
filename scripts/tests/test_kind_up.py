@@ -1101,7 +1101,10 @@ def test_the_header_says_argo_may_retry_within_the_first_operation() -> None:
 
 def test_a_clock_far_behind_the_network_is_warned_about(rig: Rig) -> None:
     rig.rules = [
-        {"cmd": "curl", "match": ["-I"], "stdout": "HTTP/2 200\r\ndate: Wed, 01 Jan 2031 00:00:00 GMT\r\n\r\n"},
+        # ANSWERS ONLY WITH `-k`. A clock this far off fails certificate
+        # validation, so a check that verifies TLS would hear nothing.
+        {"cmd": "curl", "match": ["-k", "-I"], "stdout": "HTTP/2 200\r\ndate: Wed, 01 Jan 2031 00:00:00 GMT\r\n\r\n"},
+        {"cmd": "curl", "match": ["-I"], "exit": 60, "stderr": "curl: (60) SSL certificate problem\n"},
     ] + rig.rules
     proc = rig.run("check_clock")
     assert proc.returncode == 0, proc.stderr
@@ -1122,3 +1125,33 @@ def test_a_clock_in_step_with_the_network_says_nothing(rig: Rig) -> None:
     proc = rig.run("check_clock")
     assert proc.returncode == 0, proc.stderr
     assert "behind" not in proc.stdout
+
+
+def test_the_clock_is_checked_before_anything_else_reaches_the_network() -> None:
+    body = SCRIPT.read_text().split("main() {", 1)[1]
+    assert body.index("  check_clock\n") < body.index("  ensure_packages\n"), "apt fails first on a skewed clock"
+
+
+def test_no_answer_from_the_clock_host_does_not_stop_the_run(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "curl", "match": ["-I", "dl.k8s.io"], "exit": 6, "stderr": "curl: (6) Could not resolve host\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert any("dl.k8s.io" in " ".join(c["argv"]) for c in rig.calls("curl")), "the clock was never checked"
+
+
+def test_a_failed_replace_stops_the_run(rig: Rig) -> None:
+    """replace_if_changed runs in a command substitution, where errexit does not reach."""
+    ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    rig.rules = [
+        {"cmd": "kubectl", "match": ["secret", "gateway-tls"], "stdout": base64.b64encode(ca.encode()).decode()},
+    ] + rig.rules
+    broken = rig.root / "fakebin" / "mv"
+    broken.write_text("#!/bin/sh\necho 'mv: cannot move' >&2\nexit 1\n")
+    broken.chmod(0o755)
+    proc = rig.run("load_examples; ensure_edge_ca; echo REACHED")
+    assert proc.returncode != 0, proc.stdout
+    assert "REACHED" not in proc.stdout
+    assert "written" not in proc.stdout
