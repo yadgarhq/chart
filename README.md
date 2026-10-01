@@ -154,7 +154,20 @@ say — except `platform.operators.create`, which this chart refuses on every pa
 nothing mints it, and the gateway exits at boot on a named Secret it cannot read.
 The chart does not refuse a forgotten clear — the render succeeds. Turn off
 `autoscaling.enabled` and `database.create` in the modules whose KEDA or
-mariadb-operator you do not run.
+mariadb-operator you do not run. With the last `autoscaling.enabled` off, also set
+`platform.preflight.probes.keda` and `platform.preflight.probes.prometheus` false;
+with the last `database.create` off, `platform.preflight.probes.mariadb` false.
+
+**A Prometheus of your own at another address** needs the same URL in two places:
+`platform.preflight.prometheus.address`, and `autoscaling.prometheusAddress` in
+every one of the seven autoscaled modules. Either one alone leaves the preflight
+probe and the ScaledObjects looking at different servers.
+
+**Upgrading from a release before 0.3.11.** From 0.3.11 the preflight probes
+Prometheus, and the preflight runs as a PreSync hook on every sync, so an estate
+whose operators predate platform 0.1.21 fails its next sync on the probe. Sync
+`example/operators-application.yaml` at platform 0.1.21 or later first, then the
+estate; or set `platform.preflight.probes.prometheus` false.
 
 ## The subcharts are resolved at release time, not committed
 
