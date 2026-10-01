@@ -12,17 +12,28 @@ configs:
     # POLL THE REGISTRY EVERY MINUTE rather than every three, so a first sync
     # starts promptly after `kubectl apply`.
     timeout.reconciliation: 60s
-    # THE CRD HEALTH CHECK ARGO CD v3.5.0 SHIPS, ON v3.1.8 (ledger 1197). v3.1.8's
-    # built-in script reads a CRD whose status says `Established=False,
-    # reason=Installing` as Degraded. That state lasts only until the apiserver
-    # establishes the CRD, but gitops-engine fails a running sync task whose live
-    # object is Degraded. So the `operators` sync failed its first two attempts
-    # with ~40 CRD tasks "CRD is not established" on a fresh cluster, and only a
-    # retry passed. This is upstream's fixed file VERBATIM, from
-    # argoproj/argo-cd#26126 (commit 4535a1fde7b9): `Installing` reads as
-    # Progressing. A `resource.customizations.health.*` key in argocd-cm wins
-    # over the built-in script. `scripts/tests/test_argocd_values.py` pins the
-    # bytes by digest. Delete this key when Argo CD here is v3.5.0 or later.
+    # THE CRD HEALTH CHECK FOR A CRD THE APISERVER HAS NOT ESTABLISHED YET, ON
+    # v3.1.8 (ledger 1197). gitops-engine fails a running sync task whose live
+    # object is Degraded, and a new CRD passes through two states that v3.1.8's
+    # built-in script reads as Degraded, "CRD is not established":
+    # - `Established=False, reason=Installing`. On a fresh cluster the
+    #   `operators` sync failed its first two attempts with ~40 such CRD tasks.
+    #   Upstream fixed this state in argoproj/argo-cd#26126 (commit
+    #   4535a1fde7b9, v3.5.0).
+    # - Conditions that hold no `Established` entry yet. The gateway-api CRDs
+    #   carry the `api-approved.kubernetes.io` annotation, so the apiserver
+    #   writes `KubernetesAPIApprovalPolicyConformant` about 2 s before
+    #   `NamesAccepted` and `Established`. With upstream's fixed script (chart
+    #   v0.3.14) the sync still failed twice on these 10 CRDs. Upstream master
+    #   (v3.5.3) has this gap too; argoproj/argo-cd#26346 is open.
+    # So this is upstream's fixed file plus three hunks, each marked or named
+    # `hasEstablishedCondition`: no `Established` condition reads as
+    # Progressing, "CRD is being installed". All other branches are upstream's.
+    # A `resource.customizations.health.*` key in argocd-cm wins over the
+    # built-in script. `scripts/tests/test_argocd_values.py` pins the bytes and
+    # checks that only the three hunks differ from upstream. Delete this key
+    # when the Argo CD here ships a built-in script that reads both states as
+    # Progressing.
     resource.customizations.health.apiextensions.k8s.io_CustomResourceDefinition:
       |
       local hs = {}
@@ -47,6 +58,10 @@ configs:
       end
 
       local isEstablished
+      -- NOT UPSTREAM (yadgarhq/chart, ledger 1197; argoproj/argo-cd#26346): a CRD
+      -- whose conditions hold no Established entry yet reads Progressing, not
+      -- Degraded. gateway-api CRDs get KubernetesAPIApprovalPolicyConformant first.
+      local hasEstablishedCondition = false
       local conditionMsg = ""
 
       for _, condition in pairs(obj.status.conditions) do
@@ -74,6 +89,7 @@ configs:
 
           -- Checking if CRD is established
           if condition.type == "Established" then
+              hasEstablishedCondition = true
               if condition.status == "True" then
                   isEstablished = true
                   conditionMsg = condition.message
@@ -86,6 +102,11 @@ configs:
       end
 
       if not isEstablished then
+          if not hasEstablishedCondition then
+              hs.status = "Progressing"
+              hs.message = "CRD is being installed"
+              return hs
+          end
           hs.status = "Degraded"
           hs.message = "CRD is not established"
           return hs
