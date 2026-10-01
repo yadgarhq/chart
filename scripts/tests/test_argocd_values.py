@@ -223,32 +223,53 @@ def test_only_the_own_grant_not_found_message_reads_as_progressing() -> None:
 # Running for ever, and `retry` never fires, because retry runs only after an
 # attempt FAILS.
 #
-# WHAT THE TIMEOUT DOES, read in argo-cd v3.1.8 `controller/appcontroller.go`:
+# WHAT THE TIMEOUT DOES, read in argo-cd v3.1.8 (becb020)
+# `controller/appcontroller.go`:
+# - `:1397`: `terminating` is read from the stored phase, before anything below.
 # - `:1420-1424`: an operation still in progress `syncTimeout` after its
 #   `StartedAt` is set to Terminating, "operation is terminating due to timeout".
 # - `controller/sync.go:412-413` then calls gitops-engine's `Terminate()`
-#   (`pkg/sync/sync_context.go:1278-1312` at e48120133eec), in the same call. It
+#   (`pkg/sync/sync_context.go:1278-1313` at e48120133eec), in the same call. It
 #   deletes every RUNNING hook and sets the phase Failed, "Operation terminated".
-# - `:1463-1474`: the local `terminating` was read before the timeout set the
-#   phase, so it is false, and a Failed phase with retries left is retried after
-#   the usual backoff.
+# - `:1476-1490`: `terminating` is still false, so a Failed phase with retries
+#   left is retried after the usual backoff (`RetryCount++` at `:1485`).
 # - `StartedAt` is set only when an operation starts (`:1429`); the retry path
-#   (`:1399-1418`) keeps it. So the clock covers the WHOLE operation, every
+#   (`:1400-1419`) keeps it. So the clock covers the WHOLE operation, every
 #   attempt and every backoff wait, and once it has run out each retry gets one
 #   pass and is terminated on the next one. The real effect is "the hung hook is
 #   deleted and the Application reads Failed after the timeout plus the remaining
 #   backoff", not "a retry recovers it".
+# - `:1486` appends "due to application controller sync timeout" to EVERY retry's
+#   message, whatever failed. That text is not evidence this timeout fired.
 #
 # SO THE VALUE MUST OUTLAST THE LONGEST LEGITIMATE OPERATION, retries included,
 # or it cuts off a chain the retry gate allows. The gate allows up to
-# RETRY_WINDOW_SECONDS[1] of backoff, and `kind-up.sh` budgets one 300 s hook
-# bound for each of the `limit + 1` attempts (its ESTATE_TIMEOUT comment). With
-# `limit: 6`: 1200 + 7 x 300 = 3300 s. 3600 s clears that. The longest operation
+# RETRY_WINDOW_SECONDS[1] of backoff, and every attempt may run both of the
+# estate's polling hooks to their bound (ATTEMPT_ALLOWANCE_SECONDS below). With
+# `limit: 6`: 1200 + 7 x 420 = 4140 s. 4200 s clears that. The longest operation
 # measured on the v0.3.15 VM run took 4m12s with 2 retries.
+#
+# AND IT MUST FIT A GO INT32. The controller reads the env var with
+# `env.ParseNumFromEnv(..., 0, 0, math.MaxInt32)`
+# (`cmd/argocd-application-controller/commands/argocd_application_controller.go:278`),
+# and a value above the maximum logs a warning and falls back to the default, 0
+# (`util/env/env.go:36-39`): no timeout at all, which is ledger 1208 again.
 
 SYNC_TIMEOUT_KEY = "controller.sync.timeout.seconds"
-# One hook bound per attempt, the figure `kind-up.sh` budgets ESTATE_TIMEOUT with.
-ATTEMPT_ALLOWANCE_SECONDS = 300
+MAX_INT32 = 2_147_483_647
+
+# THE HOOK TIME ONE ATTEMPT MAY LEGITIMATELY SPEND, from the hooks themselves:
+# the published `yadgar` chart at the kind example's pin (0.3.16), rendered with
+# that example's `valuesObject`, carries two polling hook Jobs:
+#   `preflight`            PreSync   `TIMEOUT_SECONDS=120` in its script
+#   `envoy-gateway-probe`  PostSync  `TIMEOUT_SECONDS=300` in its script
+# A retry re-runs both. No rendered hook Job sets `activeDeadlineSeconds`, so
+# these are script bounds, not pod bounds: a pod that never starts (the 1208
+# ImagePullBackOff) is bounded only by the sync timeout this file sets. Update
+# these when either script bound changes.
+PRESYNC_HOOK_SECONDS = 120
+POSTSYNC_HOOK_SECONDS = 300
+ATTEMPT_ALLOWANCE_SECONDS = PRESYNC_HOOK_SECONDS + POSTSYNC_HOOK_SECONDS
 
 
 def _values() -> dict:
@@ -283,6 +304,8 @@ def sync_timeout_failures(values: dict) -> list[str]:
     seconds = int(raw)
     if seconds == 0:
         return [f"{SYNC_TIMEOUT_KEY} is 0, which disables the timeout"]
+    if seconds > MAX_INT32:
+        return [f"{SYNC_TIMEOUT_KEY} is {seconds}, above MaxInt32: Argo falls back to 0, no timeout"]
     floor = sync_timeout_floor()
     if seconds < floor:
         return [f"{SYNC_TIMEOUT_KEY} is {seconds} s, below the {floor} s a retried sync may legitimately take"]
@@ -293,9 +316,9 @@ def test_the_sync_timeout_outlasts_every_retry_chain_the_gate_allows() -> None:
     assert sync_timeout_failures(_values()) == []
 
 
-def test_the_floor_is_the_gate_ceiling_plus_one_hook_bound_per_attempt() -> None:
-    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 300 s.
-    assert sync_timeout_floor() == 1200 + 7 * 300
+def test_the_floor_is_the_gate_ceiling_plus_both_hook_bounds_per_attempt() -> None:
+    # Hand-computed: a 1200 s window ceiling, limit 6, so 7 attempts of 120 + 300 s.
+    assert sync_timeout_floor() == 1200 + 7 * (120 + 300)
 
 
 @pytest.mark.parametrize(
@@ -304,11 +327,14 @@ def test_the_floor_is_the_gate_ceiling_plus_one_hook_bound_per_attempt() -> None
         (None, "has no"),
         ("0", "disables"),
         ("900", "below"),
-        ("3299", "below"),
-        (3600, "not a quoted"),
+        ("3600", "below"),
+        ("4139", "below"),
+        ("2147483648", "MaxInt32"),
+        ("3000000000", "MaxInt32"),
+        (4200, "not a quoted"),
         ("1h", "not a quoted"),
     ],
-    ids=["missing", "zero", "900", "one-under-floor", "unquoted", "go-duration"],
+    ids=["missing", "zero", "900", "old-3600", "one-under-floor", "maxint32-plus-1", "3e9", "unquoted", "go-duration"],
 )
 def test_a_bad_sync_timeout_reddens(value, named: str) -> None:
     values = yaml.safe_load(yaml.safe_dump(_values()))
@@ -318,6 +344,13 @@ def test_a_bad_sync_timeout_reddens(value, named: str) -> None:
         params[SYNC_TIMEOUT_KEY] = value
     failures = sync_timeout_failures(values)
     assert len(failures) == 1 and named in failures[0], failures
+
+
+def test_maxint32_itself_is_accepted() -> None:
+    # The boundary: `ParseNumFromEnv` rejects only a value ABOVE the maximum.
+    values = yaml.safe_load(yaml.safe_dump(_values()))
+    values["configs"]["params"][SYNC_TIMEOUT_KEY] = str(MAX_INT32)
+    assert sync_timeout_failures(values) == []
 
 if __name__ == "__main__":
     # Prints the CRD override for crd_health_cases.lua, or with the argument

@@ -100,14 +100,23 @@ ENROLMENT_FILE="${YADGAR_ENROLMENT_FILE:-/root/yadgar-enrolment.token}"
 ADMIN_EXTERNAL_ID="${YADGAR_ADMIN_EXTERNAL_ID:-admin}"
 ADMIN_DISPLAY_NAME="${YADGAR_ADMIN_DISPLAY_NAME:-Administrator}"
 RUNTIME="${YADGAR_RUNTIME:-}"
-# THE WAITS OUTLAST ARGO'S OWN WINDOW, so a timeout here never cuts off an
-# operation Argo is still retrying. Both examples retry 6 times with waits of
-# 30, 60, 120, 240, 300 and 300 s: 17.5 minutes of backoff beside the attempts.
-#   operators  25 min: a 25-minute install budget, which the measured 2m15s
+# HOW LONG THIS SCRIPT WAITS FOR EACH APPLICATION. Both examples retry 6 times
+# with waits of 30, 60, 120, 240, 300 and 300 s: 1050 s (17.5 minutes) of
+# backoff beside the attempts.
+#   operators  25 min (1500 s): an install budget, which the measured 2m15s
 #              first sync and KEDA's webhook restarts sit well inside.
-#   estate     65 min: the same 25-minute budget plus that 17.5-minute window,
-#              with room for a PostSync hook that uses its 300 s bound on each
-#              of the 7 attempts.
+#   estate     65 min (3900 s): the same 1500 s plus the 1050 s window, plus
+#              1350 s for the attempts themselves. That is NOT 7 attempts at
+#              the hooks' bounds: 7 x (120 s preflight + 300 s probe) is 2940 s,
+#              and 1500 + 1050 + 2940 = 5490 s.
+# THESE WAITS ARE SHORTER THAN ARGO'S OWN END OF AN OPERATION (ledger 1208).
+# `argocd-values.yaml` sets `controller.sync.timeout.seconds` to 4200. Argo
+# counts it from the operation's start, retries included, and once it has passed
+# every later retry is terminated on its next reconcile, so a hung operation
+# reads Failed by 4200 s plus at most the 1050 s window. Either wait here can run
+# out first. The script then reports "timed out" with the operation's state, and
+# Argo still ends the operation afterwards. A wait here can also cut off an
+# operation Argo is still retrying, if that operation outlives the wait.
 OPERATORS_TIMEOUT="${YADGAR_OPERATORS_TIMEOUT:-1500}"
 ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
 POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"
