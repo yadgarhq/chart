@@ -488,12 +488,19 @@ def test_a_failed_operation_exits_non_zero_naming_the_failed_resources(rig: Rig)
         assert "patch" not in c["argv"], c
 
 
-def test_a_timeout_prints_the_conditions_and_unhealthy_resources(rig: Rig) -> None:
+def test_a_timeout_prints_the_conditions_and_the_health_note(rig: Rig) -> None:
+    # Argo v3 does not persist per-resource health onto the Application CR by
+    # default (`controller.resource.health.persist` unset, measured 2026-10-02
+    # against kind-yadgar), so a resource `kubectl get application` returns
+    # NEVER carries a populated `.health` field — this fixture omits it, as
+    # the real object does. A prior version of this test faked `.health` onto
+    # the resource and asserted it got printed, which passed against a shape
+    # Argo never actually sends and hid that the "unhealthy:" line was dead
+    # code in production.
     doc = json.loads(app_json("operators", "Running", health="Degraded"))
     doc["status"]["conditions"] = [{"type": "SyncError", "message": "a condition worth reading"}]
     doc["status"]["resources"] = [
-        {"kind": "Deployment", "namespace": "yadgar-operators", "name": "keda-operator",
-         "health": {"status": "Degraded", "message": "crashloop"}}
+        {"kind": "Deployment", "namespace": "yadgar-operators", "name": "keda-operator"}
     ]
     rig.rules = [{"cmd": "kubectl", "match": ["get", "application", "operators"], "stdout": json.dumps(doc)}] + rig.rules
     proc = rig.run("load_examples; wait_app operators 0")
@@ -501,7 +508,15 @@ def test_a_timeout_prints_the_conditions_and_unhealthy_resources(rig: Rig) -> No
     out = proc.stdout + proc.stderr
     assert "timed out" in out
     assert "a condition worth reading" in out
-    assert "keda-operator" in out and "crashloop" in out
+    # No fabricated "unhealthy:" line — there is nothing to read it from.
+    assert "unhealthy:" not in out
+    assert "keda-operator" not in out
+    # Instead, a fixed note always points at the paste-safe recipe: a
+    # throwaway, namespaced copy of the kubeconfig, not a raw `--core` call
+    # (which needs `argocd-cm` in the current namespace to resolve at all).
+    assert "argocd (not installed by this script)" in out
+    assert 'config set-context "kind-yadgar" --namespace argocd' in out
+    assert 'argocd app get operators --core --kube-context "kind-yadgar"' in out
 
 
 # ─── 8. hosts file ──────────────────────────────────────────────────────────────
