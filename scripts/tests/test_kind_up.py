@@ -513,8 +513,15 @@ def test_a_timeout_prints_the_conditions_and_the_health_note(rig: Rig) -> None:
     assert "keda-operator" not in out
     # Instead, a fixed note always points at the paste-safe recipe: a
     # throwaway, namespaced copy of the kubeconfig, not a raw `--core` call
-    # (which needs `argocd-cm` in the current namespace to resolve at all).
+    # (which needs `argocd-cm` in the current namespace to resolve at all) and
+    # not a mutation of the operator's own kubeconfig. Subshell-scoped, like
+    # yadgarhq/argocd's MIGRATION_NOTES.md "Apply" recipe: `set -eu` so a
+    # failed minify stops the recipe instead of falling through to whatever
+    # kubeconfig `argocd`/`kubectl` default to, and the `-s` guard makes that
+    # failure explicit rather than silent.
     assert "argocd (not installed by this script)" in out
+    assert "set -eu" in out
+    assert '[ -s "$TMPKC" ] || exit 1' in out
     assert 'config set-context "kind-yadgar" --namespace argocd' in out
     assert 'argocd app get operators --core --kube-context "kind-yadgar"' in out
 

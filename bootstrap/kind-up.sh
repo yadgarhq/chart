@@ -501,11 +501,16 @@ print_app_failure() {
     (.status.conditions // [] | .[] | "  condition: \(.type): \(.message)")
   ' <<<"$doc" | tee -a "$LOG_FILE" >&2
   cat <<-NOTE | tee -a "$LOG_FILE" >&2
-	  per-resource health is not read here: kubectl never sees it (Argo does not persist it on the Application CR by default). argocd (not installed by this script) reads it live instead:
-	    TMPKC=\$(mktemp); trap 'rm -f "\$TMPKC"' EXIT
-	    kubectl --kubeconfig "$KUBECONFIG_FILE" config view --minify --flatten --context "kind-$CLUSTER_NAME" > "\$TMPKC"
-	    kubectl --kubeconfig "\$TMPKC" config set-context "kind-$CLUSTER_NAME" --namespace argocd
-	    KUBECONFIG="\$TMPKC" argocd app get $name --core --kube-context "kind-$CLUSTER_NAME" -o json | jq '.status.resources[].health'
+	  per-resource health is not read here: kubectl never sees it (Argo does not persist it on the Application CR by default). argocd (not installed by this script) reads it live instead, scoped to a throwaway kubeconfig copy so it never touches your own:
+	    (
+	      set -eu
+	      TMPKC=\$(mktemp)
+	      trap 'rm -f "\$TMPKC"' EXIT
+	      kubectl --kubeconfig "$KUBECONFIG_FILE" config view --minify --flatten --context "kind-$CLUSTER_NAME" > "\$TMPKC"
+	      [ -s "\$TMPKC" ] || exit 1
+	      kubectl --kubeconfig "\$TMPKC" config set-context "kind-$CLUSTER_NAME" --namespace argocd
+	      KUBECONFIG="\$TMPKC" argocd app get $name --core --kube-context "kind-$CLUSTER_NAME" -o json | jq '.status.resources[].health'
+	    )
 	NOTE
 }
 
