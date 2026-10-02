@@ -256,9 +256,9 @@ changing the shared release workflow.
   Deployment; `chart-baseline` and `chart-network-policy` are adopted there, not
   here, because ADR-0584 forbids adopting a gate in a repository it hard-fails and
   this chart has no pod spec to check.
-- **The reference installation.** `yadgarhq/deploy` is how our own cluster runs,
-  and it pins this chart with its own values file. Moving it to
-  this example's shape is phase E of `plans/the-one-application-install.md`.
+- **The reference installation.** `yadgarhq/argocd`'s `applications/yadgar.yaml`
+  is how our own cluster runs — this example's own shape, with this
+  organisation's values inlined as `valuesObject` (ADR-0803, phase E3).
 - **The development ApplicationSet.** D54's per-module discovery in
   `yadgarhq/argocd` stays as a development mechanism and is NOT shipped to an
   adopter. This chart is what an adopter gets.
