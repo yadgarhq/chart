@@ -5,7 +5,7 @@
 # MEASURED 2026-09-30 on a kind VM against 0.3.8: every workload up, and
 # `curl --cacert <edge CA> https://gateway.yadgar.internal:18443/` answered from
 # the host. Read `../application.yaml` for everything this file shares with it —
-# the `ignoreDifferences` block, the scheme-less `repoURL`, the one namespace.
+# the scheme-less `repoURL`, the one namespace.
 # Only the edge differs.
 #
 # ─── what `valuesObject` holds ───────────────────────────────────────────────
@@ -90,9 +90,3 @@ spec:
         duration: 15s
         factor: 2
         maxDuration: 5m
-  ignoreDifferences:
-    - group: k8s.mariadb.com
-      kind: MariaDB
-      jsonPointers:
-        - /spec/rootPasswordSecretKeyRef/generate
-        - /spec/passwordSecretKeyRef/generate

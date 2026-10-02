@@ -150,26 +150,3 @@ spec:
         duration: 15s
         factor: 2
         maxDuration: 5m
-
-  # KEEP THIS BLOCK WHILE ANY `*-db.database.create` IS TRUE — and the chart's
-  # defaults set all three. It is not decoration and it is not about drift you can
-  # ignore.
-  #
-  # mariadb-operator writes the GENERATED CREDENTIAL'S NAME back onto the spec it
-  # reconciles. Argo then sees its own manifest differ from the live object and
-  # reports OutOfSync forever; `selfHeal: true` above reverts the operator's
-  # writeback, the operator writes it again, and the two loop. It looks like
-  # drift and it is the operator doing its job.
-  #
-  # ONE ENTRY COVERS EVERY MariaDB THIS CHART RENDERS. Argo selects
-  # `ignoreDifferences` by group and kind with `name` optional, so this entry
-  # names none of the three databases and holds for all of them.
-  #
-  # NO VALUES FILE CAN EXPRESS THIS. It is Argo-level state, which is why it lives
-  # in the file you copy.
-  ignoreDifferences:
-    - group: k8s.mariadb.com
-      kind: MariaDB
-      jsonPointers:
-        - /spec/rootPasswordSecretKeyRef/generate
-        - /spec/passwordSecretKeyRef/generate
