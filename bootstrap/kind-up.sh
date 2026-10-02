@@ -473,8 +473,21 @@ app_verdict() {
 }
 
 # Everything worth reading when an Application did not come up: the operation's
-# message, the resources the sync failed, the resources not Healthy, and the
-# Application's conditions.
+# message, the resources the sync failed, and the Application's conditions.
+#
+# NOT per-resource health: Argo does not persist `.status.resources[].health`
+# onto the Application CR by default (`controller.resource.health.persist`
+# unset). This script's own bootstrap/argocd-values.yaml does not set that key
+# either, so a kind-up.sh install defaults the same way, but the live
+# corroboration is from kind-yadgar's ACTUAL argo-cd install, which is
+# yadgarhq/argocd's, not one this script produced: MEASURED 2026-10-02 that
+# its `argocd-cmd-params-cm` leaves the key unset too (same chart, same
+# `v3.1.8`), and that a live `kubectl get application ... -o json` there
+# carries no `.health` on any of its `.status.resources` entries. So a kubectl
+# read of it here is always empty — printing it would report a genuinely
+# unhealthy resource as having nothing to say. The note below points at the
+# command that reads it live instead; `argocd` itself is a separate tool this
+# script does not install (see `tools.lock`).
 print_app_failure() {
   local name="$1" doc="$2"
   [[ -n "$doc" ]] || {
@@ -488,11 +501,20 @@ print_app_failure() {
     (.status.operationState.syncResult.resources // [] | .[]
       | select((.status // "") != "Synced" or ((.hookPhase // "") | IN("Failed", "Error")))
       | "  failed: \(.kind) \(.namespace // "-")/\(.name) status=\(.status // "-") hook=\(.hookPhase // "-") \(.message // "")"),
-    (.status.resources // [] | .[]
-      | select(.health != null and .health.status != "Healthy")
-      | "  unhealthy: \(.kind) \(.namespace // "-")/\(.name) health=\(.health.status) \(.health.message // "")"),
     (.status.conditions // [] | .[] | "  condition: \(.type): \(.message)")
   ' <<<"$doc" | tee -a "$LOG_FILE" >&2
+  cat <<-NOTE | tee -a "$LOG_FILE" >&2
+	  per-resource health is not read here: kubectl never sees it (Argo does not persist it on the Application CR by default). argocd (not installed by this script) reads it live instead, scoped to a throwaway kubeconfig copy so it never touches your own:
+	    (
+	      set -eu
+	      TMPKC=\$(mktemp)
+	      trap 'rm -f "\$TMPKC"' EXIT
+	      "$BIN_DIR/kubectl" --kubeconfig "$KUBECONFIG_FILE" config view --minify --flatten --context "kind-$CLUSTER_NAME" > "\$TMPKC"
+	      [ -s "\$TMPKC" ] || exit 1
+	      "$BIN_DIR/kubectl" --kubeconfig "\$TMPKC" config set-context "kind-$CLUSTER_NAME" --namespace argocd
+	      KUBECONFIG="\$TMPKC" argocd app get $name --core --kube-context "kind-$CLUSTER_NAME" -o json | jq '.status.resources[].health'
+	    )
+	NOTE
 }
 
 wait_app() {

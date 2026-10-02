@@ -33,6 +33,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -488,12 +489,19 @@ def test_a_failed_operation_exits_non_zero_naming_the_failed_resources(rig: Rig)
         assert "patch" not in c["argv"], c
 
 
-def test_a_timeout_prints_the_conditions_and_unhealthy_resources(rig: Rig) -> None:
+def test_a_timeout_prints_the_conditions_and_the_health_note(rig: Rig) -> None:
+    # Argo v3 does not persist per-resource health onto the Application CR by
+    # default (`controller.resource.health.persist` unset, measured 2026-10-02
+    # against kind-yadgar), so a resource `kubectl get application` returns
+    # NEVER carries a populated `.health` field — this fixture omits it, as
+    # the real object does. A prior version of this test faked `.health` onto
+    # the resource and asserted it got printed, which passed against a shape
+    # Argo never actually sends and hid that the "unhealthy:" line was dead
+    # code in production.
     doc = json.loads(app_json("operators", "Running", health="Degraded"))
     doc["status"]["conditions"] = [{"type": "SyncError", "message": "a condition worth reading"}]
     doc["status"]["resources"] = [
-        {"kind": "Deployment", "namespace": "yadgar-operators", "name": "keda-operator",
-         "health": {"status": "Degraded", "message": "crashloop"}}
+        {"kind": "Deployment", "namespace": "yadgar-operators", "name": "keda-operator"}
     ]
     rig.rules = [{"cmd": "kubectl", "match": ["get", "application", "operators"], "stdout": json.dumps(doc)}] + rig.rules
     proc = rig.run("load_examples; wait_app operators 0")
@@ -501,7 +509,80 @@ def test_a_timeout_prints_the_conditions_and_unhealthy_resources(rig: Rig) -> No
     out = proc.stdout + proc.stderr
     assert "timed out" in out
     assert "a condition worth reading" in out
-    assert "keda-operator" in out and "crashloop" in out
+    # No fabricated "unhealthy:" line — there is nothing to read it from.
+    assert "unhealthy:" not in out
+    assert "keda-operator" not in out
+    # Instead, a fixed note always points at the paste-safe recipe: a
+    # throwaway, namespaced copy of the kubeconfig, not a raw `--core` call
+    # (which needs `argocd-cm` in the current namespace to resolve at all) and
+    # not a mutation of the operator's own kubeconfig. Subshell-scoped, like
+    # yadgarhq/argocd's MIGRATION_NOTES.md "Apply" recipe: `set -eu` so a
+    # failed minify stops the recipe instead of falling through to whatever
+    # kubeconfig `argocd`/`kubectl` default to, and the `-s` guard makes that
+    # failure explicit rather than silent.
+    assert "argocd (not installed by this script)" in out
+    assert "set -eu" in out
+    assert '[ -s "$TMPKC" ] || exit 1' in out
+
+    # kind-up.sh never puts kubectl on PATH (BIN_DIR defaults to
+    # /opt/yadgar-bootstrap/bin, not /usr/local/bin — see k()/h() and the
+    # remedy line above, both of which call "$BIN_DIR/kubectl"). A bare
+    # `kubectl` here would only look right in THIS suite, where the Rig's own
+    # PATH fake happens to carry one too. No occurrence of the token may be a
+    # standalone command inside the printed recipe: every one there must be
+    # part of a `/kubectl` path. (The prose sentence above the recipe says the
+    # word "kubectl" too, in English, with nothing to resolve — that one is
+    # fine and out of scope for this check.)
+    recipe = out[out.index("    (\n") : out.index("    )\n") + len("    )\n")]
+    assert re.search(r"(?<!/)\bkubectl\b", recipe) is None, recipe
+    bin_kubectl = f'"{rig.root / "bin" / "kubectl"}"'
+    kubeconfig_file = str(rig.state / "kubeconfig")
+    # The FULL minify line, not a fragment: dropping --kubeconfig here would
+    # read whatever kubeconfig is ambient instead of kind-up's own, which is
+    # the one failure mode this recipe exists to avoid.
+    assert (
+        f'{bin_kubectl} --kubeconfig "{kubeconfig_file}" config view --minify '
+        f'--flatten --context "kind-yadgar" > "$TMPKC"'
+    ) in out
+    assert f'{bin_kubectl} --kubeconfig "$TMPKC" config set-context "kind-yadgar" --namespace argocd' in out
+    assert 'argocd app get operators --core --kube-context "kind-yadgar"' in out
+
+
+def test_the_health_note_recipe_runs_with_no_kubectl_on_path(rig: Rig) -> None:
+    """Executes the printed recipe for real against a PATH that carries no
+    `kubectl` at all — only the absolute `$BIN_DIR/kubectl` baked into the
+    recipe's own text, plus a stubbed `argocd`. A bare `kubectl` anywhere in
+    the recipe fails here with "command not found" instead of completing;
+    the string checks above would not catch a regression that reintroduced
+    one under a spelling they do not look for.
+    """
+    doc = json.loads(app_json("operators", "Running", health="Degraded"))
+    no_kubectl_bin = rig.root / "no-kubectl-bin"
+    no_kubectl_bin.mkdir()
+    (no_kubectl_bin / "argocd").symlink_to(FAKE)
+    rig.rules = [
+        {"cmd": "argocd", "match": ["app", "get"], "stdout": json.dumps({"status": {"resources": []}})},
+        {"cmd": "kubectl", "match": ["config", "set-context"], "stdout": ""},
+        {"cmd": "kubectl", "match": ["config", "view", "--minify"], "stdout": "apiVersion: v1\nkind: Config\n"},
+        {"cmd": "kubectl", "match": ["get", "application", "operators"], "stdout": json.dumps(doc)},
+    ] + rig.rules
+    proc = rig.run("load_examples; wait_app operators 0")
+    out = proc.stdout + proc.stderr
+    recipe = out[out.index("    (\n") : out.index("    )\n") + len("    )\n")]
+
+    env = rig.env()
+    env["PATH"] = f"{no_kubectl_bin}:{rig.root / 'hostbin'}"  # no fakebin: no bare kubectl here
+    recipe_proc = subprocess.run(
+        ["bash", "-c", recipe],
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+    )
+    combined = recipe_proc.stdout + recipe_proc.stderr
+    assert "command not found" not in combined, combined
+    assert recipe_proc.returncode == 0, combined
 
 
 # ─── 8. hosts file ──────────────────────────────────────────────────────────────
