@@ -477,14 +477,17 @@ app_verdict() {
 #
 # NOT per-resource health: Argo does not persist `.status.resources[].health`
 # onto the Application CR by default (`controller.resource.health.persist`
-# unset). MEASURED 2026-10-02 both ways: neither this script's own
-# bootstrap/argocd-values.yaml nor the live `argocd-cmd-params-cm` on
-# kind-yadgar sets that key, and a live `kubectl get application ... -o json`
-# there carries no `.health` on any of its `.status.resources` entries. So a
-# kubectl read of it here is always empty — printing it would report a
-# genuinely unhealthy resource as having nothing to say. The note below
-# points at the command that reads it live instead; `argocd` itself is a
-# separate tool this script does not install (see `tools.lock`).
+# unset). This script's own bootstrap/argocd-values.yaml does not set that key
+# either, so a kind-up.sh install defaults the same way, but the live
+# corroboration is from kind-yadgar's ACTUAL argo-cd install, which is
+# yadgarhq/argocd's, not one this script produced: MEASURED 2026-10-02 that
+# its `argocd-cmd-params-cm` leaves the key unset too (same chart, same
+# `v3.1.8`), and that a live `kubectl get application ... -o json` there
+# carries no `.health` on any of its `.status.resources` entries. So a kubectl
+# read of it here is always empty — printing it would report a genuinely
+# unhealthy resource as having nothing to say. The note below points at the
+# command that reads it live instead; `argocd` itself is a separate tool this
+# script does not install (see `tools.lock`).
 print_app_failure() {
   local name="$1" doc="$2"
   [[ -n "$doc" ]] || {
@@ -506,9 +509,9 @@ print_app_failure() {
 	      set -eu
 	      TMPKC=\$(mktemp)
 	      trap 'rm -f "\$TMPKC"' EXIT
-	      kubectl --kubeconfig "$KUBECONFIG_FILE" config view --minify --flatten --context "kind-$CLUSTER_NAME" > "\$TMPKC"
+	      "$BIN_DIR/kubectl" --kubeconfig "$KUBECONFIG_FILE" config view --minify --flatten --context "kind-$CLUSTER_NAME" > "\$TMPKC"
 	      [ -s "\$TMPKC" ] || exit 1
-	      kubectl --kubeconfig "\$TMPKC" config set-context "kind-$CLUSTER_NAME" --namespace argocd
+	      "$BIN_DIR/kubectl" --kubeconfig "\$TMPKC" config set-context "kind-$CLUSTER_NAME" --namespace argocd
 	      KUBECONFIG="\$TMPKC" argocd app get $name --core --kube-context "kind-$CLUSTER_NAME" -o json | jq '.status.resources[].health'
 	    )
 	NOTE
