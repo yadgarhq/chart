@@ -42,7 +42,7 @@ spec:
     chart: platform
     # BARE SEMVER. The `platform` version inside the parent `application.yaml`
     # pins, read from that parent's `charts/platform/Chart.yaml`.
-    targetRevision: 0.1.24
+    targetRevision: 0.1.25
     helm:
       valuesObject:
         operators:
