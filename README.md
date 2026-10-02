@@ -258,7 +258,8 @@ changing the shared release workflow.
   this chart has no pod spec to check.
 - **The reference installation.** `yadgarhq/argocd`'s `applications/yadgar.yaml`
   is how our own cluster runs — this example's own shape, with this
-  organisation's values inlined as `valuesObject` (ADR-0803, phase E3).
+  organisation's values inlined as `valuesObject` and the S0 `syncPolicy`
+  (ADR-0803, phase E3).
 - **The development ApplicationSet.** D54's per-module discovery in
   `yadgarhq/argocd` stays as a development mechanism and is NOT shipped to an
   adopter. This chart is what an adopter gets.
