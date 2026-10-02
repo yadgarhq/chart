@@ -75,7 +75,7 @@ dependencies:
     version: 0.7.48
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.1.19
+    version: 0.1.20
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
     version: 0.3.10
