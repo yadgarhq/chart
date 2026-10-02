@@ -4731,9 +4731,15 @@ ARGO_CD_SOURCE = "argo-cd"
 PROMETHEUS_SERVICE = ("prometheus-server", "observability")
 ARGO_CD_PART_OF = "argocd"
 
-# THE ENTRY `application.yaml` EXPLAINS, and every parent example must carry it
-# unchanged: the chart's defaults create three MariaDB CRs, and without both
-# pointers Argo and mariadb-operator revert each other forever.
+# THE ENTRY NO PARENT EXAMPLE MAY CARRY (ledger 1266, ADR-0803 proposal (c)). It
+# was added on the claim that mariadb-operator writes `generate` back onto the
+# spec, so Argo and the operator revert each other. Measured read-only on kind
+# 2026-10-02, operator v26.6.0, 27 days of live CRs: live equals desired at both
+# pointers on all three CRs, `argocd-controller` is the only manager of both refs,
+# and the operator's `SetDefaults` writes them only when they are zero-valued
+# (`api/v1alpha1/mariadb_types.go:959,970`) — every `-db` chart renders both with
+# an explicit name and `generate: true`. An entry that masks nothing hides a real
+# divergence the day one appears, so its return is refused, not tolerated.
 MARIADB_IGNORE_DIFFERENCES = {
     "group": "k8s.mariadb.com",
     "kind": "MariaDB",
@@ -4900,10 +4906,11 @@ def parent_pin_failures(documents: dict[str, dict]) -> list[str]:
 
 
 def ignore_differences_failures(name: str, document: dict) -> list[str]:
-    """One parent example must carry the MariaDB entry unchanged. PURE."""
-    if MARIADB_IGNORE_DIFFERENCES in ((document.get("spec") or {}).get("ignoreDifferences") or []):
-        return []
-    return [f"`{name}` does not carry the MariaDB ignoreDifferences entry with both /generate pointers"]
+    """One parent example must carry no MariaDB ignoreDifferences entry. PURE."""
+    entries = (document.get("spec") or {}).get("ignoreDifferences") or []
+    if any(entry.get("group") == "k8s.mariadb.com" and entry.get("kind") == "MariaDB" for entry in entries):
+        return [f"`{name}` carries a MariaDB ignoreDifferences entry, which masks nothing measured (ledger 1266)"]
+    return []
 
 
 def parent_example_failures(documents: dict[str, dict], tarball: Path, destination: Path) -> list[str]:
@@ -4955,7 +4962,7 @@ def misspell_node_port(document: dict) -> None:
     [
         (lambda d: d["spec"]["source"].update(targetRevision=A_PRE_0808_PIN), "pin different versions"),
         (misspell_node_port, "`platform.gatewayListener.envoyProxy.httpsNodePrt`"),
-        (lambda d: d["spec"]["ignoreDifferences"][0]["jsonPointers"].pop(), "ignoreDifferences"),
+        (lambda d: d["spec"].update(ignoreDifferences=[copied(MARIADB_IGNORE_DIFFERENCES)]), "ignoreDifferences"),
         (lambda d: d["spec"]["source"]["helm"]["valuesObject"].update(platform={"enabled": False}), "different object set"),
     ],
     ids=["pin", "key", "ignore-differences", "render"],
