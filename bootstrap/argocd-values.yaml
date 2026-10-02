@@ -16,17 +16,26 @@ configs:
     # The clock covers the WHOLE operation, retries and backoff included
     # (`controller/appcontroller.go:1420-1424` and `:1429`, v3.1.8), so the value
     # must outlast the longest chain the examples' retry gate allows: 1200 s of
-    # backoff plus 7 attempts. Each attempt may spend the ceilings `platform`
-    # 0.1.21 documents for its preflight (eight 120 s loops plus 300 s) and its
-    # envoy-gateway probe (three 300 s loops plus 600 s), the two parallel
-    # bootstrap Jobs' pod backoff, and the unbounded wait for Sync-phase health
-    # (3x the 90 s measured): 3225 s per attempt, 23775 s in all. 24000 s
-    # (6.7 h) clears it. Max ruled 2026-10-01: honest numbers now, tightened
-    # through per-hook deadlines later (ledger 1224). Argo reads the value as
-    # an int32 and treats a larger one as 0.
+    # backoff plus 7 attempts. `yadgarhq/platform#24` (ledger 1224, open, not yet
+    # pinned by this chart's `platform` 0.1.21) bounds every hook Job with
+    # `activeDeadlineSeconds` plus grace: the preflight 1260 s + 60 s grace, the
+    # envoy-gateway probe 1200 s + 45 s grace, the bootstrap Jobs (this chart's
+    # default `iamKeys.create: true`) 500 s + 30 s grace, and the unbounded
+    # wait for Sync-phase health (3x the 90 s measured) 270 s: 3365 s per
+    # attempt, 24755 s in all. 25200 s (7 h) clears it. Counting each grace
+    # period assumes a Job reads Failed only after its pods terminate
+    # (Kubernetes >= 1.31; kind-yadgar runs 1.36) — inferred, not measured.
+    # Until a platform release pinning #24 ships, the smaller measured 3225 s
+    # per attempt (23775 s in all) still applies; 25200 s covers both, so the
+    # auto-pinned bump (`parent_bump.py`, no PR CI) needs no second raise
+    # here. Max ruled 2026-10-01: honest numbers now, tightened through
+    # per-hook deadlines later (ledger 1224). This value is sized ahead of
+    # that landing, so bounding every hook Job raised the per-attempt number
+    # this round rather than tightening it. Argo reads the value as an int32
+    # and treats a larger one as 0.
     # `scripts/tests/test_argocd_values.py` derives the floor and checks both
     # bounds. `kind-up.sh`'s waits are far shorter: see ESTATE_TIMEOUT.
-    controller.sync.timeout.seconds: "24000"
+    controller.sync.timeout.seconds: "25200"
   cm:
     # POLL THE REGISTRY EVERY MINUTE rather than every three, so a first sync
     # starts promptly after `kubectl apply`.
