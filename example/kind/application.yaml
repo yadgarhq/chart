@@ -54,10 +54,50 @@ spec:
       valuesObject:
         global:
           hostname: gateway.yadgar.internal
+        # THE TWELVE `tls.enabled` SWITCHES (ruling 11, ADR-0845), explicit for
+        # the same reason `../values.yaml` states them: the parent's own
+        # defaults do not and will not, once a per-repository contract
+        # requires each one with no default (K-8).
+        gateway:
+          task:
+            tls:
+              enabled: true
+          iam:
+            tls:
+              enabled: true
+          project:
+            tls:
+              enabled: true
         iam:
           enrolment:
             # THE HOST PORT IN `kind-config.yaml`.
             gateway: "https://gateway.yadgar.internal:18443"
+          tls:
+            enabled: true
+          iamDb:
+            tls:
+              enabled: true
+        iam-db:
+          tls:
+            enabled: true
+        task:
+          tls:
+            enabled: true
+          taskDb:
+            tls:
+              enabled: true
+        task-db:
+          tls:
+            enabled: true
+        project:
+          tls:
+            enabled: true
+          projectDb:
+            tls:
+              enabled: true
+        project-db:
+          tls:
+            enabled: true
         platform:
           gatewayListener:
             envoyProxy:

@@ -216,6 +216,27 @@ platform:
 # set `platform.preflight.probes.keda` AND `platform.preflight.probes.prometheus`
 # false with the last one.
 
+# THE TWELVE `tls.enabled` SWITCHES BELOW ARE THE ONE OTHER THING THE CHART
+# CANNOT DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above.
+# STATED TRUE HERE, AHEAD OF THE SERVICES THAT STILL CLEARTEXT THE HOP THEY
+# GUARD. ADR-0852 is the estate's direction — mutual TLS on every internal
+# hop — and a per-repository contract (`C-SVb` for the three logic services,
+# `C-DB1` for the three `-db` charts) is what will make each switch required
+# with NO DEFAULT; the parent's own `values.yaml` deliberately states none of
+# them either, so it is never a tenth writer for a value that has to come
+# from you. MEASURED TODAY: at least one side of every pair below still says
+# "does not serve TLS yet" in its own chart's `values.yaml` — read that
+# chart before you sync this file against a real cluster with these switches
+# true; turning one end of a hop on without its partner serving it breaks the
+# hop rather than securing it. The six pairs move together:
+#
+#   gateway.task.tls.enabled      + task.tls.enabled       (gateway → task)
+#   gateway.iam.tls.enabled       + iam.tls.enabled         (gateway → iam)
+#   gateway.project.tls.enabled   + project.tls.enabled     (gateway → project)
+#   iam.iamDb.tls.enabled         + iam-db.tls.enabled      (iam → iam-db)
+#   task.taskDb.tls.enabled       + task-db.tls.enabled     (task → task-db)
+#   project.projectDb.tls.enabled + project-db.tls.enabled  (project → project-db)
+
 gateway:
   adminBootstrap:
     # THE SECRET THE GATEWAY MOUNTS, and the same name the bootstrap Job mints
@@ -228,16 +249,43 @@ gateway:
     tokenSecret: admin-bootstrap-token
   autoscaling:
     enabled: true
+  # THE THREE DIALS THIS GATEWAY MAKES, stated true for the reason given above.
+  task:
+    tls:
+      enabled: true
+  iam:
+    tls:
+      enabled: true
+  project:
+    tls:
+      enabled: true
 
 iam:
   autoscaling:
     enabled: true
+  # WHAT IAM SERVES, and the dial it makes to iam-db. See the block above this
+  # chart's section.
+  tls:
+    enabled: true
+  iamDb:
+    tls:
+      enabled: true
 project:
   autoscaling:
     enabled: true
+  tls:
+    enabled: true
+  projectDb:
+    tls:
+      enabled: true
 task:
   autoscaling:
     enabled: true
+  tls:
+    enabled: true
+  taskDb:
+    tls:
+      enabled: true
 
 # THE THREE DATABASE MODULES. `database.create` renders a MariaDB CR for
 # mariadb-operator to reconcile; set it false in any module whose database you run
@@ -247,13 +295,20 @@ iam-db:
     enabled: true
   database:
     create: true
+  # WHAT THIS SERVICE SERVES, iam's own `iamDb.tls.enabled` dial above.
+  tls:
+    enabled: true
 project-db:
   autoscaling:
     enabled: true
   database:
     create: true
+  tls:
+    enabled: true
 task-db:
   autoscaling:
     enabled: true
   database:
     create: true
+  tls:
+    enabled: true
