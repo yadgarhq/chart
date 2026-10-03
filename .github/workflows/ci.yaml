@@ -194,7 +194,11 @@ jobs:
           # `helm lint --strict` REFUSES a chart whose `dependencies:` key is
           # unresolved exactly as `helm package` does. So this runs FIRST, not after.
           helm dependency update chart
-          helm lint --strict chart
+          # `-f chart/ci/values.yaml` states the twelve `tls.enabled` read
+          # switches explicitly (ruling 11, ADR-0845, K-8): the parent's own
+          # defaults do not and will not state them, and a bare lint would
+          # redden the moment a module chart starts refusing an absent one.
+          helm lint --strict chart -f chart/ci/values.yaml
           # The suite re-resolves from a copy of `chart/` for its packaged fixture,
           # which is the artifact an adopter actually installs.
           python3 -m pytest scripts/tests/ -q

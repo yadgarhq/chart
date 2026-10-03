@@ -1,0 +1,57 @@
+# THE TWELVE `tls.enabled` READ SWITCHES, ALL TRUE, AS ON `kind` (ruling 11,
+# ADR-0845). The parent's own `values.yaml` states none of them on purpose: a
+# default here would be a tenth writer for a value every one of ADR-0845's
+# per-repository contracts (C-SVb, C-DB1) requires with NO default once it
+# lands, so the parent cannot default it either without becoming the one
+# values source that is wrong for an adopter who turned the hop off.
+#
+# `helm lint --strict chart` renders the chart ALONE, with no subchart logic
+# to fall back on, so a module that later REFUSES an absent `tls.enabled`
+# would redden the bare lint the moment its pin moves here — with nothing in
+# this repository's own diff to explain why. This file is what
+# `.github/workflows/ci.yaml`'s `push_validation` job and
+# `test_helm_lint_strict_passes` both pass with `-f`, so the lint always runs
+# against an estate that names every switch, matching what an adopter who
+# reads `example/values.yaml` would actually ship.
+#
+# THE SAME TWELVE AS K-1's read list: three gateway dials, iam's own switch
+# and its iam-db dial, iam-db's own switch, task's own switch and its
+# task-db dial, task-db's own switch, project's own switch and its
+# project-db dial, and project-db's own switch.
+gateway:
+  task:
+    tls:
+      enabled: true
+  iam:
+    tls:
+      enabled: true
+  project:
+    tls:
+      enabled: true
+iam:
+  tls:
+    enabled: true
+  iamDb:
+    tls:
+      enabled: true
+iam-db:
+  tls:
+    enabled: true
+task:
+  tls:
+    enabled: true
+  taskDb:
+    tls:
+      enabled: true
+task-db:
+  tls:
+    enabled: true
+project:
+  tls:
+    enabled: true
+  projectDb:
+    tls:
+      enabled: true
+project-db:
+  tls:
+    enabled: true

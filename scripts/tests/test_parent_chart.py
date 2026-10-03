@@ -170,6 +170,19 @@ BUILTIN_GROUPS = {
 # the example adds only the edge issuer an adopter must name.
 ADOPTER_VALUES = REPO / "example" / "values.yaml"
 
+# `chart/ci/values.yaml` (ruling 11, ADR-0845, K-8's "fixture" step): the twelve
+# `tls.enabled` read switches, explicit, because the parent's OWN defaults do not
+# and will not state them — a per-repository contract (C-SVb, C-DB1) requires
+# each one with no default once it lands, and a parent default would be a tenth
+# writer for a value that has to come from the adopter. `example/values.yaml`
+# states the same twelve explicitly for the same reason (`ADOPTER_ONLY_KEYS`
+# below), so most renders over `ADOPTER_VALUES` already carry them; this constant
+# is for the renders in this suite that do not — a plain default render, or one
+# built over `MODULES_ONLY_VALUES` before it also named them — so that THIS
+# suite does not go red the moment a module's own chart starts refusing the key
+# it already declares with a default today.
+EXPLICIT_TLS = CHART / "ci" / "values.yaml"
+
 # EVERY API GROUP THAT RENDER MUST BE HANDED, and a LITERAL rather than a list
 # read off the charts. A render check calls `fail`, which aborts the WHOLE render
 # at the FIRST failing check and names only that one — so a render missing a group
@@ -744,7 +757,7 @@ def test_an_object_inside_the_create_guard_reddens_the_emits_nothing_gate(
 
 
 def test_helm_lint_strict_passes() -> None:
-    result = helm("lint", "--strict", str(CHART))
+    result = helm("lint", "--strict", str(CHART), "-f", str(EXPLICIT_TLS))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -753,8 +766,8 @@ def test_helm_lint_strict_passes() -> None:
 
 def test_the_packaged_chart_renders_the_whole_estate(packaged: Path, modules_only: Path) -> None:
     """The package an adopter downloads, at its defaults and with the platform layer off."""
-    assert dict(kinds(render(str(packaged), *API_VERSIONS))) == ADOPTER_EXPECTED
-    assert dict(kinds(render(str(packaged), "-f", str(modules_only)))) == EXPECTED
+    assert dict(kinds(render(str(packaged), *API_VERSIONS, "-f", str(EXPLICIT_TLS)))) == ADOPTER_EXPECTED
+    assert dict(kinds(render(str(packaged), "-f", str(modules_only), "-f", str(EXPLICIT_TLS)))) == EXPECTED
 
 
 def test_platform_enabled_false_removes_the_whole_platform_layer(modules_only: Path) -> None:
@@ -770,7 +783,7 @@ def test_platform_enabled_false_removes_the_whole_platform_layer(modules_only: P
     writes to get the old default back, and it needs no `--api-versions`: nothing
     in it asks for an operator.
     """
-    assert dict(kinds(render(str(CHART), "-f", str(modules_only)))) == EXPECTED, (
+    assert dict(kinds(render(str(CHART), "-f", str(modules_only), "-f", str(EXPLICIT_TLS)))) == EXPECTED, (
         "the modules-only render moved. `platform` sits behind `condition: "
         "platform.enabled`, which that render sets false, so it must contribute no "
         "object and no hook Job. ADR-0777: a step that adds an object to `platform` "
@@ -780,11 +793,11 @@ def test_platform_enabled_false_removes_the_whole_platform_layer(modules_only: P
 
 def test_the_directory_and_the_package_render_the_same_objects(packaged: Path, modules_only: Path) -> None:
     """An adopter installs the package. A property true only of the tree is not a property."""
-    assert identities(render(str(CHART), *API_VERSIONS)) == identities(
-        render(str(packaged), *API_VERSIONS)
+    assert identities(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))) == identities(
+        render(str(packaged), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     )
-    assert identities(render(str(CHART), "-f", str(modules_only))) == identities(
-        render(str(packaged), "-f", str(modules_only))
+    assert identities(render(str(CHART), "-f", str(modules_only), "-f", str(EXPLICIT_TLS))) == identities(
+        render(str(packaged), "-f", str(modules_only), "-f", str(EXPLICIT_TLS))
     )
 
 
@@ -948,7 +961,7 @@ def test_an_adopter_value_lands_in_the_rendered_child_object(packaged: Path, tmp
     values.write_text("config:\n  shared:\n    tlsRotation:\n      pollSeconds: 45\n")
 
     for target in (str(CHART), str(packaged)):
-        documents = render(target, *API_VERSIONS, "-f", str(values))
+        documents = render(target, *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
         shared = [
             document
             for document in documents
@@ -1003,7 +1016,7 @@ def test_a_value_for_one_child_does_not_reach_another(packaged: Path, tmp_path: 
         "  toolsPoll:\n"
         "    intervalSeconds: 111\n"
     )
-    documents = render(str(packaged), *API_VERSIONS, "-f", str(values))
+    documents = render(str(packaged), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
 
     def body(name: str, key: str) -> str:
         found = [
@@ -1123,14 +1136,14 @@ def test_every_crd_bearing_resource_can_be_switched_off(tmp_path: Path) -> None:
 
     values = tmp_path / "all-off.yaml"
     values.write_text(yaml.safe_dump(off))
-    survivors = crd_bearing(render(str(CHART), "-f", str(values)))
+    survivors = crd_bearing(render(str(CHART), "-f", str(EXPLICIT_TLS), "-f", str(values)))
     assert survivors == [], f"these resources survived the all-off render: {survivors}"
 
     # ── PASS 2 ───────────────────────────────────────────────────────────────
     off["platform"]["enabled"] = True
     held = tmp_path / "creates-off.yaml"
     held.write_text(yaml.safe_dump(off))
-    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(held)))
+    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(held)))
     assert survivors == [], (
         f"these resources survived the render with `platform.enabled` held true and "
         f"every `create` false: {survivors}. A CRD-bearing object behind no toggle an "
@@ -1151,7 +1164,7 @@ def test_a_create_toggle_that_cannot_be_switched_off_reddens_the_second_pass(tmp
 
     values = tmp_path / "one-create-stuck-on.yaml"
     values.write_text(yaml.safe_dump(off))
-    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(values)))
+    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values)))
     assert survivors != [], (
         "a `create` toggle was left true and the second pass found no CRD-bearing "
         "survivor, so it is passing over a render it never examined"
@@ -1172,7 +1185,7 @@ def test_a_toggle_left_on_reddens_the_first_pass(tmp_path: Path) -> None:
     off["task-db"]["database"]["create"] = True
     values = tmp_path / "one-default-left-on.yaml"
     values.write_text(yaml.safe_dump(off))
-    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(values)))
+    survivors = crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values)))
     assert [kind for _, kind, _ in survivors] == ["MariaDB"], survivors
 
 
@@ -1205,7 +1218,7 @@ def test_no_knob_is_stated_in_two_configmaps(packaged: Path) -> None:
     would have been RED. That duplicate was the transitional state ADR-0740's
     migration created on purpose; nothing measured it going away.
     """
-    documents = render(str(packaged), *API_VERSIONS)
+    documents = render(str(packaged), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     names = sorted(
         str((document.get("metadata") or {}).get("name"))
         for document in documents
@@ -2368,6 +2381,11 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
     admin token named, so a red case written over them reaches the refusal it
     names only by accident. `MODULES_ONLY_VALUES` is the pre-B6 defaults, and every
     refusal below sets the `platform.*.create` it needs EXPLICITLY on top.
+
+    `EXPLICIT_TLS` RIDES IN BETWEEN THE TWO (ruling 11, K-8): `MODULES_ONLY_VALUES`
+    states no `tls.enabled`, so a module chart that starts refusing an absent one
+    would redden every refusal test below for a reason none of them names. A red
+    case that itself sets a `tls` key still wins — it is the last `-f`.
     """
     values = overlay(tmp_path / f"{name}.yaml", body)
     result = helm(
@@ -2377,6 +2395,8 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
         *API_VERSIONS,
         "-f",
         str(modules_only_file(tmp_path)),
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(values),
     )
@@ -2657,7 +2677,7 @@ def test_platform_enabled_false_alone_turns_the_whole_platform_layer_off(tmp_pat
     the modules keep their autoscaling and databases, which are the modules' own
     toggles and not the platform layer's.
     """
-    defaults = helm("template", "yadgar", str(CHART), *API_VERSIONS)
+    defaults = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     assert defaults.returncode == 0, defaults.stderr
     everything, platform_count = platform_free_identities(defaults.stdout)
     platform_objects = {
@@ -2670,7 +2690,7 @@ def test_platform_enabled_false_alone_turns_the_whole_platform_layer_off(tmp_pat
     }
 
     values = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
     found, from_platform = platform_free_identities(result.stdout)
     print(
@@ -2700,7 +2720,7 @@ def test_platform_enabled_false_wins_over_every_create_left_true(tmp_path: Path)
     ))
     opt_out = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
     both = [
-        helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(path))
+        helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(path))
         for path in (contradictory, opt_out)
     ]
     for result in both:
@@ -2720,7 +2740,7 @@ def test_platform_enabled_false_still_refuses_the_operators_toggle(tmp_path: Pat
         tmp_path / "opt-out-with-operators.yaml",
         OPT_OUT_VALUES.replace("  enabled: false\n", "  enabled: false\n  operators:\n    create: true\n", 1),
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode != 0, "the opt-out with operators.create true rendered"
     assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
 
@@ -2731,7 +2751,7 @@ def test_platform_enabled_false_needs_no_iam_keys_agreement(tmp_path: Path) -> N
         tmp_path / "opt-out-own-keys.yaml",
         OPT_OUT_VALUES + "iam:\n  keysSecret: my-own-iam-keys\n",
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
 
 
@@ -2744,7 +2764,7 @@ def test_platform_enabled_false_alone_renders_and_still_mounts_the_admin_token(t
     `gateway.adminBootstrap.tokenSecret` is the second key of the opt-out.
     """
     values = overlay(tmp_path / "enabled-false-alone.yaml", "platform:\n  enabled: false\n")
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
     found, from_platform = platform_free_identities(result.stdout)
     print(f"\nADR-0807: `platform.enabled: false` alone renders {len(found)} objects")
@@ -2889,6 +2909,8 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
             "yadgar",
             str(copy),
             *API_VERSIONS,
+            "-f",
+            str(EXPLICIT_TLS),
             "-f",
             str(
                 overlay(
@@ -3405,6 +3427,8 @@ def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
             "-f",
             str(modules_only_file(tmp_path)),
             "-f",
+            str(EXPLICIT_TLS),
+            "-f",
             str(overlay(tmp_path / f"{name}.yaml", body)),
         )
 
@@ -3482,6 +3506,8 @@ def test_the_null_operators_arm_is_reachable_only_without_the_pinned_subchart(
         "yadgar",
         str(copy),
         *API_VERSIONS,
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(
             overlay(
@@ -3597,6 +3623,8 @@ def test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render(
         "yadgar",
         str(copy),
         *API_VERSIONS,
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(
             overlay(
@@ -3737,6 +3765,8 @@ def rendered(copy: Path, tmp_path: Path, name: str, body: str) -> subprocess.Com
         str(copy),
         "-f",
         str(modules_only_file(tmp_path)),
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(overlay(tmp_path / name, body)),
     )
@@ -3882,8 +3912,8 @@ def test_the_refusals_are_satisfied_at_the_defaults_and_unreachable_without_the_
     `_validate.tpl` exists for, and the one that would raise if somebody replaced
     it with a direct `.Values.platform.bootstrap.create`.
     """
-    assert len(render(str(CHART), *API_VERSIONS)) == ADOPTER_OBJECTS
-    assert dict(kinds(render(str(CHART), "-f", str(modules_only)))) == EXPECTED
+    assert len(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))) == ADOPTER_OBJECTS
+    assert dict(kinds(render(str(CHART), "-f", str(modules_only), "-f", str(EXPLICIT_TLS)))) == EXPECTED
     assert render(str(chart_without_its_dependencies(tmp_path)), "-f", str(modules_only)) == []
 
 
@@ -3971,7 +4001,9 @@ def test_breaking_the_guard_makes_the_modules_only_render_refuse(tmp_path: Path)
     assert needle in text, "the guard moved; this red case is now testing nothing"
     partial.write_text(text.replace(needle, "{{- if true -}}", 1))
 
-    result = helm("template", "yadgar", str(copy), "-f", str(modules_only_file(tmp_path)))
+    result = helm(
+        "template", "yadgar", str(copy), "-f", str(modules_only_file(tmp_path)), "-f", str(EXPLICIT_TLS)
+    )
     assert result.returncode != 0, (
         "the guard was removed and the modules-only render still succeeded, so the "
         "guard is not what is keeping the refusals off that render"
@@ -3996,9 +4028,29 @@ API_VERSIONS_DECLARATION = CHART / "ci" / "api-versions.txt"
 # and no client outside the cluster trusts it. The example names a placeholder
 # `ClusterIssuer` so an adopter sees the key. Every other leaf of the example must
 # equal the default; a new exception needs its own line here and its own reason.
+#
+# THE TWELVE `tls.enabled` READ SWITCHES JOIN THE SAME EXCEPTION (ruling 11,
+# ADR-0845). Each module chart already defaults its own `tls.enabled` to
+# `false`, so today this is a restatement the chart's own default would also
+# produce — but the default is going away with no replacement once C-SVb and
+# C-DB1 land (K-8), and the parent's `values.yaml` must never be the value's
+# tenth writer. The example states all twelve explicitly now so an adopter
+# who copies it is never silently holding the old default.
 ADOPTER_ONLY_KEYS = {
     "platform.edgeTLS.issuerRef.name",
     "platform.edgeTLS.issuerRef.kind",
+    "gateway.task.tls.enabled",
+    "gateway.iam.tls.enabled",
+    "gateway.project.tls.enabled",
+    "iam.tls.enabled",
+    "iam.iamDb.tls.enabled",
+    "iam-db.tls.enabled",
+    "task.tls.enabled",
+    "task.taskDb.tls.enabled",
+    "task-db.tls.enabled",
+    "project.tls.enabled",
+    "project.projectDb.tls.enabled",
+    "project-db.tls.enabled",
 }
 
 # THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
@@ -4148,7 +4200,7 @@ def test_k1_the_defaults_render_what_the_adopter_values_render(tmp_path: Path) -
     this one, a default the example leaves out is present in both renders and the
     equality cannot see it.
     """
-    defaults = render(str(CHART), *API_VERSIONS)
+    defaults = render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     stated = render(str(chart_with_no_defaults(tmp_path)), *API_VERSIONS, "-f", str(ADOPTER_VALUES))
     print(
         f"\nK1: the default render holds {len(defaults)} objects; "
@@ -4178,7 +4230,7 @@ def test_k1_a_default_the_example_omits_reddens_the_equality_and_names_the_key(
     assert len(failures) == 1 and "`platform.valkey.create`" in failures[0], failures
 
     stated = render(str(chart_with_no_defaults(tmp_path)), *API_VERSIONS, "-f", str(shrunk))
-    missing = identities(render(str(CHART), *API_VERSIONS)) - identities(stated)
+    missing = identities(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))) - identities(stated)
     assert {name for _, _, name in missing} == {"valkey", "valkey-ingress"}, sorted(missing)
 
 
@@ -4193,7 +4245,7 @@ def test_k1_a_reverted_default_reddens_the_equality_and_names_the_key(tmp_path: 
     failures = default_disagreements(values, yaml.safe_load(ADOPTER_VALUES.read_text()))
     assert len(failures) == 1 and "`platform.valkey.create`" in failures[0], failures
 
-    reverted = render(str(copy), *API_VERSIONS)
+    reverted = render(str(copy), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     stated = render(str(copy), *API_VERSIONS, "-f", str(ADOPTER_VALUES))
     assert identities(reverted) != identities(stated)
     assert len(reverted) < len(stated) == ADOPTER_OBJECTS, (len(reverted), len(stated))
@@ -4206,8 +4258,12 @@ def test_k2_the_defaults_refuse_a_render_without_the_declared_api_versions() -> 
     use meets a render check that names it, not `no matches for kind` half-way
     through a sync. Matched on the render check's own text rather than on an exit
     code, so a refusal for any other reason does not pass here.
+
+    `EXPLICIT_TLS` RIDES ALONG so the ONLY missing thing is an API version: once a
+    module starts refusing an absent `tls.enabled` too, a bare render with neither
+    would refuse for TLS first and this test would stop proving what it claims.
     """
-    result = helm("template", "yadgar", str(CHART))
+    result = helm("template", "yadgar", str(CHART), "-f", str(EXPLICIT_TLS))
     assert result.returncode != 0, "the default render succeeded with no --api-versions"
     assert THE_RENDER_CHECK_REFUSAL in result.stderr, result.stderr
     assert any(group in result.stderr for group in DECLARED_API_VERSIONS), result.stderr
@@ -4226,7 +4282,7 @@ def test_k2_every_declared_group_is_required_by_the_defaults() -> None:
             if group != dropped
             for part in ("--api-versions", group)
         ]
-        result = helm("template", "yadgar", str(CHART), *flags)
+        result = helm("template", "yadgar", str(CHART), *flags, "-f", str(EXPLICIT_TLS))
         assert result.returncode != 0, f"the defaults rendered without {dropped}"
         assert THE_RENDER_CHECK_REFUSAL in result.stderr and dropped in result.stderr, (
             dropped,
@@ -4236,7 +4292,7 @@ def test_k2_every_declared_group_is_required_by_the_defaults() -> None:
 
 def test_the_default_edge_leaf_is_issued_by_the_internal_ca() -> None:
     """The defaults leave `platform.edgeTLS.issuerRef` empty, and the edge leaf still names a real Issuer."""
-    documents = render(str(CHART), *API_VERSIONS)
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     edge = [
         document
         for document in certificates(documents)
@@ -4251,7 +4307,7 @@ def test_the_defaults_render_only_the_declared_operators_crds() -> None:
     """Every CRD-bearing object of the default render is a declared operator's or Gateway API's."""
     found = {
         (api_version.split("/")[0], kind)
-        for api_version, kind, _ in crd_bearing(render(str(CHART), *API_VERSIONS))
+        for api_version, kind, _ in crd_bearing(render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS)))
     }
     assert found == DEFAULT_CRD_BEARING, (
         f"new: {sorted(found - DEFAULT_CRD_BEARING)}; gone: {sorted(DEFAULT_CRD_BEARING - found)}"
@@ -4511,7 +4567,7 @@ def test_a_version_being_cut_renders_from_head(tmp_path: Path) -> None:
     """On the stamp commit the pin is HEAD's chart packaged as that version, and it renders."""
     tarball = parent_at(AN_UNPUBLISHED_VERSION, tmp_path, "push", A_LISTING)
     assert tarball.name == f"yadgar-{AN_UNPUBLISHED_VERSION}.tgz"
-    assert set(WHOLE_ESTATE_KINDS) <= set(kinds(render(str(tarball), *API_VERSIONS)))
+    assert set(WHOLE_ESTATE_KINDS) <= set(kinds(render(str(tarball), *API_VERSIONS, "-f", str(EXPLICIT_TLS))))
 
 
 def test_the_example_pins_a_published_parent_at_or_above_the_floor() -> None:
