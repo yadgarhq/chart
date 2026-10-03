@@ -4972,13 +4972,15 @@ def test_a_new_parent_example_meets_every_parent_gate(pinned: Path, tmp_path: Pa
     documents = parent_examples_of(with_new_parent_example(change))
     assert A_NEW_PARENT_EXAMPLE in documents
     failures = parent_example_failures(documents, pinned, tmp_path)
-    # A platform render that validates its own schema adds a second failure once
-    # `gatewayListener.envoyProxy` is closed (D-S(platform)): helm's own refusal,
-    # which never carries the backticked dotted path. So the gate asserts the
-    # recognition sentence is first and every other failure stays accounted for,
-    # not that there is exactly one.
+    # Once platform's schema closes `gatewayListener.envoyProxy` (D-S(platform)), the
+    # `key` row also fails helm's own render: a second failure whose stderr never
+    # carries the backticked dotted path. That refusal is the only extra failure any
+    # row may carry; every other row still fails exactly once.
     assert failures and named in failures[0], failures
-    assert all("pin different versions" in f or A_NEW_PARENT_EXAMPLE in f for f in failures), failures
+    assert "pin different versions" in failures[0] or A_NEW_PARENT_EXAMPLE in failures[0], failures
+    assert all(
+        f.startswith(f"`{A_NEW_PARENT_EXAMPLE}` does not render:") and "httpsNodePrt" in f for f in failures[1:]
+    ), failures
 
 
 # ─── no prose states a version the release tooling will not move ──────────────
