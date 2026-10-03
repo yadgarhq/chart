@@ -66,7 +66,7 @@ dependencies:
     version: 0.2.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
-    version: 0.9.56
+    version: 0.9.57
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
     version: 0.8.47
@@ -75,13 +75,13 @@ dependencies:
     version: 0.7.52
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.1.20
+    version: 0.1.21
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
     version: 0.3.13
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
-    version: 0.5.30
+    version: 0.5.32
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
     version: 0.6.37
@@ -101,6 +101,6 @@ dependencies:
   # no path its `condition` names resolves. The key in `chart/values.yaml` is what
   # makes this line mean `false`, and it is not a restatement of a child default.
   - name: platform
-    version: 0.1.27
+    version: 0.1.29
     repository: oci://ghcr.io/yadgarhq/charts
     condition: platform.enabled
