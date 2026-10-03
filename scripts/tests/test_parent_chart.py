@@ -2677,7 +2677,7 @@ def test_platform_enabled_false_alone_turns_the_whole_platform_layer_off(tmp_pat
     the modules keep their autoscaling and databases, which are the modules' own
     toggles and not the platform layer's.
     """
-    defaults = helm("template", "yadgar", str(CHART), *API_VERSIONS)
+    defaults = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     assert defaults.returncode == 0, defaults.stderr
     everything, platform_count = platform_free_identities(defaults.stdout)
     platform_objects = {
@@ -2690,7 +2690,7 @@ def test_platform_enabled_false_alone_turns_the_whole_platform_layer_off(tmp_pat
     }
 
     values = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
     found, from_platform = platform_free_identities(result.stdout)
     print(
@@ -2720,7 +2720,7 @@ def test_platform_enabled_false_wins_over_every_create_left_true(tmp_path: Path)
     ))
     opt_out = overlay(tmp_path / "opt-out.yaml", OPT_OUT_VALUES)
     both = [
-        helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(path))
+        helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(path))
         for path in (contradictory, opt_out)
     ]
     for result in both:
@@ -2740,7 +2740,7 @@ def test_platform_enabled_false_still_refuses_the_operators_toggle(tmp_path: Pat
         tmp_path / "opt-out-with-operators.yaml",
         OPT_OUT_VALUES.replace("  enabled: false\n", "  enabled: false\n  operators:\n    create: true\n", 1),
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode != 0, "the opt-out with operators.create true rendered"
     assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
 
@@ -2751,7 +2751,7 @@ def test_platform_enabled_false_needs_no_iam_keys_agreement(tmp_path: Path) -> N
         tmp_path / "opt-out-own-keys.yaml",
         OPT_OUT_VALUES + "iam:\n  keysSecret: my-own-iam-keys\n",
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
 
 
@@ -2764,7 +2764,7 @@ def test_platform_enabled_false_alone_renders_and_still_mounts_the_admin_token(t
     `gateway.adminBootstrap.tokenSecret` is the second key of the opt-out.
     """
     values = overlay(tmp_path / "enabled-false-alone.yaml", "platform:\n  enabled: false\n")
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert result.returncode == 0, result.stderr
     found, from_platform = platform_free_identities(result.stdout)
     print(f"\nADR-0807: `platform.enabled: false` alone renders {len(found)} objects")
@@ -2909,6 +2909,8 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
             "yadgar",
             str(copy),
             *API_VERSIONS,
+            "-f",
+            str(EXPLICIT_TLS),
             "-f",
             str(
                 overlay(
@@ -3425,6 +3427,8 @@ def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
             "-f",
             str(modules_only_file(tmp_path)),
             "-f",
+            str(EXPLICIT_TLS),
+            "-f",
             str(overlay(tmp_path / f"{name}.yaml", body)),
         )
 
@@ -3502,6 +3506,8 @@ def test_the_null_operators_arm_is_reachable_only_without_the_pinned_subchart(
         "yadgar",
         str(copy),
         *API_VERSIONS,
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(
             overlay(
@@ -3617,6 +3623,8 @@ def test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render(
         "yadgar",
         str(copy),
         *API_VERSIONS,
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(
             overlay(
@@ -3757,6 +3765,8 @@ def rendered(copy: Path, tmp_path: Path, name: str, body: str) -> subprocess.Com
         str(copy),
         "-f",
         str(modules_only_file(tmp_path)),
+        "-f",
+        str(EXPLICIT_TLS),
         "-f",
         str(overlay(tmp_path / name, body)),
     )
@@ -3991,7 +4001,9 @@ def test_breaking_the_guard_makes_the_modules_only_render_refuse(tmp_path: Path)
     assert needle in text, "the guard moved; this red case is now testing nothing"
     partial.write_text(text.replace(needle, "{{- if true -}}", 1))
 
-    result = helm("template", "yadgar", str(copy), "-f", str(modules_only_file(tmp_path)))
+    result = helm(
+        "template", "yadgar", str(copy), "-f", str(modules_only_file(tmp_path)), "-f", str(EXPLICIT_TLS)
+    )
     assert result.returncode != 0, (
         "the guard was removed and the modules-only render still succeeded, so the "
         "guard is not what is keeping the refusals off that render"
@@ -4246,8 +4258,12 @@ def test_k2_the_defaults_refuse_a_render_without_the_declared_api_versions() -> 
     use meets a render check that names it, not `no matches for kind` half-way
     through a sync. Matched on the render check's own text rather than on an exit
     code, so a refusal for any other reason does not pass here.
+
+    `EXPLICIT_TLS` RIDES ALONG so the ONLY missing thing is an API version: once a
+    module starts refusing an absent `tls.enabled` too, a bare render with neither
+    would refuse for TLS first and this test would stop proving what it claims.
     """
-    result = helm("template", "yadgar", str(CHART))
+    result = helm("template", "yadgar", str(CHART), "-f", str(EXPLICIT_TLS))
     assert result.returncode != 0, "the default render succeeded with no --api-versions"
     assert THE_RENDER_CHECK_REFUSAL in result.stderr, result.stderr
     assert any(group in result.stderr for group in DECLARED_API_VERSIONS), result.stderr
@@ -4266,7 +4282,7 @@ def test_k2_every_declared_group_is_required_by_the_defaults() -> None:
             if group != dropped
             for part in ("--api-versions", group)
         ]
-        result = helm("template", "yadgar", str(CHART), *flags)
+        result = helm("template", "yadgar", str(CHART), *flags, "-f", str(EXPLICIT_TLS))
         assert result.returncode != 0, f"the defaults rendered without {dropped}"
         assert THE_RENDER_CHECK_REFUSAL in result.stderr and dropped in result.stderr, (
             dropped,

@@ -218,17 +218,16 @@ platform:
 
 # THE TWELVE `tls.enabled` SWITCHES BELOW ARE THE ONE OTHER THING THE CHART
 # CANNOT DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above.
-# STATED TRUE HERE, AHEAD OF THE SERVICES THAT STILL CLEARTEXT THE HOP THEY
-# GUARD. ADR-0852 is the estate's direction — mutual TLS on every internal
-# hop — and a per-repository contract (`C-SVb` for the three logic services,
-# `C-DB1` for the three `-db` charts) is what will make each switch required
-# with NO DEFAULT; the parent's own `values.yaml` deliberately states none of
-# them either, so it is never a tenth writer for a value that has to come
-# from you. MEASURED TODAY: at least one side of every pair below still says
-# "does not serve TLS yet" in its own chart's `values.yaml` — read that
-# chart before you sync this file against a real cluster with these switches
-# true; turning one end of a hop on without its partner serving it breaks the
-# hop rather than securing it. The six pairs move together:
+# STATED TRUE HERE, AS THE REFERENCE INSTALL ON kind RUNS THEM: every server
+# in the six pairs below serves TLS today, and argocd sets all twelve true.
+# A per-repository contract (`C-SVb` for the three logic services, `C-DB1`
+# for the three `-db` charts) will make each switch required with NO
+# DEFAULT; the parent's own `values.yaml` deliberately states none of them,
+# so it is never a tenth writer for a value that has to come from you. Some
+# module charts' own `values.yaml` comments still say "does not serve TLS
+# yet" — that prose predates the cut-over and is stale. The two ends of each
+# pair still move together: set `false` on one end only and the hop breaks.
+# The six pairs:
 #
 #   gateway.task.tls.enabled      + task.tls.enabled       (gateway → task)
 #   gateway.iam.tls.enabled       + iam.tls.enabled         (gateway → iam)
