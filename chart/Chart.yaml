@@ -81,7 +81,7 @@ dependencies:
     version: 0.3.13
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
-    version: 0.5.30
+    version: 0.5.31
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
     version: 0.6.37
