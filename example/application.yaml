@@ -26,8 +26,8 @@
 # ─── what `valuesObject` holds, and why it is this short ─────────────────────
 #
 # ONLY WHAT THE CHART CANNOT DEFAULT FOR YOU. Everything else — the platform
-# layer, autoscaling, databases, the admin token — is already on. Two things are
-# yours:
+# layer, autoscaling, databases, the admin token — is already on. Three things
+# are yours:
 #
 #   1. YOUR HOSTNAME, once, in `global.hostname` (ADR-0808). The five keys that
 #      carry it — the platform listener, the edge certificate's common name and
@@ -44,9 +44,25 @@
 #      and no client outside the cluster trusts it. The chart creates no issuer
 #      for you; `ClusterIssuer` is looked up cluster-wide, `Issuer` in this
 #      namespace.
+#   3. THE TWELVE `tls.enabled` READ SWITCHES (ruling 11, ADR-0845): three
+#      gateway dials, iam's own switch and its iam-db dial, iam-db's own
+#      switch, task's own switch and its task-db dial, task-db's own switch,
+#      project's own switch and its project-db dial, and project-db's own
+#      switch. This is the one other thing no chart can default for you: the
+#      parent's own `values.yaml` states none of them, on purpose, so it is
+#      never a tenth writer for a value a per-repository contract comes to
+#      require with no default of its own (K-8, ADR-0857's "fixture" step).
+#      `example/kind/application.yaml` states the same twelve, all `true`, for
+#      the same reason. STATING THEM IS NOT OPTIONAL THE WAY 1 AND 2 ARE: once
+#      any one contract reaches its "contract" step (ADR-0857), the switch it
+#      covers has no default anywhere, in the child chart or in this one, and
+#      a render that omits it refuses at the schema rather than falling back.
 #
-# Strictly, `valuesObject: {}` also renders — the same objects — but the estate
-# is then reachable at no hostname anyone can resolve.
+# Strictly, `valuesObject: {}` also renders TODAY — the same objects — because
+# every switch item 3 names still defaults `false` in its own child chart. That
+# default is going away, module by module, with no replacement (ADR-0857): the
+# day the first one lands, a bare `valuesObject: {}` refuses at the schema,
+# naming the switch, rather than reachable at no hostname as it is meanwhile.
 #
 # THE EDGE SERVICE STAYS `LoadBalancer`, the chart's default
 # (`platform.gatewayListener.envoyProxy.serviceType`, ledger 1076). On a cluster
@@ -116,6 +132,47 @@ spec:
         # YOUR HOSTNAME, once. Replace `yadgar.example.com`.
         global:
           hostname: yadgar.example.com
+        # THE TWELVE `tls.enabled` SWITCHES (ruling 11, ADR-0845), explicit for
+        # the same reason `values.yaml` states them: the parent's own
+        # defaults do not and will not, once a per-repository contract
+        # requires each one with no default (K-8).
+        gateway:
+          task:
+            tls:
+              enabled: true
+          iam:
+            tls:
+              enabled: true
+          project:
+            tls:
+              enabled: true
+        iam:
+          tls:
+            enabled: true
+          iamDb:
+            tls:
+              enabled: true
+        iam-db:
+          tls:
+            enabled: true
+        task:
+          tls:
+            enabled: true
+          taskDb:
+            tls:
+              enabled: true
+        task-db:
+          tls:
+            enabled: true
+        project:
+          tls:
+            enabled: true
+          projectDb:
+            tls:
+              enabled: true
+        project-db:
+          tls:
+            enabled: true
         platform:
           edgeTLS:
             # YOUR ISSUER. The chart creates none. Both halves are required.

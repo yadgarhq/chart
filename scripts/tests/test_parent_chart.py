@@ -4996,6 +4996,187 @@ def test_every_parent_example_passes_every_parent_gate(pinned: Path, tmp_path: P
     assert parent_example_failures(parent_examples(), pinned, tmp_path) == []
 
 
+# ─── a module that requires `tls.enabled` with no default, before any exists ──
+#
+# `pinned` ABOVE CANNOT CATCH THE GAP THIS PR CLOSES. It pulls the published
+# parent at today's pin, and every module chart it bundles still DEFAULTS
+# `tls.enabled` to `false` — ADR-0845's six open PRs (task#73, project#29,
+# iam-db#84, task-db#85, project-db#54, C-SVb) drop that default and add the
+# JSON-schema `required` the render checks already enforce at runtime, but none
+# of them has merged, so the registry holds no pin that requires the switch.
+# `example/application.yaml` could omit all twelve and this module's own gates
+# above would stay green. This mutates `task-db`'s OWN vendored member inside a
+# freshly packaged copy of the parent instead — exactly the shape C-DB1 ships
+# for it — the same technique `chart_with_a_vendored_line_rewritten` uses for
+# `platform` above, adapted to a parent that is PACKAGED rather than a bare
+# directory: a package embeds each dependency expanded under
+# `yadgar/charts/<name>/`, not as a nested `.tgz` to unpack a second time.
+TASK_DB_VALUES_MEMBER = "yadgar/charts/task-db/values.yaml"
+TASK_DB_SCHEMA_MEMBER = "yadgar/charts/task-db/values.schema.json"
+TASK_DB_DEFAULT_WAS = "has to infer it.\n  enabled: false\n"
+TASK_DB_DEFAULT_NOW = "has to infer it.\n"
+TASK_DB_SCHEMA_TLS_WAS = (
+    '    "tls": {\n'
+    '      "properties": {\n'
+    '        "enabled": {},\n'
+    '        "certSecret": {},\n'
+    '        "certSecretKey": {},\n'
+    '        "keySecretKey": {}\n'
+    '      },\n'
+    '      "additionalProperties": false\n'
+    '    },\n'
+)
+TASK_DB_SCHEMA_TLS_NOW = (
+    '    "tls": {\n'
+    '      "properties": {\n'
+    '        "enabled": {},\n'
+    '        "certSecret": {},\n'
+    '        "certSecretKey": {},\n'
+    '        "keySecretKey": {}\n'
+    '      },\n'
+    '      "additionalProperties": false,\n'
+    '      "required": ["enabled"]\n'
+    '    },\n'
+)
+
+
+def parent_packaged_with_task_db_requiring_tls(destination: Path) -> Path:
+    """A fresh package of the parent whose vendored `task-db` requires `tls.enabled`.
+
+    `helm package chart -u` IS `packaged`'s OWN RECIPE (ADR-0725: nothing under
+    `chart/charts/` is committed), run again here rather than shared with it, so
+    this mutation never touches the fixture every other test in this module reads.
+
+    THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE THE REPACK, same discipline
+    as `chart_with_a_vendored_line_rewritten`: a member this package no longer
+    holds, or a line that moved, is a red case that has stopped testing anything.
+    """
+    import io
+    import tarfile
+
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(CHART, destination / "chart")
+    result = helm("package", "chart", "-u", "--version", "0.1.0", "--app-version", "0.1.0", cwd=destination)
+    assert result.returncode == 0, result.stderr
+    tarball = destination / "yadgar-0.1.0.tgz"
+    assert tarball.is_file(), sorted(path.name for path in destination.iterdir())
+
+    with tarfile.open(tarball, "r:gz") as archive:
+        entries = [
+            (entry, archive.extractfile(entry).read() if entry.isfile() else None)
+            for entry in archive.getmembers()
+        ]
+    names = [entry.name for entry, _ in entries]
+    rewrites = {
+        TASK_DB_VALUES_MEMBER: (TASK_DB_DEFAULT_WAS, TASK_DB_DEFAULT_NOW),
+        TASK_DB_SCHEMA_MEMBER: (TASK_DB_SCHEMA_TLS_WAS, TASK_DB_SCHEMA_TLS_NOW),
+    }
+    for member in rewrites:
+        assert member in names, (
+            f"`{member}` is not a member of `{tarball.name}`, so this mutation "
+            f"would edit nothing and the render would be the unmutated one"
+        )
+
+    rewritten = io.BytesIO()
+    with tarfile.open(fileobj=rewritten, mode="w:gz") as archive:
+        for entry, body in entries:
+            if entry.name in rewrites:
+                was, now = rewrites[entry.name]
+                text = body.decode()
+                assert text.count(was) == 1, (
+                    f"`{was.strip()}` occurs {text.count(was)} times in `{entry.name}` "
+                    f"and exactly one was expected, so this mutation would be a no-op"
+                )
+                body = text.replace(was, now, 1).encode()
+                entry.size = len(body)
+            archive.addfile(entry, io.BytesIO(body) if body is not None else None)
+    tarball.write_bytes(rewritten.getvalue())
+    return tarball
+
+
+def test_every_parent_example_renders_once_a_module_requires_tls_enabled(tmp_path: Path) -> None:
+    """RED-FIRST FOR THIS PR, against `example/application.yaml` BEFORE it stated
+    the twelve switches: `example/kind/application.yaml` already stated
+    `task-db.tls.enabled` and kept rendering once `task-db` required the switch
+    with no default; `example/application.yaml` stated none of the twelve and
+    refused, naming the missing property — exactly the failure the PR
+    description measured against a real pin. Both must render now.
+
+    RENDERS THE IN-TREE PACKAGED CHART, not the published registry pin `pinned`
+    reads elsewhere in this module: that pin cannot yet carry a `task-db` whose
+    schema requires the switch, because none of ADR-0857's six open contract
+    PRs has released one, so a check against it alone would stay green through
+    the exact regression this PR fixes.
+
+    ONLY `task-db` IS MUTATED, by design, not every chart `tls.enabled` names. A
+    second gate — the BARE in-tree parent render (no `-f` at all) refusing and
+    naming `tls`/`enabled` once ANY ONE of the six contract charts is vendored —
+    was considered and dropped: proving it for more than one chart means hand
+    writing six not-yet-released schemas and defaults, which is coupled to
+    guesses about files this repository does not hold today, rather than to
+    `task-db`'s real, current shape. The behaviour is the one `parent_at` and
+    `EXPLICIT_TLS` riding along almost every other render in this module already
+    document in prose: a contract pin breaks the bare render of WHATEVER chart
+    it lands in, task-db included, which is exactly what this test shows for
+    the one that exists to mutate.
+    """
+    tarball = parent_packaged_with_task_db_requiring_tls(tmp_path / "mutated")
+    documents = parent_examples()
+    for name in ("example/kind/application.yaml", "example/application.yaml"):
+        values_object = documents[name]["spec"]["source"]["helm"]["valuesObject"]
+        destination = tmp_path / name.replace("/", "_")
+        destination.mkdir()
+        result = example_render(tarball, values_object, destination)
+        assert result.returncode == 0, (name, result.stderr)
+
+
+# THE SAME TWELVE AS `ADOPTER_ONLY_KEYS`'s, WITHOUT THE TWO EDGE-ISSUER KEYS: just
+# the `tls.enabled` switches, so the equality below can be about them alone.
+TWELVE_TLS_SWITCHES = frozenset(
+    {
+        "gateway.task.tls.enabled",
+        "gateway.iam.tls.enabled",
+        "gateway.project.tls.enabled",
+        "iam.tls.enabled",
+        "iam.iamDb.tls.enabled",
+        "iam-db.tls.enabled",
+        "task.tls.enabled",
+        "task.taskDb.tls.enabled",
+        "task-db.tls.enabled",
+        "project.tls.enabled",
+        "project.projectDb.tls.enabled",
+        "project-db.tls.enabled",
+    }
+)
+
+
+def twelve_switches_of(values: dict) -> dict[str, object]:
+    """Every one of the twelve switches `values` states, by path, with its value. PURE."""
+    return {path: value_at(values, path) for path in TWELVE_TLS_SWITCHES if value_at(values, path) is not _ABSENT}
+
+
+def test_the_twelve_tls_switches_agree_across_every_adopter_source() -> None:
+    """ruling 11 / ADR-0845: the same twelve switches, at the same value, wherever an
+    adopter reads them from — `example/values.yaml`, both parent examples'
+    `valuesObject`, and `chart/ci/values.yaml` (K-8's fixture). A file that drops
+    one, or states it differently from the rest, is the gap `example/application.yaml`
+    had, and this gate is what keeps it from reopening anywhere in the set.
+    """
+    documents = parent_examples()
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "example/application.yaml": documents["example/application.yaml"]["spec"]["source"]["helm"]["valuesObject"],
+        "example/kind/application.yaml": documents["example/kind/application.yaml"]["spec"]["source"]["helm"][
+            "valuesObject"
+        ],
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    stated = {name: twelve_switches_of(values) for name, values in sources.items()}
+    missing = {name: sorted(TWELVE_TLS_SWITCHES - switches.keys()) for name, switches in stated.items()}
+    assert missing == {name: [] for name in sources}, missing
+    assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+
+
 A_NEW_PARENT_EXAMPLE = "example/new/application.yaml"
 
 
