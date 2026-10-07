@@ -1319,33 +1319,56 @@ WORKFLOW = REPO / ".github" / "workflows" / "ci.yaml"
 PUSH_JOB = "push_validation"
 
 
-def _admits(condition: str, context: dict[str, str]) -> bool:
-    """Would GitHub run a job with this `if:`, in this event context?
+_STARTSWITH = re.compile(r"^startsWith\((?P<reference>[\w.]+),\s*'(?P<prefix>[^']*)'\)$")
+
+
+def _admits(condition: str, context: dict[str, str], job: str) -> bool:
+    """Would GitHub run `job` with this `if:`, in this event context?
 
     DELIBERATELY NOT A GENERAL EXPRESSION PARSER, and not a port of
     `ci_verdict.py` from `yadgarhq/actions` either — that file is the merge
     gate's verdict over `ci-pr.yaml`'s conditions and has no business being
-    duplicated here. This models the ONE shape `push_validation`'s condition
-    uses: `github.<field> == '<literal>'` clauses joined by `&&`. A condition
-    that grows past that shape REFUSES here rather than being approximated,
-    because an evaluator that silently mis-reads a condition is worse than none.
+    duplicated here. This models the shapes `push_validation` and
+    `tag_validation` actually use: `||`-joined groups of `&&`-joined clauses,
+    each clause either `github.<field> == '<literal>'` or
+    `startsWith(github.<field>, '<literal>')`. A condition that grows past
+    that shape REFUSES here rather than being approximated, because an
+    evaluator that silently mis-reads a condition is worse than none.
 
     ADMISSION IS NOT MODELLED AND DOES NOT NEED TO BE. The implicit check
     `test_ci_release_skip_propagation.py` in `yadgarhq/actions` documents applies
-    to a job whose `needs:` ancestors did not all conclude `success`, and this job
-    is asserted below to declare no `needs:` at all — which is why it cannot be
-    skipped by an ancestor the way that repository's `parent` job was.
+    to a job whose `needs:` ancestors did not all conclude `success`, and both
+    jobs below are asserted to declare no `needs:` at all — which is why
+    neither can be skipped by an ancestor the way that repository's `parent`
+    job was.
     """
+    return any(_admits_every_clause(group, context, job) for group in condition.split("||"))
+
+
+def _admits_every_clause(condition: str, context: dict[str, str], job: str) -> bool:
+    """The `&&`-joined half of `_admits`: every clause in `condition` must admit."""
     for clause in condition.split("&&"):
-        left, operator, right = clause.strip().partition("==")
+        clause = clause.strip()
+        starts_with = _STARTSWITH.match(clause)
+        if starts_with:
+            reference, prefix = starts_with["reference"], starts_with["prefix"]
+            assert reference in context, (
+                f"`{job}`'s condition reads `{reference}`, which this test does "
+                f"not model. Add it to every context below, with the value each "
+                f"event really carries."
+            )
+            if not context[reference].startswith(prefix):
+                return False
+            continue
+        left, operator, right = clause.partition("==")
         assert operator == "==", (
-            f"`{PUSH_JOB}`'s condition contains a clause this test cannot "
-            f"evaluate: {clause.strip()!r}. Extend `_admits` deliberately rather "
+            f"`{job}`'s condition contains a clause this test cannot "
+            f"evaluate: {clause!r}. Extend `_admits` deliberately rather "
             f"than letting the condition go unchecked."
         )
         reference = left.strip()
         assert reference in context, (
-            f"`{PUSH_JOB}`'s condition reads `{reference}`, which this test does "
+            f"`{job}`'s condition reads `{reference}`, which this test does "
             f"not model. Add it to every context below, with the value each event "
             f"really carries."
         )
@@ -1382,7 +1405,7 @@ def test_the_push_path_job_admits_a_push_to_main() -> None:
         ({"github.event_name": "push", "github.ref": "refs/tags/v0.1.0"}, False),
     ]
     for context, expected in cases:
-        assert _admits(condition, context) is expected, (
+        assert _admits(condition, context, PUSH_JOB) is expected, (
             f"`{PUSH_JOB}`'s condition `{condition}` evaluates to "
             f"{not expected} for {context}, and it must be {expected}."
         )
@@ -1408,6 +1431,123 @@ def test_the_push_path_job_admits_a_push_to_main() -> None:
             f"pin change by rendering and testing it; without this it is admitted "
             f"and proves nothing."
         )
+
+
+def test__admits_evaluates_an_or_of_and_groups() -> None:
+    """THE `||` EXTENSION. `tag_validation`'s own condition needs none today, but
+    `_admits` must not quietly keep approximating a condition that later grows
+    one — the shape both jobs below actually use is `||`-joined AND-groups.
+    """
+    condition = (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main' "
+        "|| github.event_name == 'workflow_dispatch'"
+    )
+    pushed_to_main = {"github.event_name": "push", "github.ref": "refs/heads/main"}
+    dispatched = {"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/other"}
+    neither = {"github.event_name": "pull_request", "github.ref": "refs/heads/main"}
+    assert _admits(condition, pushed_to_main, "test") is True
+    assert _admits(condition, dispatched, "test") is True
+    assert _admits(condition, neither, "test") is False
+
+
+def test__admits_evaluates_startswith() -> None:
+    """THE `startsWith(...)` EXTENSION: `tag_validation`'s own condition."""
+    condition = "startsWith(github.ref, 'refs/tags/')"
+    assert _admits(condition, {"github.ref": "refs/tags/v0.3.54"}, "test") is True
+    assert _admits(condition, {"github.ref": "refs/heads/main"}, "test") is False
+
+
+# THE JOB `release` NEEDS BEFORE IT PUBLISHES (ledger 1137's `tag_validation`).
+# `release` fires on the tag with no `needs:` today, and measured on `adf30008`
+# it SUCCEEDED while every `main / *` validation job skipped — so nothing walls
+# the one commit a tag publishes. `tag_validation` walls RENDER REFUSALS ONLY:
+# `helm dependency update`, `helm lint --strict` on the fixture, `helm template`
+# over the directory and the package, and `scripts/tests/test_tag_wall.py` —
+# a dedicated file rather than a marker expression, ruled by Max after ledger
+# 837's `no-test-skips` hook refused the marker-narrowed invocation outright
+# (it forbids any `-m`/`-k`/`--deselect` narrowing, estate-wide, no exemption)
+# but explicitly permits a positional path or filename argument: "no scan can
+# tell a directory that IS the suite from one that is a slice of it". That file's own
+# `test_this_file_pulls_no_published_pin_and_asserts_no_count_literal` is what
+# keeps running it alone honest.
+TAG_JOB = "tag_validation"
+TAG_WALL_FILE = "scripts/tests/test_tag_wall.py"
+
+
+def test_the_tag_job_admits_a_push_to_a_tag_and_refuses_everything_else() -> None:
+    """MEASURED BY EVALUATION, same proof as `push_validation`'s own test above."""
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    assert TAG_JOB in jobs, (
+        f"`{TAG_JOB}` is not a job in {WORKFLOW.name}. It is the wall `release` "
+        f"needs before it publishes."
+    )
+    job = jobs[TAG_JOB]
+    condition = str(job["if"])
+
+    cases = [
+        ({"github.event_name": "push", "github.ref": "refs/tags/v0.3.54"}, True),
+        ({"github.event_name": "push", "github.ref": "refs/heads/main"}, False),
+        ({"github.event_name": "pull_request", "github.ref": "refs/pull/42/merge"}, False),
+    ]
+    for context, expected in cases:
+        assert _admits(condition, context, TAG_JOB) is expected, (
+            f"`{TAG_JOB}`'s condition `{condition}` evaluates to "
+            f"{not expected} for {context}, and it must be {expected}."
+        )
+
+    assert not job.get("needs"), (
+        f"`{TAG_JOB}` declares `needs: {job.get('needs')}`. `release` today has "
+        f"none at all, and this job must not be skippable by an ancestor either."
+    )
+
+
+def test_the_release_job_needs_the_tag_job() -> None:
+    """THE WALL ONLY MATTERS IF `release` CANNOT RUN WITHOUT IT. Measured on
+    `adf30008`: `release / chart` SUCCEEDED while every `main / *` validation
+    job skipped, because nothing in `release`'s own definition depended on one.
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    needs = jobs["release"].get("needs")
+    needed = {needs} if isinstance(needs, str) else set(needs or [])
+    assert TAG_JOB in needed, (
+        f"`release` declares `needs: {needs}`, which does not include `{TAG_JOB}`. "
+        f"A red tag gate must block the publish, not just report one."
+    )
+
+
+def test_the_tag_job_runs_the_render_refusals_and_the_dedicated_suite() -> None:
+    """THE WALL'S BODY, asserted loosely so a future edit cannot gut it while the
+    condition and `needs:` assertions above stay green.
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    # `yaml.safe_dump` FOLDS A LONG SCALAR AT ITS DEFAULT WIDTH, so fragments
+    # stay short enough that a fold inside the `run:` block cannot split one —
+    # the same reason `test_the_push_path_job_admits_a_push_to_main` above
+    # checks `"helm lint --strict"` rather than the whole command line.
+    body = yaml.safe_dump(jobs[TAG_JOB])
+    for fragment in (
+        "helm dependency update chart",
+        "helm lint --strict",
+        "chart/ci/values.yaml",
+        "helm template",
+        TAG_WALL_FILE,
+    ):
+        assert fragment in body, (
+            f"`{TAG_JOB}` no longer runs `{fragment}`. It walls render refusals "
+            f"only: dependency resolution, the strict lint on the fixture, the "
+            f"fixture render over the directory and the package, and "
+            f"`{TAG_WALL_FILE}`."
+        )
+    # A MARKER EXPRESSION HAS NO BUSINESS HERE — see the job's own header
+    # comment for why (ledger 837's `no-test-skips`). `TAG_WALL_FILE` being a
+    # positional argument is what the hook itself exempts; the dedicated
+    # file's own `test_this_file_pulls_no_published_pin_and_asserts_no_count_literal`
+    # is the gate that keeps running it alone honest, not a second scan here.
+    assert "pinned" not in body, (
+        f"`{TAG_JOB}` references `pinned`, the fixture that pulls the parent's "
+        f"own published pin. The tag job renders HEAD's own version; it never "
+        f"pulls that."
+    )
 
 
 # ------------- 7. the platform layer: whole when on, absent when off, refused when half-on
@@ -2407,39 +2547,6 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
     return result.stderr
 
 
-def test_the_parent_refuses_an_empty_admin_token_when_it_installs_the_platform_layer(
-    tmp_path: Path,
-) -> None:
-    """RULING 5. Red case: a `platform.*.create` true and the token left at its default."""
-    message = refusal(
-        tmp_path,
-        "empty-admin-token",
-        "platform:\n  enabled: true\n  internalCA:\n    create: true\n",
-    )
-    assert "gateway.adminBootstrap.tokenSecret is empty" in message, message
-    assert "platform.internalCA.create" in message, message
-
-
-def test_the_parent_refuses_a_minted_name_the_gateway_does_not_mount(tmp_path: Path) -> None:
-    """The Job mints one name and the gateway mounts another; the refusal names both."""
-    message = refusal(
-        tmp_path,
-        "two-token-names",
-        "platform:\n"
-        "  enabled: true\n"
-        "  bootstrap:\n"
-        "    create: true\n"
-        "    adminToken:\n"
-        "      secretName: minted-here\n"
-        "gateway:\n"
-        "  adminBootstrap:\n"
-        "    tokenSecret: mounted-there\n",
-    )
-    assert "platform.bootstrap.adminToken.secretName" in message, message
-    assert "gateway.adminBootstrap.tokenSecret" in message, message
-    assert '"minted-here"' in message and '"mounted-there"' in message, message
-
-
 # THE SAME SHAPE FOR `iam-keys`, AND ONLY ONE SIDE OF IT IS A KEY. The bootstrap
 # Job mints the name as a LITERAL in its script; `iam` mounts `iam.keysSecret`,
 # which is a value. So the red case renames the mounted side alone — there is no
@@ -2814,62 +2921,6 @@ THE_PARENT_FAIL = '{{- fail (printf "\\n\\nyadgar: this parent chart refuses to 
 THE_PARENT_FAIL_OFF = '{{- $ignored := (printf "\\n\\nyadgar: NOT REFUSING.'
 
 
-def test_the_parent_names_a_platform_enabled_it_cannot_read(tmp_path: Path) -> None:
-    """Six unreadable `platform.enabled` values, six refusals that say what is true.
-
-    THE TYPE NAME IS ASSERTED PER ROW, and `invalid` is reported as `null` the way
-    every other shape refusal in this file reports it — "is a invalid" names
-    nothing an adopter wrote.
-
-    THE OLD MESSAGE MUST BE ABSENT, not merely the new one present. Both arms are
-    reachable from the same values file shape, and an implementation that emitted
-    both would satisfy a positive-only assertion while still telling the adopter
-    the render contains none of the objects it is about to contain.
-    """
-    for name, scalar, kind in THE_UNREADABLE_ENABLED_SHAPES:
-        message = refusal(
-            tmp_path,
-            name,
-            f"platform:\n  enabled: {scalar}\n  valkey:\n    create: true\n"
-            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
-        )
-        assert f"platform.enabled is a {kind} rather than true or false" in message, (
-            f"`{name}` refused without naming what the adopter wrote: {message}"
-        )
-        assert "platform.valkey.create" in message, (
-            f"`{name}` refused without naming the toggle that asked: {message}"
-        )
-        assert THE_DEPENDENCY_REFUSAL not in message, (
-            f"`{name}` also emitted the message for a RESOLVED false condition, "
-            f"which says this render contains none of the objects it is in fact "
-            f"about to contain: {message}"
-        )
-        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-            assert raise_text not in message, (
-                f"`{name}` RAISED instead of refusing: {message}"
-            )
-
-
-def test_an_unreadable_platform_enabled_is_refused_with_every_create_false(tmp_path: Path) -> None:
-    """The shape refusal does not wait for a `create` toggle to open the guard.
-
-    `platform.enabled: null` with every `create` false used to render exit 0 WITH
-    `platform` objects and no refusal: helm leaves the dependency enabled, and the
-    refusal sat inside the `create` guard, which nothing opened. Measured on
-    751e64b and on this branch before the fix: 4 objects from `platform`, exit 0.
-    """
-    for name, scalar, kind in THE_UNREADABLE_ENABLED_SHAPES:
-        message = refusal(
-            tmp_path,
-            f"{name}-nothing-created",
-            f"platform:\n  enabled: {scalar}\n",
-        )
-        assert f"platform.enabled is a {kind} rather than true or false" in message, (
-            f"`{name}` with every create false refused without naming the key: {message}"
-        )
-        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-            assert raise_text not in message, f"`{name}` RAISED instead of refusing: {message}"
-
 
 def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
     tmp_path: Path,
@@ -3156,26 +3207,6 @@ THE_DELETED_OPERATORS_KEY_REFUSAL = (
 )
 
 
-def the_parent_names_the_type(kind: str) -> str:
-    return f"platform.operators is a {kind} {THE_OPERATORS_SHAPE_REFUSAL}"
-
-
-THE_NON_MAPPING_OPERATORS = (
-    ("operators-is-a-bool", "true", THE_PARENT, the_parent_names_the_type("bool")),
-    ("operators-is-the-yaml-yes", "yes", THE_PARENT, the_parent_names_the_type("bool")),
-    ("operators-is-false", "false", THE_PARENT, the_parent_names_the_type("bool")),
-    ("operators-is-null", "null", THE_SUBCHART, THE_DELETED_OPERATORS_KEY_REFUSAL),
-    ("operators-is-zero", "0", THE_PARENT, the_parent_names_the_type("float64")),
-    ("operators-is-an-empty-string", '""', THE_PARENT, the_parent_names_the_type("string")),
-    ("operators-is-an-empty-list", "[]", THE_PARENT, the_parent_names_the_type("slice")),
-    ("operators-is-a-list", "[a]", THE_PARENT, the_parent_names_the_type("slice")),
-)
-
-# WHAT THE WALK ABOVE MUST EXAMINE, COUNTED AND SPLIT BY REFUSER. A row deleted from
-# the tuple, or a row that quietly changed which chart answered it, reddens here
-# rather than leaving the loop exercising one fewer shape and reporting a pass.
-THE_SHAPES_AN_ADOPTER_CAN_WRITE = {THE_PARENT: 7, THE_SUBCHART: 1}
-
 # ── WHICH CHART ANSWERED, OBSERVED RATHER THAN ASSUMED ───────────────────────
 # THE COUNTER USED TO TALLY THE TUPLE'S OWN LABEL. It read `refused_by[chart] += 1`
 # with `chart` taken from the row it had just read, so the comment above — "a row
@@ -3215,174 +3246,6 @@ def the_chart_that_refused(name: str, message: str) -> str:
         f"called `fail`, so either an unknown chart refused or two did.\n{message}"
     )
     return found[0]
-
-
-def test_the_parent_refuses_a_platform_operators_key_that_is_not_a_mapping(
-    tmp_path: Path,
-) -> None:
-    """The adopter typo that used to abort the render with a stack trace.
-
-    `platform.operators: true` is what somebody writes who thinks the toggle IS
-    the block rather than a key inside it. Sprig's `default` substitutes only on an
-    EMPTY value, so `default dict true` is `true`, and both the `create` read and
-    the range then run against a bool. Measured on helm 4.3.0 before the `kindIs`
-    arm existed: `--set platform.operators=true` aborted with `can't evaluate field
-    create in type bool`.
-
-    EVERY ROW OF `THE_NON_MAPPING_OPERATORS` IS RUN, and the five EMPTY ones are
-    what this test was missing. The same `default` that makes the `true` case raise
-    makes `false`, `null`, `0`, `""` and `[]` read as ABSENT, so a guard built on
-    `default dict` covers only the non-empty half of the shapes it claims. The
-    RAW value is what has to be typed, which is what the template does now.
-
-    ASSERTED ON THE ABSENCE OF A RAISE, not only on the exit code. A refusal and a
-    raise both exit 1, so an implementation that went back to raising would satisfy
-    `returncode != 0` while giving the adopter a stack trace instead of a key name.
-
-    SEVEN ROWS ARE THIS PARENT'S REFUSAL AND ONE IS `platform`'s, which is a
-    structural fact rather than an inconsistency — the tuple's comment carries the
-    measurement. `platform.operators: null` makes helm DELETE the key, so the
-    parent's `hasKey` reads false and the only chart that still knows the key was
-    written is the one whose own defaults guarantee it.
-    `test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render` is the
-    red case, and it shows the shape rendering exit 0 with the operators in.
-    """
-    refused_by: collections.Counter = collections.Counter()
-    for name, scalar, chart, phrase in THE_NON_MAPPING_OPERATORS:
-        message = refusal(
-            tmp_path,
-            name,
-            f"platform:\n  enabled: true\n  operators: {scalar}\n"
-            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
-        )
-        assert phrase in message, (
-            f"`{name}` refused without the phrase `{chart}` alone writes: {message}"
-        )
-        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-            assert raise_text not in message, (
-                f"`{name}` RAISED instead of refusing: {message}"
-            )
-        observed = the_chart_that_refused(name, message)
-        assert observed == chart, (
-            f"`{name}` is tabled as refused by `{chart}` and `{observed}` refused "
-            f"it. Which chart answers which shape is the structural claim this "
-            f"table makes, and it has moved.\n{message}"
-        )
-        refused_by[observed] += 1
-    assert dict(refused_by) == THE_SHAPES_AN_ADOPTER_CAN_WRITE, (
-        f"this walk examined {dict(refused_by)} and the table says "
-        f"{THE_SHAPES_AN_ADOPTER_CAN_WRITE}"
-    )
-
-
-# ── THE REGISTER KEYS, ONE LEVEL DOWN FROM THE EIGHT SHAPES ABOVE ────────────
-# THE EIGHT SHAPES ABOVE ARE SHAPES OF THE BLOCK. None of them is a shape of the
-# key helm's `condition:` actually reads, and until `platform` 0.1.12 a mapping
-# with an unusable `create` inside it walked through every refusal in both charts.
-# Measured at `platform` 0.1.11, on helm 3.20.2 and 4.3.0 alike:
-# `platform.operators.create:` with no value rendered EXIT 0, 197 objects, 165 of
-# them from the five operator subcharts, against the 32 of the then-bare default — a
-# cluster-wide cert-manager, KEDA, argo-cd, Envoy Gateway and mariadb-operator out
-# of a key nobody could read.
-#
-# WHICH CHART ANSWERS WHICH SHAPE IS THE POINT OF THE TABLE, and the split here is
-# the opposite way round from the eight above. There, seven are this parent's and
-# one is the subchart's. Here, the parent takes every PRESENT non-bool and the
-# subchart takes the two DELETIONS, and the reason is mechanical rather than
-# stylistic:
-#
-#   - `platform.operators.create: null` DELETES the key, because `platform`
-#     declares it. This parent then reads `hasKey` FALSE and cannot tell it from
-#     the adopter who never wrote it, so `platform` 0.1.12 refuses it from the one
-#     chart whose own defaults guarantee the key.
-#   - `platform.nats: null` deletes the whole block the same way, and `platform`
-#     refuses it for the same reason, naming `nats.create`.
-#   - `platform.nats.create: null` does NOT delete: the `nats` SUBCHART's own
-#     values are coalesced into `platform.nats`, so the key comes back PRESENT and
-#     nil. `platform`'s arm for a present non-bool stands down under a parent, so
-#     THIS chart is the only one that refuses it — which it did not do until the
-#     `hasKey` arm in `_validate.tpl` replaced the `invalid` exclusion.
-#
-# ALL TWELVE ROWS RE-MEASURED AT `platform` 0.1.12 ON BOTH HELM LINES, 2026-09-26,
-# and the two agree row for row.
-#
-# EACH ROW: (name, the YAML under `platform:`, the chart that refuses, the phrase).
-THE_REGISTER_KEY_SHAPES = (
-    ("operators-create-is-null", "operators:\n    create:\n", THE_SUBCHART,
-     "operators.create has been deleted"),
-    ("operators-create-is-a-quoted-true", 'operators:\n    create: "true"\n', THE_PARENT,
-     "platform.operators.create is a string rather than a boolean"),
-    ("operators-create-is-the-yaml-yes-string", 'operators:\n    create: "yes"\n', THE_PARENT,
-     "platform.operators.create is a string rather than a boolean"),
-    ("operators-create-is-the-yaml-no-string", 'operators:\n    create: "no"\n', THE_PARENT,
-     "platform.operators.create is a string rather than a boolean"),
-    ("operators-create-is-an-empty-string", 'operators:\n    create: ""\n', THE_PARENT,
-     "platform.operators.create is a string rather than a boolean"),
-    ("operators-create-is-zero", "operators:\n    create: 0\n", THE_PARENT,
-     "platform.operators.create is a float64 rather than a boolean"),
-    ("operators-create-is-one", "operators:\n    create: 1\n", THE_PARENT,
-     "platform.operators.create is a float64 rather than a boolean"),
-    ("operators-create-is-an-empty-list", "operators:\n    create: []\n", THE_PARENT,
-     "platform.operators.create is a slice rather than a boolean"),
-    ("operators-create-is-an-empty-map", "operators:\n    create: {}\n", THE_PARENT,
-     "platform.operators.create is a map rather than a boolean"),
-    ("nats-create-is-null", "nats:\n    create:\n", THE_PARENT,
-     "platform.nats.create is a null rather than a boolean"),
-    ("nats-create-is-the-yaml-yes-string", 'nats:\n    create: "yes"\n', THE_PARENT,
-     "platform.nats.create is a string rather than a boolean"),
-    ("nats-create-is-an-empty-map", "nats:\n    create: {}\n", THE_PARENT,
-     "platform.nats.create is a map rather than a boolean"),
-    ("nats-block-is-null", "nats:\n", THE_SUBCHART,
-     "nats.create has been deleted"),
-)
-
-# THE SAME SPLIT, COUNTED. Written out rather than derived from the tuple, for the
-# reason every expected count in this estate is a literal: a total computed from
-# the thing under test agrees with whatever that thing happens to be.
-THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE = {THE_PARENT: 11, THE_SUBCHART: 2}
-
-
-def test_the_register_key_shapes_are_refused_and_the_table_says_by_whom(
-    tmp_path: Path,
-) -> None:
-    """Thirteen shapes of the key helm's `condition:` reads, and who answers each.
-
-    THE PHRASE AND THE REFUSER ARE ASSERTED SEPARATELY, because they fail for
-    different reasons. A wrong phrase is a reworded or wrongly-typed refusal; a
-    wrong refuser is the division of labour between the two charts moving, which
-    is the structural claim this table exists to hold and the one a pin can break
-    without anybody editing either file.
-
-    ASSERTED ON THE ABSENCE OF A RAISE TOO. A refusal and a raise both exit 1, and
-    `platform.operators.create: 1` RAISED here at one point in this file's history
-    — `incompatible types for comparison: float64 and bool` — which is exactly the
-    outcome ADR-0794 forbids.
-    """
-    refused_by: collections.Counter = collections.Counter()
-    for name, body, chart, phrase in THE_REGISTER_KEY_SHAPES:
-        message = refusal(
-            tmp_path,
-            f"register-{name}",
-            f"platform:\n  enabled: true\n  {body}"
-            "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
-        )
-        assert phrase in message, (
-            f"`{name}` refused without the phrase `{chart}` alone writes: {message}"
-        )
-        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-            assert raise_text not in message, (
-                f"`{name}` RAISED instead of refusing: {message}"
-            )
-        observed = the_chart_that_refused(name, message)
-        assert observed == chart, (
-            f"`{name}` is tabled as refused by `{chart}` and `{observed}` refused "
-            f"it.\n{message}"
-        )
-        refused_by[observed] += 1
-    assert dict(refused_by) == THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE, (
-        f"this walk examined {dict(refused_by)} and the table says "
-        f"{THE_REGISTER_SHAPES_AN_ADOPTER_CAN_WRITE}"
-    )
 
 
 # THE LINE THE `nats.create: null` RED CASE REWRITES, AND IT IS IN THIS CHART.
@@ -3536,29 +3399,6 @@ def test_the_null_operators_arm_is_reachable_only_without_the_pinned_subchart(
         )
 
 
-def test_the_pinned_subchart_is_what_makes_that_arm_unreachable(tmp_path: Path) -> None:
-    """THE OTHER HALF, so the paragraph above is measured rather than asserted.
-
-    The SAME overlay against the chart as it ships is refused by `platform`, not
-    by the arm above. Without this, the test above would read as "the parent
-    refuses a null `platform.operators`" full stop, which is the claim this file
-    carried before 2026-09-26 and which a pinned `platform` had already made
-    false.
-    """
-    message = refusal(
-        tmp_path,
-        "pinned-operators-null",
-        "platform:\n  enabled: true\n  operators: null\n"
-        "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
-    )
-    assert THE_DELETED_OPERATORS_KEY_REFUSAL in message, message
-    assert "platform.operators is a null rather than a mapping" not in message, (
-        "the parent's `invalid` arm answered with `platform` pinned, so it is not "
-        f"fixture-only after all and the paragraph above needs rewriting: {message}"
-    )
-    assert the_chart_that_refused("pinned-operators-null", message) == THE_SUBCHART
-
-
 # THE ONE LINE THE RED CASE BELOW REWRITES, AND IT IS IN THE SUBCHART. The `null`
 # row's refusal is `platform`'s, so the mutation that has to show it load-bearing is
 # `platform`'s too — the parent has no line to switch off for this row, which is the
@@ -3665,62 +3505,6 @@ def test_switching_off_the_subcharts_deleted_key_arm_lets_the_null_render(
         f"{len(THE_OPERATOR_SOURCES)} operator subcharts — {arrived} — so the "
         f"fail-open this red case exists to show did not happen in full"
     )
-
-
-# THE FOUR NON-BOOLEAN `create` SPELLINGS, AND THE TWO KEY PATHS THEY SIT ON. A
-# quoted `"true"` and a bare `1` are what an adopter writes who is copying a shell
-# export or a JSON fragment, and `eq (default false $block.create) true` cannot
-# compare either against a bool: helm aborts with `error calling eq: incompatible
-# types for comparison`. Measured on helm 4.3.0 at 883a7a8 — a stack trace naming
-# `_validate.tpl:189` and `:194` where the adopter needs a key name.
-#
-# THE SUB-KEY PATH IS THE ONE THIS PULL REQUEST OPENED. Measured on `main`:
-# `platform.operators.certManager.create: "true"` rendered exit 0 and 32 objects —
-# silently permitted, because `main` has no operators clause at all — and at
-# 883a7a8 it RAISES. The top-level `platform.operators.create` raised on `main`
-# too, at the pre-existing `$creating` range, so that half is a defect this file
-# inherited rather than one the clause introduced. Both are refusals now.
-THE_NON_BOOLEAN_CREATES = (
-    ("create-is-a-quoted-true", "certManager", '"true"', "platform.operators.certManager.create", "string"),
-    ("create-is-an-integer", "certManager", "1", "platform.operators.certManager.create", "float64"),
-    ("create-is-a-quoted-true-at-the-top", None, '"true"', "platform.operators.create", "string"),
-    ("create-is-an-integer-at-the-top", None, "1", "platform.operators.create", "float64"),
-)
-THE_CREATE_SHAPE_REFUSAL = "rather than a boolean"
-
-
-def test_the_parent_refuses_a_create_toggle_that_is_not_a_boolean(tmp_path: Path) -> None:
-    """A `create` helm cannot compare is refused by name, never raised on.
-
-    THE RULE IS THE SAME ONE `platform.operators` OBEYS: refuse a value in a shape
-    the chart cannot read, never coerce it and read it anyway. `default false` is
-    nil-safe and never type-safe — it substitutes on an EMPTY value, so it turns a
-    missing key into `false` and hands a present `"true"` straight to `eq`.
-
-    ASSERTED ON THE ABSENCE OF A RAISE, and that assertion is the whole test. Both
-    spellings already exit 1 at 883a7a8 — BY RAISING — so a red case reading
-    `returncode != 0` is green against the defect it is supposed to catch.
-
-    A NIL `create` IS LEFT ALONE, DELIBERATELY. `create: null` never raised:
-    `default false nil` is `false` and `eq false true` is a legal comparison. Only
-    the values that ABORT the render are refused here, so this clause changes the
-    raising class and nothing else.
-    """
-    for name, operator, scalar, key, kind in THE_NON_BOOLEAN_CREATES:
-        block = (
-            f"    {operator}:\n      create: {scalar}\n"
-            if operator
-            else f"    create: {scalar}\n"
-        )
-        message = refusal(tmp_path, name, operators_overlay(block))
-        assert THE_CREATE_SHAPE_REFUSAL in message, message
-        assert f"{key} is a {kind} rather than a boolean" in message, (
-            f"`{name}` refused without naming the key and the type: {message}"
-        )
-        for raise_text in THE_TEXTS_A_RAISE_LEAVES:
-            assert raise_text not in message, (
-                f"`{name}` RAISED instead of refusing: {message}"
-            )
 
 
 # THE TWO LINES THE RED CASES BELOW REWRITE, each isolating one half of the clause.
