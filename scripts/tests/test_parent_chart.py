@@ -51,7 +51,9 @@ form, or that ADR-0803 decided:
    the record for the template that carries the parent's own refusals.
 
 8. THE DEFAULTS ARE THE WHOLE ESTATE (ADR-0803 step B6, decision 2). The parent
-   with no values file renders exactly what the adopter values render (K1), and
+   with no values file, `chart/ci/values.yaml`'s twelve `tls.enabled` switches
+   riding along (ruling 11, ADR-0845 — the parent's own `values.yaml` states
+   none of them), renders exactly what the adopter values render (K1), and
    refuses offline without the four API versions `chart/ci/api-versions.txt`
    declares (K2) — the file every shared gate reads (ADR-0806).
 
@@ -74,6 +76,7 @@ Run: python3 -m pytest scripts/tests/ -q
 from __future__ import annotations
 
 import collections
+import json
 import os
 import re
 import shutil
@@ -4422,8 +4425,33 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
             member = f"yadgar/charts/{name}/values.yaml"
             if member in archive.getnames():
                 defaults = merged({name: values_of(member)}, defaults)
+            # A CONTRACT CHART (ADR-0845, ADR-0857) DELETES ITS OWN DEFAULT, so
+            # `values_of(member)` alone stops declaring the key the moment the
+            # chart stops defaulting it — exactly the state this schema-only
+            # leaf still names. The schema's `properties` tree is read too, as
+            # a SKELETON merged UNDER the values-derived defaults (never over
+            # them): a leaf the schema declares and the values no longer do
+            # becomes a recognised, open (`None`) leaf, the same tolerance
+            # `undeclared_leaves` already gives any other open map.
+            schema = f"yadgar/charts/{name}/values.schema.json"
+            if schema in archive.getnames():
+                defaults = merged({name: schema_skeleton(json.loads(archive.extractfile(schema).read()))}, defaults)
 
     return undeclared_leaves(values_object, defaults, "no chart in the pinned parent")
+
+
+def schema_skeleton(schema: dict) -> dict:
+    """The key tree a JSON schema's `properties` declare, every leaf `None`. PURE.
+
+    A PROPERTY WITH NO `properties` OF ITS OWN IS A LEAF, recognised but open —
+    the same reading `undeclared_leaves` already gives an empty mapping or a
+    `None` node. One WITH `properties` recurses, so a nested block (`tls`,
+    `database`) is walked rather than swallowed whole.
+    """
+    return {
+        key: (schema_skeleton(sub) if isinstance(sub, dict) and sub.get("properties") else None)
+        for key, sub in (schema.get("properties") or {}).items()
+    }
 
 
 def undeclared_leaves(values_object: dict, defaults: dict, declarer: str) -> list[str]:
@@ -4588,7 +4616,7 @@ def test_the_example_installs_the_whole_estate_at_its_pin(pinned: Path, tmp_path
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     print(f"\nB7: {source['targetRevision']} with the example's valuesObject renders {len(documents)} objects")
-    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS)), (
+    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS, "-f", str(EXPLICIT_TLS))), (
         "the example's valuesObject changed which objects the pinned parent renders"
     )
     assert [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)] == []
@@ -4972,7 +5000,7 @@ def ignore_differences_failures(name: str, document: dict) -> list[str]:
 def parent_example_failures(documents: dict[str, dict], tarball: Path, destination: Path) -> list[str]:
     """Every gate a parent example must pass, for each of them. Renders with helm."""
     failures = parent_pin_failures(documents)
-    expected = identities(render(str(tarball), *API_VERSIONS))
+    expected = identities(render(str(tarball), *API_VERSIONS, "-f", str(EXPLICIT_TLS)))
     for index, (name, document) in enumerate(sorted(documents.items())):
         failures += ignore_differences_failures(name, document)
         values_object = document["spec"]["source"]["helm"]["valuesObject"]
@@ -5050,6 +5078,15 @@ def parent_packaged_with_task_db_requiring_tls(destination: Path) -> Path:
     THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE THE REPACK, same discipline
     as `chart_with_a_vendored_line_rewritten`: a member this package no longer
     holds, or a line that moved, is a red case that has stopped testing anything.
+
+    TOLERATES A `task-db` THAT ALREADY SHIPS THE CONTRACT. `chart/Chart.yaml`'s
+    pin moves to a real `task-db` release the day C-DB1 lands, and that release
+    is exactly this function's target shape: `required: ["enabled"]` with no
+    default. At that point `TASK_DB_DEFAULT_WAS`/`TASK_DB_SCHEMA_TLS_WAS` no
+    longer occur in the vendored member — there is nothing left to mutate, and
+    the plain assert below would refuse for the wrong reason. Checked by reading
+    the vendored schema BEFORE the rewrite asserts fire, so a real contract pin
+    returns the already-contracted tarball unchanged rather than erroring.
     """
     import io
     import tarfile
@@ -5071,6 +5108,9 @@ def parent_packaged_with_task_db_requiring_tls(destination: Path) -> Path:
         TASK_DB_VALUES_MEMBER: (TASK_DB_DEFAULT_WAS, TASK_DB_DEFAULT_NOW),
         TASK_DB_SCHEMA_MEMBER: (TASK_DB_SCHEMA_TLS_WAS, TASK_DB_SCHEMA_TLS_NOW),
     }
+    schema_now = json.loads(dict((entry.name, body) for entry, body in entries)[TASK_DB_SCHEMA_MEMBER])
+    if "enabled" in schema_now["properties"]["tls"].get("required", []):
+        return tarball  # the pinned task-db already ships the contract: nothing to simulate
     for member in rewrites:
         assert member in names, (
             f"`{member}` is not a member of `{tarball.name}`, so this mutation "
@@ -5121,33 +5161,22 @@ def test_every_parent_example_renders_once_a_module_requires_tls_enabled(tmp_pat
     the one that exists to mutate.
     """
     tarball = parent_packaged_with_task_db_requiring_tls(tmp_path / "mutated")
-    documents = parent_examples()
-    for name in ("example/kind/application.yaml", "example/application.yaml"):
-        values_object = documents[name]["spec"]["source"]["helm"]["valuesObject"]
+    for name, document in parent_examples().items():
+        values_object = document["spec"]["source"]["helm"]["valuesObject"]
         destination = tmp_path / name.replace("/", "_")
         destination.mkdir()
         result = example_render(tarball, values_object, destination)
         assert result.returncode == 0, (name, result.stderr)
 
 
-# THE SAME TWELVE AS `ADOPTER_ONLY_KEYS`'s, WITHOUT THE TWO EDGE-ISSUER KEYS: just
-# the `tls.enabled` switches, so the equality below can be about them alone.
-TWELVE_TLS_SWITCHES = frozenset(
-    {
-        "gateway.task.tls.enabled",
-        "gateway.iam.tls.enabled",
-        "gateway.project.tls.enabled",
-        "iam.tls.enabled",
-        "iam.iamDb.tls.enabled",
-        "iam-db.tls.enabled",
-        "task.tls.enabled",
-        "task.taskDb.tls.enabled",
-        "task-db.tls.enabled",
-        "project.tls.enabled",
-        "project.projectDb.tls.enabled",
-        "project-db.tls.enabled",
-    }
-)
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
+# exception list `default_disagreements` walks past (the two edge-issuer keys
+# plus these twelve), and copying the twelve out by hand would be a second
+# place for the list to drift from the one `ADOPTER_ONLY_KEYS` already names.
+TWELVE_TLS_SWITCHES = ADOPTER_ONLY_KEYS - {
+    "platform.edgeTLS.issuerRef.name",
+    "platform.edgeTLS.issuerRef.kind",
+}
 
 
 def twelve_switches_of(values: dict) -> dict[str, object]:
@@ -5162,15 +5191,12 @@ def test_the_twelve_tls_switches_agree_across_every_adopter_source() -> None:
     one, or states it differently from the rest, is the gap `example/application.yaml`
     had, and this gate is what keeps it from reopening anywhere in the set.
     """
-    documents = parent_examples()
     sources = {
         "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
-        "example/application.yaml": documents["example/application.yaml"]["spec"]["source"]["helm"]["valuesObject"],
-        "example/kind/application.yaml": documents["example/kind/application.yaml"]["spec"]["source"]["helm"][
-            "valuesObject"
-        ],
         "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
     }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
     stated = {name: twelve_switches_of(values) for name, values in sources.items()}
     missing = {name: sorted(TWELVE_TLS_SWITCHES - switches.keys()) for name, switches in stated.items()}
     assert missing == {name: [] for name in sources}, missing
@@ -5625,7 +5651,7 @@ def test_the_kind_example_renders_a_node_port_edge_and_the_enrolment_port(pinned
     assert result.returncode == 0, result.stderr
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     assert kind_edge_failures(documents, kind_values()) == []
-    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS))
+    assert identities(documents) == identities(render(str(pinned), *API_VERSIONS, "-f", str(EXPLICIT_TLS)))
 
 
 def test_the_kind_example_on_heads_chart_probes_prometheus(packaged: Path, tmp_path: Path) -> None:
