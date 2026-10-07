@@ -265,26 +265,26 @@ jobs:
           python3 -m pip install --quiet "pytest==9.1.1" "pyyaml==6.0.3" "shellcheck-py==0.11.0.1"
           helm dependency update chart
           helm lint --strict chart -f chart/ci/values.yaml
-          # THE FOUR GROUPS `chart/ci/api-versions.txt` DECLARES (ADR-0806):
-          # every render check in the package reads `.Capabilities.APIVersions`
-          # for one of these, so a bare `helm template` refuses at the first one
-          # a toggle in the fixture reaches.
-          helm template yadgar chart -f chart/ci/values.yaml \
-            --api-versions cert-manager.io/v1 \
-            --api-versions gateway.envoyproxy.io/v1alpha1 \
-            --api-versions k8s.mariadb.com/v1alpha1 \
-            --api-versions keda.sh/v1alpha1 \
-            > /dev/null
+          # THE GROUPS `chart/ci/api-versions.txt` DECLARES (ADR-0806), DERIVED
+          # rather than hardcoded, by the same rules `scripts/api_versions.py`
+          # (`yadgarhq/actions`) reads the file with: `#` starts a comment, a
+          # blank line is nothing. Every render check in the package reads
+          # `.Capabilities.APIVersions` for one of these, so a bare `helm
+          # template` refuses at the first one a toggle in the fixture reaches.
+          python3 > /tmp/api-version-flags.txt <<'PY'
+          for line in open("chart/ci/api-versions.txt"):
+              entry = line.split("#", 1)[0].strip()
+              if entry:
+                  print("--api-versions")
+                  print(entry)
+          PY
+          mapfile -t API_VERSION_FLAGS < /tmp/api-version-flags.txt
+          helm template yadgar chart -f chart/ci/values.yaml "${API_VERSION_FLAGS[@]}" > /dev/null
           # THE PACKAGED ARTIFACT, THE SAME WAY `ci-release.yaml` BUILDS IT
           # (ADR-0725): `helm package chart -u`. The version is a throwaway —
           # this proves the package renders, not what it is published as.
           helm package chart -u --version 0.1.0 --app-version 0.1.0
-          helm template yadgar yadgar-0.1.0.tgz -f chart/ci/values.yaml \
-            --api-versions cert-manager.io/v1 \
-            --api-versions gateway.envoyproxy.io/v1alpha1 \
-            --api-versions k8s.mariadb.com/v1alpha1 \
-            --api-versions keda.sh/v1alpha1 \
-            > /dev/null
+          helm template yadgar yadgar-0.1.0.tgz -f chart/ci/values.yaml "${API_VERSION_FLAGS[@]}" > /dev/null
           # A DEDICATED FILE, NOT A MARKER — see the job's own header above.
           python3 -m pytest scripts/tests/test_tag_wall.py -q
       - name: a red tag gate must say why, where release's own logs are read

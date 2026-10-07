@@ -1514,36 +1514,75 @@ def test_the_release_job_needs_the_tag_job() -> None:
         f"A red tag gate must block the publish, not just report one."
     )
 
+    # `needs:` GATES ON `success()` ONLY WHEN `release`'s OWN `if:` CALLS NO
+    # STATUS FUNCTION ITSELF — the same rule `push_validation`'s and
+    # `tag_validation`'s own headers document. `if: always() && startsWith(...)`
+    # would keep `release`'s condition true regardless of `tag_validation`'s
+    # result, running it even after a red tag gate — `needs:` without it would
+    # be decoration.
+    condition = str(jobs["release"]["if"])
+    for status_function in ("always(", "success(", "failure(", "cancelled("):
+        assert status_function not in condition, (
+            f"`release`'s condition `{condition}` calls `{status_function}`, "
+            f"which overrides the implicit `success()` gate `needs: {TAG_JOB}` "
+            f"otherwise adds — a red `{TAG_JOB}` would no longer block the publish."
+        )
+
+
+def _tag_wall_run_script(jobs: dict) -> str:
+    """The `run:` text of `tag_validation`'s main step, comment lines stripped. PURE.
+
+    READ OFF THE LOADED STRING DIRECTLY, never re-dumped through
+    `yaml.safe_dump`: the dumper folds a long scalar at its default width and
+    re-escapes an embedded `"` as `\\"` when it picks a double-quoted style,
+    either of which can split or hide a fragment this check looks for — both
+    measured the hard way in an earlier draft of this test. The string
+    `yaml.safe_load` hands back has neither problem.
+
+    COMMENTS STRIPPED, so a fragment the job no longer RUNS cannot hide behind
+    a comment that still merely MENTIONS it — this file's own header, for
+    one, describes the first draft's marker expression in prose.
+    """
+    job = jobs[TAG_JOB]
+    step = next(s for s in job["steps"] if "run" in s and TAG_WALL_FILE in s["run"])
+    return "\n".join(
+        line for line in step["run"].splitlines() if not line.strip().startswith("#")
+    )
+
 
 def test_the_tag_job_runs_the_render_refusals_and_the_dedicated_suite() -> None:
     """THE WALL'S BODY, asserted loosely so a future edit cannot gut it while the
     condition and `needs:` assertions above stay green.
     """
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    # `yaml.safe_dump` FOLDS A LONG SCALAR AT ITS DEFAULT WIDTH, so fragments
-    # stay short enough that a fold inside the `run:` block cannot split one —
-    # the same reason `test_the_push_path_job_admits_a_push_to_main` above
-    # checks `"helm lint --strict"` rather than the whole command line.
-    body = yaml.safe_dump(jobs[TAG_JOB])
+    script = _tag_wall_run_script(jobs)
     for fragment in (
         "helm dependency update chart",
-        "helm lint --strict",
-        "chart/ci/values.yaml",
+        "helm lint --strict chart -f chart/ci/values.yaml",
         "helm template",
+        "chart/ci/api-versions.txt",
         TAG_WALL_FILE,
     ):
-        assert fragment in body, (
+        assert fragment in script, (
             f"`{TAG_JOB}` no longer runs `{fragment}`. It walls render refusals "
             f"only: dependency resolution, the strict lint on the fixture, the "
-            f"fixture render over the directory and the package, and "
-            f"`{TAG_WALL_FILE}`."
+            f"fixture render over the directory and the package with the API "
+            f"versions `chart/ci/api-versions.txt` declares, and `{TAG_WALL_FILE}`."
         )
+    assert "set -euo pipefail" in script, (
+        f"`{TAG_JOB}` no longer sets `-euo pipefail`; a render refusal or a "
+        f"failing test partway through the script would go unnoticed."
+    )
+    assert "|| true" not in script, (
+        f"`{TAG_JOB}` suppresses a command's exit code with `|| true`, which "
+        f"would let a render refusal or a failing test pass this wall."
+    )
     # A MARKER EXPRESSION HAS NO BUSINESS HERE — see the job's own header
     # comment for why (ledger 837's `no-test-skips`). `TAG_WALL_FILE` being a
     # positional argument is what the hook itself exempts; the dedicated
     # file's own `test_this_file_pulls_no_published_pin_and_asserts_no_count_literal`
     # is the gate that keeps running it alone honest, not a second scan here.
-    assert "pinned" not in body, (
+    assert "pinned" not in script, (
         f"`{TAG_JOB}` references `pinned`, the fixture that pulls the parent's "
         f"own published pin. The tag job renders HEAD's own version; it never "
         f"pulls that."
@@ -2552,77 +2591,24 @@ def refusal(tmp_path: Path, name: str, body: str) -> str:
 # which is a value. So the red case renames the mounted side alone — there is no
 # minted side to rename — and the overlay below is the ONE place both names meet.
 #
-# EVERY FIELD IS SET EXPLICITLY BECAUSE `refusal()` RENDERS AT THE CHART DEFAULTS.
-# `platform.enabled` and `bootstrap.create` are what reach the clause at all;
-# `gateway.adminBootstrap.tokenSecret` is set to the name `platform` mints so that
-# BOTH admin-token refusals stay silent, which is what makes the message this test
-# reads unambiguously its own.
-IAM_KEYS_OVERLAY = (
-    "platform:\n"
-    "  enabled: true\n"
-    "  bootstrap:\n"
-    "    create: true\n"
-    "    iamKeys:\n"
-    "      create: true\n"
-    "gateway:\n"
-    "  adminBootstrap:\n"
-    "    tokenSecret: admin-bootstrap-token\n"
-    "iam:\n"
-    "  keysSecret: {name}\n"
-)
-
-# A NAME THAT SHARES NO SPAN WITH THE LITERAL, and one that CONTAINS IT WHOLE. The
-# second is the discriminating one: `iam-keys-2` names a Secret the Job never mints,
-# and an implementation matching on `contains` or `hasPrefix` would let it through
-# while still refusing the first. A test carrying only the first proves nothing
-# about exactness.
+# THE NAME THE REFUSAL HALF OF THIS SCENARIO ALSO NEEDS
+# (`test_the_parent_refuses_a_renamed_iam_keys_secret`, `test_tag_wall.py`,
+# ledger 1137 split): imported from there rather than duplicated.
 A_DISJOINT_NAME = "my-own-iam-keys"
-A_NAME_THE_LITERAL_IS_A_PREFIX_OF = "iam-keys-2"
-
-# THE PHRASE THAT NAMES THE MINTED SIDE, asserted instead of the bare literal.
-# `iam-keys` is a SUBSTRING of both red-case names, so `"iam-keys" in message`
-# passes whether or not the message ever names what the Job mints — it would read
-# the adopter's own value back and call it a match.
-THE_MINTED_NAME_IN_THE_MESSAGE = "mints a Secret named exactly iam-keys"
 
 
-def test_the_parent_refuses_a_renamed_iam_keys_secret(tmp_path: Path) -> None:
-    """The Job mints `iam-keys` and `iam` mounts something else; the refusal names both.
-
-    MEASURED BEFORE THIS CLAUSE EXISTED, on helm 3.18.4 and 4.3.0 alike:
-    `example/values.yaml` plus `iam.keysSecret: my-own-iam-keys` rendered exit 0 and
-    81 objects, the Job carrying `"metadata":{"name":"iam-keys"}` and the `iam`
-    Deployment `secretName: my-own-iam-keys`. Nothing refused, and the pod would
-    stick in `ContainerCreating` on a Secret nothing created.
-
-    THE GREEN CASE IS PART OF THE TEST, because a refusal that fires on a correct
-    configuration is worse than none. An adopter who renames the Secret with
-    `iamKeys.create` FALSE is doing the supported thing — bringing their own keys
-    from Vault, SOPS or 1Password — and that render must still be the whole estate.
+def test_a_renamed_iam_keys_secret_with_the_toggle_off_still_renders_the_whole_estate(
+    tmp_path: Path,
+) -> None:
+    """THE GREEN CASE, split out from `test_the_parent_refuses_a_renamed_iam_keys_secret`
+    (ledger 1137): that test moved to `test_tag_wall.py`, which may assert no
+    literal a module's pin moves, and `ADOPTER_OBJECTS` is one. A refusal that
+    fires on a correct configuration is worse than none, so the green case stays
+    a real assertion rather than being dropped — an adopter who renames the
+    Secret with `iamKeys.create` FALSE is doing the supported thing, bringing
+    their own keys from Vault, SOPS or 1Password, and that render must still be
+    the whole estate.
     """
-    message = refusal(
-        tmp_path, "renamed-iam-keys", IAM_KEYS_OVERLAY.format(name=A_DISJOINT_NAME)
-    )
-    assert "platform.bootstrap.iamKeys.create is true" in message, message
-    assert THE_MINTED_NAME_IN_THE_MESSAGE in message, message
-    assert "iam.keysSecret" in message, message
-    assert f'"{A_DISJOINT_NAME}"' in message, message
-    # The overlay reaches THIS clause and no other — neither admin-token refusal
-    # fires, so the assertions above read a message this clause alone wrote.
-    assert "gateway.adminBootstrap.tokenSecret is empty" not in message, message
-    assert "platform.bootstrap.adminToken.secretName" not in message, message
-
-    # EXACT, NOT A PREFIX. The literal is a whole prefix of this name.
-    superset = refusal(
-        tmp_path,
-        "iam-keys-with-a-suffix",
-        IAM_KEYS_OVERLAY.format(name=A_NAME_THE_LITERAL_IS_A_PREFIX_OF),
-    )
-    assert THE_MINTED_NAME_IN_THE_MESSAGE in superset, superset
-    assert f'"{A_NAME_THE_LITERAL_IS_A_PREFIX_OF}"' in superset, superset
-
-    # THE GREEN CASE: the same rename with the toggle OFF mints nothing, so nothing
-    # disagrees, and the whole estate renders.
     documents = adopter_render(
         "-f",
         str(
@@ -3073,50 +3059,17 @@ def sub_key_block(operator: str) -> str:
     return f"    {operator}:\n      create: true\n"
 
 
-def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
+def test_every_operator_key_stated_false_still_renders_the_whole_estate(
     tmp_path: Path,
 ) -> None:
-    """ADR-0787: `operators.create` is a `platform` path, and never the parent's.
-
-    SIX RENDERS, NOT ONE, and the five sub-key renders are the part a top-level
-    refusal would miss. Each operator dependency in `platform` is declared
-    `condition: operators.<op>.create,operators.create`, and helm evaluates the
-    FIRST valid path and stops — so `operators.certManager.create: true` installs
-    cert-manager while `operators.create` is false. Measured in `platform` at step
-    3 of the operators-toggle plan: `--set operators.create=false --set
-    operators.certManager.create=true` rendered 50 objects with 6 CRDs. A parent
-    refusal reading the top-level key alone is FALSE in that shape, and
-    `test_a_refusal_that_read_the_top_level_key_alone_would_let_a_sub_key_through`
-    below constructs that narrowing and shows it passing the sub-key.
-
-    MEASURED ON `main` BEFORE THIS CLAUSE EXISTED, helm 4.3.0:
-    `--set platform.operators.certManager.create=true` rendered exit 0 and 32
-    objects — `platform.operators` is a map whose own `create` key is absent, so
-    the `$creating` guard never opened and no refusal ran.
-
-    THE GREEN CASE IS PART OF THE TEST. An adopter who writes an operator key
-    FALSE is doing the supported thing, and a refusal keyed on the key being
-    PRESENT rather than on it being TRUE would break every one of them.
+    """THE GREEN CASE, split out from
+    `test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys`
+    (ledger 1137): that test moved to `test_tag_wall.py`, which may assert no
+    literal a module's pin moves, and `ADOPTER_OBJECTS` is one. An adopter who
+    writes an operator key FALSE is doing the supported thing, and a refusal
+    keyed on the key being PRESENT rather than on it being TRUE would break
+    every one of them — which is what this render alone still proves.
     """
-    message = refusal(tmp_path, "operators-create", operators_overlay(TOP_LEVEL_BLOCK))
-    assert THE_OPERATORS_REFUSAL in message, message
-    assert "platform.operators.create" in message, message
-    assert THE_ADMIN_TOKEN_REFUSAL not in message, message
-    assert THE_DEPENDENCY_REFUSAL not in message, message
-
-    for operator in THE_FIVE_OPERATOR_SUB_KEYS:
-        message = refusal(
-            tmp_path, f"operators-{operator}", operators_overlay(sub_key_block(operator))
-        )
-        assert THE_OPERATORS_REFUSAL in message, message
-        assert f"platform.operators.{operator}.create" in message, message
-        # The sub-key opens no `platform.<name>.create`, so the guarded refusals
-        # stay shut and the assertions above read this clause's message alone.
-        assert THE_ADMIN_TOKEN_REFUSAL not in message, message
-        assert THE_DEPENDENCY_REFUSAL not in message, message
-
-    # THE GREEN CASE: every operator key stated FALSE, which is a values file the
-    # parent supports, and the whole estate still renders.
     documents = adopter_render(
         "-f",
         str(

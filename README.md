@@ -254,12 +254,19 @@ Its suite is a dedicated file, `scripts/tests/test_tag_wall.py`, not the whole
 `scripts/tests/` directory `push_validation` runs: `yadgarhq/actions`'
 `no-test-skips` hook (ledger 837) refuses any `pytest` invocation narrowed by
 `-m`/`-k`/`--deselect`, in every repository, with no exemption — so the tests
-this wall cannot carry (one that pulls the parent's own published pin, not yet
-pullable while a release is being cut; one that asserts a literal a module's
-pin moves, which a bot pin commit never updates) are moved to their own file
-rather than deselected by marker, and that file's own
-`test_this_file_pulls_no_published_pin_and_asserts_no_count_literal` keeps it
-honest. `ci.yaml`'s own `release` job, which calls `ci-release.yaml`, now
+this wall CAN carry are moved to their own file, and the ones it cannot (one
+that pulls the parent's own published pin, not yet pullable while a release
+is being cut; one that asserts an OBJECT-COUNT literal a module's pin moves —
+`ADOPTER_OBJECTS`, `EXPECTED` and the like, never a refusal's own phrase or
+which chart answered it) stay in `test_parent_chart.py`, rather than being
+deselected by marker. Two render-refusal tests split on exactly that line:
+each asserts a refusal's message AND, in a second, separately-named test, an
+`ADOPTER_OBJECTS` green case — the refusal half moved, the count half stayed.
+`test_tag_wall.py`'s own
+`test_this_file_pulls_no_published_pin_and_asserts_no_count_literal` and
+`test_no_test_in_this_file_requests_a_published_pin` keep that honest, the
+second over pytest's own resolved fixture graph rather than this file's
+source text. `ci.yaml`'s own `release` job, which calls `ci-release.yaml`, now
 `needs: tag_validation`, so a red tag gate blocks the publish rather than
 only reporting one.
 
