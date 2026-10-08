@@ -2,8 +2,9 @@
 # (ADR-0803 step B6, decision 2). An adopter who installs this chart with no
 # values file gets every module, the platform layer, autoscaling and the three
 # databases. `example/values.yaml` beside this chart restates every one of these
-# defaults, plus the one key the defaults leave to the adopter — the edge
-# certificate's issuer — and the suite holds the two files equal (K1).
+# defaults, plus the edge certificate's issuer and `chart/ci/values.yaml`'s
+# twelve `tls.enabled` switches — two things THIS file leaves to the adopter on
+# purpose (ruling 11, ADR-0845) — and the suite holds the two files equal (K1).
 #
 # THE DEFAULTS NEED FOUR OPERATORS IN THE CLUSTER: cert-manager, Envoy Gateway,
 # mariadb-operator and KEDA. The charts install none of them by default, and
@@ -13,10 +14,13 @@
 # cluster itself. OFFLINE, helm knows only the built-in groups, so a bare
 # `helm template chart` REFUSES. `ci/api-versions.txt` beside this file declares
 # the four API versions, and every shared gate in `yadgarhq/actions` that renders
-# this chart offline passes them as `--api-versions` (ADR-0806). Render it by hand
-# the same way:
+# this chart offline passes them as `--api-versions` (ADR-0806), and passes
+# `ci/values.yaml` too — its twelve `tls.enabled` switches are moving, module by
+# module (ADR-0845, ADR-0857), from each child's own default to no default at
+# all, so a render naming only the API versions stops working the day the first
+# one lands. Render it by hand the same way:
 #
-#   helm template yadgar chart $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
+#   helm template yadgar chart -f chart/ci/values.yaml $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
 #
 # Every other knob an adopter can set belongs to a child chart and is reached
 # through the child's own name — `config.shared.tlsRotation.pollSeconds`,

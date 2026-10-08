@@ -100,8 +100,9 @@ variables that change its defaults.
 (`yadgarhq/platform` — internal CA and its leaves, the edge leaf, the Gateway
 listener, Valkey, NATS and the bootstrap Jobs), autoscaling in all seven modules
 and a database in each of the three `-db` modules. 81 objects. `example/values.yaml`
-restates the same defaults so you can see every choice, and the suite holds the
-two renders equal.
+restates the same defaults, plus `chart/ci/values.yaml`'s twelve `tls.enabled`
+switches (ruling 11, ADR-0845 — the parent's own `values.yaml` states none of
+them), so you can see every choice, and the suite holds the two renders equal.
 
 **Four operators must already run in the cluster**: cert-manager, Envoy Gateway,
 mariadb-operator and KEDA. The chart installs none of them by default
@@ -109,11 +110,15 @@ mariadb-operator and KEDA. The chart installs none of them by default
 render check that refuses, naming the operator, rather than letting a sync fail
 half-way. Argo and `helm install` read the API versions from the cluster. An
 offline `helm template` knows only the built-in groups, so a bare render refuses;
-pass the four declared in `chart/ci/api-versions.txt`. The `sed` drops `#`
-comments and blank lines, which the shared reader permits in that file:
+pass the four declared in `chart/ci/api-versions.txt`, and `chart/ci/values.yaml`
+too — it states the twelve `tls.enabled` switches ADR-0845/ADR-0857 are moving
+from each child's own default to no default at all, module by module, so a
+render naming only the API versions stops working the day the first one lands.
+The `sed` drops `#` comments and blank lines, which the shared reader permits in
+that file:
 
 ```
-helm template yadgar chart $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
+helm template yadgar chart -f chart/ci/values.yaml $(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' -e 's/^/--api-versions /' chart/ci/api-versions.txt)
 ```
 
 The shared gates in `yadgarhq/actions` read the same file (ADR-0806).
@@ -218,20 +223,20 @@ runs on every commit. The packaged-chart fixture resolves dependencies with
 `helm package chart -u`, the same command `ci-release.yaml` runs, so this
 suite needs the registry reachable rather than running offline.
 
-| what                                                   | asserted as                                                                                            |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| the parent renders nothing of its own                  | an empty render with every subchart removed                                                            |
-| a default install is the whole estate (K1)             | the defaults render the adopter values' 81-object set; every example leaf equals its default           |
-| the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it           |
-| the modules alone are 32 objects                       | 3 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute             |
-| the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                  |
-| the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                            |
-| an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300 |
-| a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only    |
-| no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path            |
-| a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`       |
-| a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                 |
-| it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups             |
+| what                                                   | asserted as                                                                                                                                               |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                               |
+| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches riding along, render the adopter values' 81-object set; every example leaf equals its default |
+| the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                              |
+| the modules alone are 32 objects                       | 3 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                |
+| the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                     |
+| the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                                                                               |
+| an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300                                                    |
+| a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only                                                       |
+| no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path                                                               |
+| a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`                                                          |
+| a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                                                                    |
+| it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                |
 
 The object count is an equality rather than a ceiling on purpose. A module release
 that adds or drops an object changes what an adopter of the parent receives, and
