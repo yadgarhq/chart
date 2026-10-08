@@ -546,14 +546,418 @@ D80's all-off pass is unaffected: it writes `platform.enabled` as a bool false.
 {{- end -}}
 
 {{/*
+B-U6, PART 1 (ledger 925/770): EVERY CLIENT SECRET A MODULE NAMES MUST BE A KEY
+OF `platform.certificates.leaves`.
+
+FOUR KEYS NAME A CLIENT SECRET TODAY, VERIFIED AGAINST EACH CHART'S OWN
+VALUES AND SCHEMA RATHER THAN ASSUMED: `gateway.clientCertificate.secret`
+(one leaf shared across gateway's three upstream dials — iam, task and
+project, each gated by that dial's own `tls.enabled`), `iam.iamDb.tls.clientCertSecret`,
+`task.taskDb.tls.clientCertSecret` and `project.projectDb.tls.clientCertSecret`
+— measured at the pinned `gateway` 0.10.2, `iam` 0.10.0, `task` 0.7.0 and
+`project` 0.3.0. Each is the Secret a caller mounts to PRESENT its own client
+certificate, the opposite direction from `<dial>.tls.caSecret`, which VERIFIES
+the server and is a different key this clause says nothing about.
+
+NO NATS OR VALKEY CLIENT SECRET KEY EXISTS YET, so none is checked here. B-P2
+(chart#39) stated the broker's and the cache's TLS POSTURE at the platform
+layer; it added no client-side secret-naming key to `gateway` or `iam` —
+measured against their 0.10.2 and 0.10.0 schemas, `nats.tls` and `valkey.tls`
+each declare only a boolean `enabled`. The day one of those charts gains a
+`clientCertSecret`-shaped key, add it to `$clientSecrets` below the same way
+the four gRPC ones are.
+
+SKIPPED WHEN `platform` IS NOT A KEY OF `.Subcharts` — `platform.enabled:
+false`, or helm would not have resolved the dependency, so `leaves` does not
+exist to check against (gate [I]; measured 2026-10-08 on helm 3.18.4 and
+4.3.0: `(default dict (default dict .Subcharts.platform).Values).enabled` raises `nil pointer evaluating
+interface {}.Values` once `platform.enabled` is false and the pin carries
+`chart/ci/values.yaml`'s twelve switches). SKIPPED AGAIN WHEN
+`platform.certificates.create` is not exactly `true`, for the reason
+`certificates.yaml` itself skips: an adopter running their own CA mints these
+Secrets under a name this chart never sees.
+
+A SECRET NAME LEFT EMPTY IS NOT CHECKED. Every one of the four keys defaults
+to `""`, meaning "present no client certificate on this hop" — a valid
+configuration this clause has nothing to say about. Only a NAMED secret is
+checked against the leaf map, and the comparison is exact: `hasKey`, never a
+prefix or a substring, for the reason `test_the_parent_refuses_a_renamed_iam_keys_secret`
+already states for the admin-token pair above.
+*/}}
+{{- if hasKey .Subcharts "platform" -}}
+{{- $platformValues := (default dict .Subcharts.platform).Values -}}
+
+{{/*
+B-U6, PART 1b (ruling R7, coordinator update 2026-10-08): THE SIX SERVERS' OWN
+`tls.clientCaSecret` — the bundle each verifies a CALLER against — gets the
+same "is a key of platform.certificates.leaves" check, now that all six B-U5
+contracts are merged and the key renders (B-U5E convention item 4).
+
+A LEAF'S SECRET CARRIES THE ISSUING CA'S BUNDLE TOO, which is why any leaf
+name satisfies a `clientCaSecret`. cert-manager writes `ca.crt` — the full
+certificate of the issuer that signed the leaf — into EVERY Certificate's
+target Secret, not only `tls.crt`/`tls.key`; every leaf in this estate is
+signed by the one internal CA (`platform.certificates.issuerRef`), so every
+leaf's `ca.crt` is the SAME bundle. The convention of a server naming its OWN
+serving leaf (`iam-db.tls.clientCaSecret: iam-db-tls`) is a locality
+convention, not a requirement this clause enforces — any leaf key renders a
+usable bundle.
+
+`platform.internalCA.name` IS REFUSED BY NAME, EXPLICITLY, RATHER THAN LEFT TO
+THE GENERIC "not a key of platform.certificates.leaves" CHECK BELOW. That
+Secret is NOT a leaf — it is the CA's OWN Certificate, and cert-manager writes
+the CA's PRIVATE KEY into it (`tls.key`), not only a public bundle. Mounting
+it as a client-CA bundle hands the pod the authority to SIGN new certificates,
+a materially different risk from a typo'd name, so it gets its own sentence
+rather than sharing the generic one.
+
+THIS CHECK SITS OUTSIDE `certificates.create`, DELIBERATELY (coordinator
+review 2026-10-09): the danger is `platform.internalCA.create` minting that
+Secret at all, which is independent of whether THIS chart also issues the
+leaves under `certificates.leaves` — an adopter running `internalCA.create:
+true` with `certificates.create: false` (their own CA, somebody else's
+leaves) still must not point a `clientCaSecret` at the one Secret that holds
+the CA's private key. The GENERIC not-a-leaf check, below, still needs
+`certificates.leaves` to exist and stays inside that guard; this one does not
+read `leaves` at all, so it does not need it.
+*/}}
+{{- $internalCaName := default "yadgar-internal-ca" (default dict $platformValues.internalCA).name -}}
+{{- $clientCaSecrets := list -}}
+{{- $iamClientCa := default "" (default dict (default dict (default dict .Subcharts.iam).Values).tls).clientCaSecret -}}
+{{- if $iamClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "iam.tls.clientCaSecret" "name" $iamClientCa) -}}
+{{- end -}}
+{{- $taskClientCa := default "" (default dict (default dict (default dict .Subcharts.task).Values).tls).clientCaSecret -}}
+{{- if $taskClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "task.tls.clientCaSecret" "name" $taskClientCa) -}}
+{{- end -}}
+{{- $projectClientCa := default "" (default dict (default dict (default dict .Subcharts.project).Values).tls).clientCaSecret -}}
+{{- if $projectClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "project.tls.clientCaSecret" "name" $projectClientCa) -}}
+{{- end -}}
+{{- $iamDbClientCa := default "" (default dict (default dict (default dict (index .Subcharts "iam-db")).Values).tls).clientCaSecret -}}
+{{- if $iamDbClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "iam-db.tls.clientCaSecret" "name" $iamDbClientCa) -}}
+{{- end -}}
+{{- $taskDbClientCa := default "" (default dict (default dict (default dict (index .Subcharts "task-db")).Values).tls).clientCaSecret -}}
+{{- if $taskDbClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "task-db.tls.clientCaSecret" "name" $taskDbClientCa) -}}
+{{- end -}}
+{{- $projectDbClientCa := default "" (default dict (default dict (default dict (index .Subcharts "project-db")).Values).tls).clientCaSecret -}}
+{{- if $projectDbClientCa -}}
+{{- $clientCaSecrets = append $clientCaSecrets (dict "key" "project-db.tls.clientCaSecret" "name" $projectDbClientCa) -}}
+{{- end -}}
+{{- range $clientCaSecrets -}}
+{{- if eq .name $internalCaName -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names %q, the Secret platform.internalCA mints for the CA ITSELF, which holds the CA's "
+      "private key. Mounting it as a client-CA bundle would hand this pod the authority to sign "
+      "new certificates, not just read one. Name a leaf's Secret instead: cert-manager writes the "
+      "issuing CA's ca.crt into every Certificate's target Secret, so any key of "
+      "platform.certificates.leaves carries the same bundle this one does."))
+      .key .name) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $certsCreate := default false (default dict $platformValues.certificates).create -}}
+{{- if eq $certsCreate true -}}
+{{- $leaves := default dict (default dict $platformValues.certificates).leaves -}}
+{{- $clientSecrets := list -}}
+{{- $gatewayCallerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if $gatewayCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "gateway.clientCertificate.secret" "name" $gatewayCallerSecret) -}}
+{{- end -}}
+{{- $iamCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
+{{- if $iamCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret) -}}
+{{- end -}}
+{{- $taskCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
+{{- if $taskCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "task.taskDb.tls.clientCertSecret" "name" $taskCallerSecret) -}}
+{{- end -}}
+{{- $projectCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).clientCertSecret -}}
+{{- if $projectCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret) -}}
+{{- end -}}
+{{- range $clientSecrets -}}
+{{- if not (hasKey $leaves .name) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names the Secret %q as the client certificate it presents, and %q is not a key of "
+      "platform.certificates.leaves. The parent issues every client leaf this estate mounts under "
+      "platform.certificates.leaves (ledger 925), so a name that is not one of its keys is a Secret "
+      "cert-manager never creates: the pod mounting it sticks in ContainerCreating. Check the name "
+      "against platform.certificates.leaves for a typo in %s."))
+      .key .name .name .key) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+THE GENERIC not-a-leaf CHECK FOR `clientCaSecret`, NOW REUSING `$clientCaSecrets`
+GATHERED ABOVE. Every entry already matched against `$internalCaName`; an
+entry that WAS that name already carries its own refusal and is skipped here
+(`ne .name $internalCaName`) so a values file naming it gets one sentence,
+not two.
+*/}}
+{{- range $clientCaSecrets -}}
+{{- if and (ne .name $internalCaName) (not (hasKey $leaves .name)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names the Secret %q as the bundle it verifies a caller against, and %q is not a key of "
+      "platform.certificates.leaves. Every leaf's Secret carries the issuing CA's ca.crt, so any "
+      "leaf name renders a usable bundle; a name that is not one of platform.certificates.leaves's "
+      "keys is a Secret cert-manager never creates. Check the name against "
+      "platform.certificates.leaves for a typo in %s."))
+      .key .name .name .key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+B-U6, PART 2 (ledger 925/770, M-reaudit-B RS-5, M-reaudit3-B): A SERVER MAY NOT
+ENFORCE A HANDSHAKE ITS ONLY CALLER NEVER PRESENTS.
+
+EACH OF THE SIX gRPC SERVERS HAS EXACTLY ONE CALLER IN THIS ESTATE, VERIFIED
+AGAINST EACH CHART'S OWN DIAL CONFIG: `gateway` 0.10.2 dials `iam`, `task` and
+`project` (one `clientCertificate` shared across all three, gated per-dial by
+that dial's own `tls.enabled`); `iam` 0.10.0 dials `iam-db`; `task` 0.7.0 dials
+`task-db`; `project` 0.3.0 dials `project-db`. A server whose `tls.clientAuth`
+is `optional` or `required` while its one caller is not wired to present
+anything is an install that looks protected and is not: the server VERIFIES a
+certificate its caller never sends, which either refuses every call
+(`required`) or quietly accepts none (`optional`).
+
+"PRESENTS NOTHING" IS TWO INDEPENDENT WAYS TO FAIL, so both are checked. The
+dial's own `tls.enabled` false means the hop runs in cleartext, so no
+certificate of any kind crosses it. The dial's own `tls.enabled` true with its
+client-certificate Secret left empty means the hop is encrypted but the
+client leg presents no identity — the Secret that would carry it was never
+named.
+
+`kindIs "string"` GUARDS EVERY `clientAuth` READ BEFORE ANY COMPARISON
+(B-U5E convention item 1): the server's own schema deliberately never types
+this key (ruling R1, ADR-0847 — an `enum`/`type` would pre-empt the render
+check's own named refusal for a bare, unquoted `off`), so a bare
+`off`/`optional`/`required` read unquoted is a bool here and `has`/`eq`
+against a bool rather than a string would abort the whole render on an
+incompatible-types panic instead of reaching that server's own named
+refusal first.
+
+EACH SERVER'S OWN `clientAuth` RENDER CHECK USED TO REFUSE `optional` AND
+`required` UNCONDITIONALLY, until its own B-U5 contract lifted that refusal
+(B-U5E convention) — all six landed during this unit's own work (iam#95,
+iam-db#86, task#74, task-db#87, project#30, project-db#56), and the parent's
+pin was bumped to match before this file's test suite was finished. So
+`test_parent_chart.py` exercises each of these six clauses against the real,
+unmodified pin: `--set iam.tls.clientAuth=required` now reaches THIS
+template, not `iam`'s own `templates/render-checks.yaml`, measured
+2026-10-08. Each server's own contract ALSO now requires `tls.clientCaSecret`
+whenever `clientAuth` is `optional`/`required` — a check of its OWN, about
+which authority it verifies a caller against, not about whether a caller
+presents one — so a red case for this clause names a real leaf there too, or
+the server's own refusal fires first and names nothing this clause is about.
+*/}}
+{{- $iamTls := default dict (default dict (default dict .Subcharts.iam).Values).tls -}}
+{{- if and (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).iam).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "iam.tls.clientAuth is %q, which verifies a client certificate on every call, and gateway — "
+      "iam's only caller in this estate — presents none: gateway.iam.tls.enabled is %t and "
+      "gateway.clientCertificate.secret is %q. Set gateway.iam.tls.enabled true and name "
+      "gateway.clientCertificate.secret, or set iam.tls.clientAuth back to \"off\"."))
+      $iamTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $taskTls := default dict (default dict (default dict .Subcharts.task).Values).tls -}}
+{{- if and (kindIs "string" $taskTls.clientAuth) (has $taskTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).task).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "task.tls.clientAuth is %q, which verifies a client certificate on every call, and gateway — "
+      "task's only caller in this estate — presents none: gateway.task.tls.enabled is %t and "
+      "gateway.clientCertificate.secret is %q. Set gateway.task.tls.enabled true and name "
+      "gateway.clientCertificate.secret, or set task.tls.clientAuth back to \"off\"."))
+      $taskTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $projectTls := default dict (default dict (default dict .Subcharts.project).Values).tls -}}
+{{- if and (kindIs "string" $projectTls.clientAuth) (has $projectTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).project).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "project.tls.clientAuth is %q, which verifies a client certificate on every call, and "
+      "gateway — project's only caller in this estate — presents none: gateway.project.tls.enabled "
+      "is %t and gateway.clientCertificate.secret is %q. Set gateway.project.tls.enabled true and "
+      "name gateway.clientCertificate.secret, or set project.tls.clientAuth back to \"off\"."))
+      $projectTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $iamDbTls := default dict (default dict (default dict (index .Subcharts "iam-db")).Values).tls -}}
+{{- if and (kindIs "string" $iamDbTls.clientAuth) (has $iamDbTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "iam-db.tls.clientAuth is %q, which verifies a client certificate on every call, and iam — "
+      "iam-db's only caller in this estate — presents none: iam.iamDb.tls.enabled is %t and "
+      "iam.iamDb.tls.clientCertSecret is %q. Set iam.iamDb.tls.enabled true and name "
+      "iam.iamDb.tls.clientCertSecret, or set iam-db.tls.clientAuth back to \"off\"."))
+      $iamDbTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $taskDbTls := default dict (default dict (default dict (index .Subcharts "task-db")).Values).tls -}}
+{{- if and (kindIs "string" $taskDbTls.clientAuth) (has $taskDbTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "task-db.tls.clientAuth is %q, which verifies a client certificate on every call, and task — "
+      "task-db's only caller in this estate — presents none: task.taskDb.tls.enabled is %t and "
+      "task.taskDb.tls.clientCertSecret is %q. Set task.taskDb.tls.enabled true and name "
+      "task.taskDb.tls.clientCertSecret, or set task-db.tls.clientAuth back to \"off\"."))
+      $taskDbTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $projectDbTls := default dict (default dict (default dict (index .Subcharts "project-db")).Values).tls -}}
+{{- if and (kindIs "string" $projectDbTls.clientAuth) (has $projectDbTls.clientAuth (list "optional" "required")) -}}
+{{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).enabled -}}
+{{- $callerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).clientCertSecret -}}
+{{- if or (not $callerEnabled) (not $callerSecret) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "project-db.tls.clientAuth is %q, which verifies a client certificate on every call, and "
+      "project — project-db's only caller in this estate — presents none: "
+      "project.projectDb.tls.enabled is %t and project.projectDb.tls.clientCertSecret is %q. Set "
+      "project.projectDb.tls.enabled true and name project.projectDb.tls.clientCertSecret, or set "
+      "project-db.tls.clientAuth back to \"off\"."))
+      $projectDbTls.clientAuth $callerEnabled $callerSecret) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+B-U6, PART 3 (ledger 925/770, M-reaudit-B RS-5, M-reaudit3-B): NATS AND VALKEY,
+WHOSE `tls.clientAuth`, `tls.enabled` AND `tls.plaintext` ARE PLATFORM-OWNED
+KEYS (B-L1, the folded B-N2/B-V2 expand) THE PARENT ALONE CAN CROSS-CHECK
+AGAINST A CLIENT'S OWN DIAL FLAGS, which live in `gateway` and `iam` rather
+than in `platform`.
+
+NATS HAS NO OPTIONAL CLIENT-CERTIFICATE MODE (ADR-0854): its `verify` is
+require-and-verify only, so its `clientAuth` set is `off | required` rather
+than the three-way set every gRPC server and valkey carry — mirroring
+`platform`'s own render check. `gateway` 0.10.2 and `iam` 0.10.0 are NATS's
+only two clients in this estate (`iam` publishes cache-invalidation events;
+`gateway` subscribes), each with its own `nats.tls.enabled`. `valkey`'s only
+client in this estate is `gateway` (`gateway.valkey.tls.enabled`); no other
+module dials it.
+
+`allow_non_tls` IS A PASSTHROUGH TO THE UPSTREAM nats-server CONFIG, not a
+`platform`-owned key the way `nats.tls.enabled`/`clientAuth` are — confirmed
+against the plan (plan-final.md B-N2: "for the transport step only,
+`nats.config.merge.allow_non_tls`") and against the pinned schema: `nats.tls`
+is CLOSED (`additionalProperties: false`, only `enabled`/`clientAuth`), so
+`platform.nats.tls.allowNonTls` is refused by `platform`'s own schema before
+this template ever runs — measured 2026-10-09, `--set
+platform.nats.tls.allowNonTls=true` exits 1 with `additional properties
+'allowNonTls' not allowed`. `nats` itself (one level up) is OPEN, so
+`nats.config.merge.allow_non_tls` reaches the broker's own config the same
+way `nats.config.merge.authorization` already does for the two accounts
+`platform`'s own `values.yaml` declares.
+
+THE gRPC CLAUSES ABOVE LOST THIS GAP WHEN B-U5 LANDED; `platform` STILL HAS
+IT, because B-N2/B-V2 have not: `platform` 0.1.36 refuses any `clientAuth`
+other than `"off"`, and `enabled: true` / `plaintext: false`, UNCONDITIONALLY
+— measured 2026-10-08, `helm template ... --set
+platform.nats.tls.clientAuth=required` exits 1 at
+`platform/templates/render-checks.yaml:648` before this template runs. Each
+clause below is fixture work ahead of B-N2/B-V2, exercised in the test suite
+by rewriting the one line of a vendored `platform` chart that performs that
+self-refusal.
+*/}}
+{{- if hasKey .Subcharts "platform" -}}
+{{- $platformTlsValues := (default dict .Subcharts.platform).Values -}}
+{{- $natsTls := default dict (default dict $platformTlsValues.nats).tls -}}
+{{- $valkeyTls := default dict (default dict $platformTlsValues.valkey).tls -}}
+
+{{- if and (kindIs "string" $natsTls.clientAuth) (eq $natsTls.clientAuth "required") -}}
+{{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).enabled -}}
+{{- $iamEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).enabled -}}
+{{- if or (not $gatewayEnabled) (not $iamEnabled) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.nats.tls.clientAuth is \"required\", which verifies a client certificate on every "
+      "connection, and gateway.nats.tls.enabled is %t and iam.nats.tls.enabled is %t — NATS's only "
+      "two clients in this estate. A client whose own nats.tls.enabled is false connects in "
+      "cleartext and presents no certificate at all, so the broker cannot verify it. Set both to "
+      "true, or set platform.nats.tls.clientAuth back to \"off\"."))
+      $gatewayEnabled $iamEnabled) -}}
+{{- end -}}
+{{- end -}}
+
+{{- if and (kindIs "string" $valkeyTls.clientAuth) (has $valkeyTls.clientAuth (list "optional" "required")) -}}
+{{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).valkey).tls).enabled -}}
+{{- if not $gatewayEnabled -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.valkey.tls.clientAuth is %q, which verifies a client certificate on every "
+      "connection, and gateway.valkey.tls.enabled is false — valkey's only client in this estate. "
+      "A client with tls.enabled false connects in cleartext and presents no certificate at all, "
+      "so the cache cannot verify it. Set gateway.valkey.tls.enabled true, or set "
+      "platform.valkey.tls.clientAuth back to \"off\"."))
+      $valkeyTls.clientAuth) -}}
+{{- end -}}
+{{- end -}}
+
+{{- if and (kindIs "bool" $valkeyTls.plaintext) (not $valkeyTls.plaintext) -}}
+{{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).valkey).tls).enabled -}}
+{{- if not $gatewayEnabled -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.valkey.tls.plaintext is false, so the cache accepts only TLS connections, and "
+      "gateway.valkey.tls.enabled is false — valkey's only client in this estate dials in "
+      "cleartext. The one connection this estate makes to valkey would be refused at the socket, "
+      "not at the application. Set gateway.valkey.tls.enabled true, or set "
+      "platform.valkey.tls.plaintext back to true."))) -}}
+{{- end -}}
+{{- end -}}
+
+{{- if and (kindIs "bool" $natsTls.enabled) $natsTls.enabled -}}
+{{- $allowNonTls := (default dict (default dict (default dict $platformTlsValues.nats).config).merge).allow_non_tls -}}
+{{- if not (and (kindIs "bool" $allowNonTls) $allowNonTls) -}}
+{{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).enabled -}}
+{{- $iamEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).enabled -}}
+{{- if or (not $gatewayEnabled) (not $iamEnabled) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.nats.tls.enabled is true and platform.nats.config.merge.allow_non_tls is not true, "
+      "so the broker accepts only TLS connections, and gateway.nats.tls.enabled is %t and "
+      "iam.nats.tls.enabled is %t — NATS's only two clients in this estate. A client whose own "
+      "nats.tls.enabled is false dials in cleartext and the broker would refuse it at the socket. "
+      "Set both clients' nats.tls.enabled true, or set platform.nats.config.merge.allow_non_tls "
+      "true to let a plaintext client through the same port."))
+      $gatewayEnabled $iamEnabled) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
-AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Every refusal above `{{- if $creating -}}` is guarded on an adopter
-setting a `platform.<name>.create`; the operators clause is not, because the values
-file it exists for sets none. Raising here rather than inside the guard is what
-makes both reachable from one `fail`, which is the accumulation rule this file
-opens with. The guard itself is unmoved and still decides which refusals are
-COLLECTED — `test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
-with `{{- if true -}}` and reddens the modules-only render.
+AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Of the refusals ABOVE
+`{{- if $creating -}}` (the admin-token and `iam-keys` pair), both are guarded
+on an adopter setting a `platform.<name>.create`; the operators clause is
+not, because the values file it exists for sets none. Raising here rather
+than inside the guard is what makes both reachable from one `fail`, which is
+the accumulation rule this file opens with. The guard itself is unmoved and
+still decides which of THOSE TWO refusals are COLLECTED —
+`test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
+with `{{- if true -}}` and reddens the modules-only render. B-U6's own
+clauses, further above still, answer to none of this: each guards itself on
+`hasKey .Subcharts "<name>"` or a sibling's own dial flag, independent of
+`$creating` — they reach this same `fail` only because every refusal in this
+file accumulates into the one `$refusals` list.
 */}}
 {{- if $refusals -}}
 {{- fail (printf "\n\nyadgar: this parent chart refuses to render.\n\n%s\n" (join "\n\n" $refusals)) -}}
