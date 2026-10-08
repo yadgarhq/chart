@@ -2046,12 +2046,7 @@ def chart_with_a_vendored_line_deleted(
 
 
 def chart_with_a_vendored_line_rewritten(
-    destination: Path,
-    member: str,
-    was: str,
-    now: str,
-    subchart: str = THE_VENDORED_SUBCHART,
-    extra_replacements: list[tuple[str, str]] | None = None,
+    destination: Path, member: str, was: str, now: str, subchart: str = THE_VENDORED_SUBCHART
 ) -> Path:
     """A copy of the parent whose vendored `platform` tarball had one line rewritten.
 
@@ -2062,11 +2057,9 @@ def chart_with_a_vendored_line_rewritten(
     and repack it under the same name so the pin in `chart/Chart.yaml` still
     resolves.
 
-    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): the six gRPC
-    enforce-without-presenter clauses each simulate ONE server's own B-U5
-    contract landing, so each needs its OWN vendored tarball edited — `iam`,
-    `task`, `project`, `iam-db`, `task-db` or `task-db` — never the shared
-    `platform` one the original callers all edit.
+    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): the NATS/valkey
+    enforce-without-presenter clauses simulate `platform`'s own B-N2/B-V2
+    contract landing, the one case this helper's original caller also covers.
 
     IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
     whole chart, `charts/` included, and every edit lands inside `destination`.
@@ -2083,16 +2076,6 @@ def chart_with_a_vendored_line_rewritten(
     `chart_with_the_validate_line_rewritten` counts its own: a line that occurs
     twice would be half-rewritten and the render would show a mutation nobody
     designed.
-
-    `extra_replacements` APPLIES MORE (was, now) PAIRS TO THE SAME MEMBER, IN
-    ONE REPACK (B-U6). `task` and `task-db` each refuse `tls.clientAuth:
-    required` from a DEDICATED `{{- if eq .Values.tls.clientAuth "required" }}`
-    clause, not from the shared `{{- if ne .Values.tls.clientAuth "off" }}`
-    catch-all every other sibling uses — and `fail` aborts the whole render at
-    the FIRST clause that fires, so lifting only the catch-all leaves the
-    dedicated one standing and the render still refuses, through a different
-    sentence. Both need lifting in the one copy this helper writes; calling the
-    helper twice would copy over the first edit instead of adding to it.
     """
     import io
     import tarfile
@@ -2103,11 +2086,11 @@ def chart_with_a_vendored_line_rewritten(
     # ONE TARBALL, ASSERTED. A glob that matches zero files would otherwise make
     # this helper a no-op, and a glob that matches two would mutate whichever
     # sorted first. `[0-9]` AFTER THE HYPHEN (B-U6), not `*`: `charts/iam-*.tgz`
-    # matches `iam-db-0.9.1.tgz` too, since `iam-db-...` starts with `iam-`. The
-    # version always starts with a digit, so anchoring on that is what tells
-    # `iam` apart from `iam-db`, `task` from `task-db`, and `project` from
-    # `project-db` — `platform`, this helper's original and only subchart, has
-    # no such sibling and never exercised the ambiguity.
+    # would also match a sibling `iam-db-*.tgz`, since `iam-db-...` starts with
+    # `iam-` too. The version always starts with a digit, so anchoring on that is
+    # what would tell them apart — `platform`, this helper's only caller today,
+    # has no such sibling and does not exercise the ambiguity, but the anchor
+    # costs nothing and is correct for either shape.
     tarballs = sorted(copy.glob(f"charts/{subchart}-[0-9]*.tgz"))
     assert len(tarballs) == 1, (
         f"`charts/` holds {len(tarballs)} `{subchart}` tarball(s) — "
@@ -2127,22 +2110,18 @@ def chart_with_a_vendored_line_rewritten(
         f"would edit nothing and the render would be the unmutated one"
     )
 
-    replacements = [(was, now), *(extra_replacements or [])]
-
     rewritten = io.BytesIO()
     with tarfile.open(fileobj=rewritten, mode="w:gz") as archive:
         for entry, body in entries:
             if entry.name == member:
                 text = body.decode()
-                for one_was, one_now in replacements:
-                    assert text.count(one_was) == 1, (
-                        f"`{one_was.strip()}` occurs {text.count(one_was)} times in `{member}` "
-                        f"and exactly one was expected, so this red case is now testing "
-                        f"something else — the line moved and the edit would be a no-op "
-                        f"the render could not show"
-                    )
-                    text = text.replace(one_was, one_now, 1)
-                body = text.encode()
+                assert text.count(was) == 1, (
+                    f"`{was.strip()}` occurs {text.count(was)} times in `{member}` "
+                    f"and exactly one was expected, so this red case is now testing "
+                    f"something else — the line moved and the edit would be a no-op "
+                    f"the render could not show"
+                )
+                body = text.replace(was, now, 1).encode()
                 entry.size = len(body)
             archive.addfile(entry, io.BytesIO(body) if body is not None else None)
 
@@ -2264,110 +2243,76 @@ def test_a_mutation_helm_never_reads_is_refused_rather_than_passing_silently(
 # `platform.certificates.leaves`. PART 2 and PART 3 cover a server (or NATS or
 # valkey) enforcing a handshake its one caller in this estate never presents.
 #
-# PART 2 AND 3's RED CASES ALL VENDOR A CHART, AND THAT IS NOT A STYLE CHOICE.
-# At today's pins every one of the six gRPC servers refuses `tls.clientAuth`
-# other than `"off"` UNCONDITIONALLY (B-U5E convention), and `platform` 0.1.36
-# refuses `nats`/`valkey` TLS other than the off posture UNCONDITIONALLY
-# (B-L1's folded B-N2/B-V2 expand) — measured 2026-10-08: `--set
-# iam.tls.clientAuth=required` exits 1 inside `iam`'s own
-# `templates/render-checks.yaml`, before `_validate.tpl` is ever reached, and
-# the same is true of all five siblings and of `platform`'s own nats/valkey
-# arm. So a red case built from an UNMODIFIED pin would be testing that
-# self-refusal, not the parent's clause — the exact false-positive
-# `chart_with_a_vendored_line_rewritten` exists to let this suite avoid. Each
-# case below lifts ONLY that one self-refusal, in a vendored copy, which is
-# the K-8 "fixture ahead of contract" shape: the parent states the cross-check
-# before the contract that makes it reachable through an unmodified pin lands.
-
-THE_SERVER_SELF_REFUSAL_LINE = '{{- if ne .Values.tls.clientAuth "off" }}\n'
-
-# `task` AND `task-db` EACH CARRY A DEDICATED `eq ... "required"` CLAUSE
-# AHEAD OF the shared catch-all `THE_SERVER_SELF_REFUSAL_LINE` refuses, so
-# lifting only the catch-all leaves that dedicated clause standing — see
-# `chart_with_a_vendored_line_rewritten`'s own comment on `extra_replacements`.
-# `iam`, `project`, `iam-db` and `project-db` have no such dedicated clause
-# (measured against each one's own pinned `render-checks.yaml`), so their
-# entries below pass no `extra_replacements`.
-THE_DEDICATED_REQUIRED_CLAUSE_LINE = '{{- if eq .Values.tls.clientAuth "required" }}\n'
-
+# PART 2 NEEDS NO VENDORING, UNLIKE PART 3. All six B-U5 contracts merged
+# during this unit's own work (iam#95, iam-db#86, task#74, task-db#87,
+# project#30, project-db#56) and the parent's auto-pin bump landed — rebased
+# onto it and re-ran `helm dependency update chart` before this suite was
+# finished — so every one of the six servers' own `clientAuth` render check
+# now accepts `optional`/`required` directly, measured 2026-10-08. Each one
+# ALSO now requires `tls.clientCaSecret` whenever `clientAuth` is
+# `optional`/`required` (the server's OWN verifying-side check, not this
+# clause's); every case below sets it to a real leaf key so that check passes
+# and the render reaches `_validate.tpl`'s PART 2 clause on its own premise —
+# the caller's missing presentation — rather than on the server's.
+#
 # Every key or dial path below is read off the pinned tarballs, never assumed:
 # `gateway` 0.10.2 dials `iam`, `task` and `project`, one `clientCertificate`
-# shared across all three; `iam` 0.9.2 dials `iam-db`; `task` 0.6.1 dials
-# `task-db`; `project` 0.2.1 dials `project-db`.
+# shared across all three; `iam` 0.10.0 dials `iam-db`; `task` 0.7.0 dials
+# `task-db`; `project` 0.3.0 dials `project-db`.
 GRPC_ENFORCE_WITHOUT_PRESENTER_CASES = [
     pytest.param(
-        "iam",
-        "iam:\n  tls:\n    clientAuth: required\ngateway:\n  iam:\n    tls:\n      enabled: false\n",
+        "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
+        "gateway:\n  iam:\n    tls:\n      enabled: false\n",
         ['iam.tls.clientAuth is "required"', "gateway.iam.tls.enabled is false"],
-        [],
         id="iam-from-gateway",
     ),
     pytest.param(
-        "task",
-        "task:\n  tls:\n    clientAuth: required\ngateway:\n  task:\n    tls:\n      enabled: false\n",
+        "task:\n  tls:\n    clientAuth: required\n    clientCaSecret: task-tls\n    clientCaSecretKey: ca.crt\n"
+        "gateway:\n  task:\n    tls:\n      enabled: false\n",
         ['task.tls.clientAuth is "required"', "gateway.task.tls.enabled is false"],
-        [(THE_DEDICATED_REQUIRED_CLAUSE_LINE, "{{- if false }}\n")],
         id="task-from-gateway",
     ),
     pytest.param(
-        "project",
-        "project:\n  tls:\n    clientAuth: required\ngateway:\n  project:\n    tls:\n      enabled: false\n",
+        "project:\n  tls:\n    clientAuth: required\n    clientCaSecret: project-tls\n    clientCaSecretKey: ca.crt\n"
+        "gateway:\n  project:\n    tls:\n      enabled: false\n",
         ['project.tls.clientAuth is "required"', "gateway.project.tls.enabled is false"],
-        [],
         id="project-from-gateway",
     ),
     pytest.param(
-        "iam-db",
-        "iam-db:\n  tls:\n    clientAuth: required\niam:\n  iamDb:\n    tls:\n      enabled: false\n",
+        "iam-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
+        "iam:\n  iamDb:\n    tls:\n      enabled: false\n",
         ['iam-db.tls.clientAuth is "required"', "iam.iamDb.tls.enabled is false"],
-        [],
         id="iam-db-from-iam",
     ),
     pytest.param(
-        "task-db",
-        "task-db:\n  tls:\n    clientAuth: required\ntask:\n  taskDb:\n    tls:\n      enabled: false\n",
+        "task-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: task-db-tls\n    clientCaSecretKey: ca.crt\n"
+        "task:\n  taskDb:\n    tls:\n      enabled: false\n",
         ['task-db.tls.clientAuth is "required"', "task.taskDb.tls.enabled is false"],
-        [(THE_DEDICATED_REQUIRED_CLAUSE_LINE, "{{- if false }}\n")],
         id="task-db-from-task",
     ),
     pytest.param(
-        "project-db",
-        "project-db:\n  tls:\n    clientAuth: required\nproject:\n  projectDb:\n    tls:\n      enabled: false\n",
+        "project-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: project-db-tls\n"
+        "    clientCaSecretKey: ca.crt\nproject:\n  projectDb:\n    tls:\n      enabled: false\n",
         ['project-db.tls.clientAuth is "required"', "project.projectDb.tls.enabled is false"],
-        [],
         id="project-db-from-project",
     ),
 ]
 
 
-@pytest.mark.parametrize(
-    ("subchart", "overlay_body", "expected_substrings", "extra_replacements"), GRPC_ENFORCE_WITHOUT_PRESENTER_CASES
-)
+@pytest.mark.parametrize(("overlay_body", "expected_substrings"), GRPC_ENFORCE_WITHOUT_PRESENTER_CASES)
 def test_a_server_enforcing_clientauth_with_no_presenter_refuses(
-    tmp_path: Path,
-    subchart: str,
-    overlay_body: str,
-    expected_substrings: list[str],
-    extra_replacements: list[tuple[str, str]],
+    tmp_path: Path, overlay_body: str, expected_substrings: list[str]
 ) -> None:
     """B-U6 PART 2: the parent refuses a server `clientAuth` its one caller never presents.
 
-    `subchart`'s OWN self-refusal is lifted in a vendored copy — see the module
-    comment above for why an unmodified pin cannot reach this clause at all.
-    The caller's dial is left `tls.enabled: false`, which is "presents nothing"
-    read one of its two ways; `test_an_empty_caller_secret_also_counts_as_no_presenter`
-    below is the other.
+    Directly against the real pin, no vendoring — see the module comment
+    above. The caller's dial is left `tls.enabled: false`, which is "presents
+    nothing" read one of its two ways;
+    `test_an_empty_caller_secret_also_counts_as_no_presenter` below is the
+    other.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        f"{subchart}/templates/render-checks.yaml",
-        THE_SERVER_SELF_REFUSAL_LINE,
-        "{{- if false }}\n",
-        subchart,
-        extra_replacements,
-    )
     values = overlay(tmp_path / "no-presenter.yaml", overlay_body)
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     for substring in expected_substrings:
         assert substring in result.stderr, result.stderr
@@ -2382,18 +2327,12 @@ def test_an_empty_caller_secret_also_counts_as_no_presenter(tmp_path: Path) -> N
     none. Only `iam` here, as the representative case; the other five pairs
     share the same two-armed `or` in `_validate.tpl`.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "iam/templates/render-checks.yaml",
-        THE_SERVER_SELF_REFUSAL_LINE,
-        "{{- if false }}\n",
-        "iam",
-    )
     values = overlay(
         tmp_path / "enabled-but-empty-secret.yaml",
-        "iam:\n  tls:\n    clientAuth: required\ngateway:\n  iam:\n    tls:\n      enabled: true\n",
+        "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
+        "gateway:\n  iam:\n    tls:\n      enabled: true\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert 'iam.tls.clientAuth is "required"' in result.stderr, result.stderr
     assert 'gateway.clientCertificate.secret is ""' in result.stderr, result.stderr
@@ -2402,30 +2341,22 @@ def test_an_empty_caller_secret_also_counts_as_no_presenter(tmp_path: Path) -> N
 def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp_path: Path) -> None:
     """THE MUTATION CHECK'S GREEN HALF, for the representative `iam` pair.
 
-    Same vendored chart as the red case above — `iam`'s own self-refusal lifted
-    the same way — with `gateway.iam.tls.enabled: true` and
-    `gateway.clientCertificate.secret` named at a real leaf key
+    Same values as the red case above, with `gateway.iam.tls.enabled: true`
+    and `gateway.clientCertificate.secret` named at a real leaf key
     (`platform.certificates.leaves` carries `gateway-client-tls`, verified
     against `platform` 0.1.36's `values.yaml`). Removing the "no presenter"
     half of PART 2's `or` is exactly what this proves green: the render is
     exit 0, so the clause this suite is adding is reachable in both directions.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "iam/templates/render-checks.yaml",
-        THE_SERVER_SELF_REFUSAL_LINE,
-        "{{- if false }}\n",
-        "iam",
-    )
     values = overlay(
         tmp_path / "a-real-presenter.yaml",
         (
-            "iam:\n  tls:\n    clientAuth: required\n"
+            "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
             "gateway:\n  iam:\n    tls:\n      enabled: true\n"
             "  clientCertificate:\n    secret: gateway-client-tls\n"
         ),
     )
-    documents = render(str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert documents
 
 
