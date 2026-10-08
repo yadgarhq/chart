@@ -67,7 +67,7 @@ from test_parent_chart import (
     THE_ADMIN_TOKEN_REFUSAL,
     THE_DELETED_OPERATORS_KEY_REFUSAL,
     THE_DEPENDENCY_REFUSAL,
-    THE_FIVE_OPERATOR_SUB_KEYS,
+    THE_OPERATOR_SUB_KEYS,
     THE_OPERATORS_REFUSAL,
     THE_OPERATORS_SHAPE_REFUSAL,
     THE_PARENT,
@@ -410,7 +410,7 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
 ) -> None:
     """ADR-0787: `operators.create` is a `platform` path, and never the parent's.
 
-    SIX RENDERS, NOT ONE, and the five sub-key renders are the part a top-level
+    SEVEN RENDERS, NOT ONE, and the six sub-key renders are the part a top-level
     refusal would miss. Each operator dependency in `platform` is declared
     `condition: operators.<op>.create,operators.create`, and helm evaluates the
     FIRST valid path and stops — so `operators.certManager.create: true` installs
@@ -438,7 +438,7 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
     assert THE_ADMIN_TOKEN_REFUSAL not in message, message
     assert THE_DEPENDENCY_REFUSAL not in message, message
 
-    for operator in THE_FIVE_OPERATOR_SUB_KEYS:
+    for operator in THE_OPERATOR_SUB_KEYS:
         message = refusal(
             tmp_path, f"operators-{operator}", operators_overlay(sub_key_block(operator))
         )

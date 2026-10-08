@@ -353,8 +353,9 @@ LADDER = {
 # visible — `autoscaling.enabled` and `database.create` are sibling charts' keys —
 # so each probe is asserted against the OBJECTS in the same render.
 #
-# FOUR PAIRS (three until ADR-0820), AND THE COUNT IS PERMANENT RATHER THAN
-# PENDING A PIN. `plans/the-platform-layer-in-the-charts.md` states three,
+# FOUR PAIRS SINCE ADR-0820 (three before it). THE COUNT MOVES ONLY WHEN
+# `platform` ADDS A CROSS-CHART PROBE, NEVER WITH AN ORDINARY PIN.
+# `plans/the-platform-layer-in-the-charts.md` states three,
 # written before ADR-0820, for the same reason: `probes.envoyGateway` against
 # `gatewayListener.create` does not belong at this scope. BOTH halves of that
 # pair are `platform`'s OWN keys. `platform` can see them both, and its own
@@ -3074,9 +3075,9 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
     )
 
 
-# ── ADR-0787: the parent offers no operators path, and refuses six keys ───────
+# ── ADR-0787: the parent offers no operators path, and refuses seven keys ────
 #
-# THE FIVE SUB-KEY SPELLINGS, READ OFF `yadgarhq/platform` AND NOT OFF THE PARENT'S
+# THE SIX SUB-KEY SPELLINGS, READ OFF `yadgarhq/platform` AND NOT OFF THE PARENT'S
 # TEMPLATE. They are the second path of each operator dependency's
 # `condition: operators.<op>.create,operators.create` in `platform`'s own
 # `chart/Chart.yaml`, verified on `origin/feat/operators-toggle-step1`. The
@@ -3085,42 +3086,129 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
 # `platform` accepts — not a copy of the implementation it tests. A test that built
 # its inputs out of the template's own list would pass whatever that list said.
 #
-# THEY CANNOT BE READ OFF THE VENDORED TARBALL, which is the usual way this suite
-# checks an assumption about `platform` (see
-# `test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes`). `platform`
-# 0.1.8 is the pin `chart/Chart.yaml` carries and it has no `operators` key at all:
-# steps 1 to 6 of the operators-toggle plan are unmerged. A drift gate against the
-# tarball would therefore be red today rather than green, so none is built. When a
-# `platform` version carrying `operators` is pinned here, that gate becomes
-# constructible and this comment is its trigger.
+# A DRIFT GATE AGAINST THE VENDORED TARBALL NOW EXISTS, below this tuple:
+# `test_the_operator_sub_keys_are_the_ones_the_pinned_platform_declares` reads
+# `platform/Chart.yaml` off `chart/charts/platform-*.tgz` directly — never off
+# this tuple — and compares the set of operator condition paths it declares
+# against this tuple. `platform` 0.1.8, the pin this comment originally named
+# as the trigger, had no `operators` key at all; `platform` 0.1.36, the pin
+# today, carries `operators` with SIX condition paths — `certManager`, `keda`,
+# `mariadbOperator`, `envoyGateway`, `argoCd` AND `prometheus` — and this tuple
+# now names all six, so the gate is green. `prometheus` joined at `platform`
+# 0.1.21 (ADR-0820). Ledger 1083's D-C3 sweep (opus review) ruled it IN SCOPE
+# for this tuple rather than a follow-up: `test_tag_wall.py:441` loops over
+# EVERY member of this tuple to build one refusal render per sub-key, so a
+# member missing here is a render `test_tag_wall.py` never builds, not an
+# inert spelling. Before this commit `prometheus` was simply absent from the
+# tuple — not a drop this suite could see, since nothing here compared the
+# tuple against `platform`'s own declared set — which is the gap this gate
+# closes. Mutation-tested below (see the PR body for quoted output): dropping
+# any one of the six, or adding a bogus seventh, now reddens
+# `test_the_operator_sub_keys_are_the_ones_the_pinned_platform_declares`.
 #
-# LEDGER 1083's D-C3 SWEEP MEASURED THAT TRIGGER AS MET AND LEFT THE GATE
-# UNBUILT, deliberately. `platform` 0.1.36, the pin today, DOES carry
-# `operators`, and its `Chart.yaml` dependencies name SIX condition paths,
-# not five: `certManager`, `keda`, `mariadbOperator`, `envoyGateway`,
-# `argoCd` AND `prometheus` (read off `platform/Chart.yaml` directly).
-# `prometheus` joined at `platform` 0.1.21 (ADR-0820), after this tuple was
-# written, and this tuple was never grown to six. The section header above
-# ("refuses six keys") is NOT the same six: `test_tag_wall.py`'s
-# `test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys`
-# spells out "SIX RENDERS, NOT ONE" as one top-level `operators.create`
-# render plus the five sub-key renders this tuple drives — so the header's
-# six and this tuple's five already agree; `prometheus` is absent from
-# BOTH, not a header/tuple mismatch.
-#
-# Dropping `argoCd` from this five-member tuple survives this file's full
-# suite (measured on this worktree: `1 failed, 246 passed`, the one failure
-# being `test_kind_up.py`'s environmental `shellcheck`-off-`PATH` case,
-# unrelated) — every usage either takes `THE_FIVE_OPERATOR_SUB_KEYS[0]`
-# alone (unaffected by what the rest of the tuple holds) or iterates the
-# whole tuple to render `operators.create: false` beside every per-key
-# `false` (ADR-0787's global toggle already renders the all-off estate
-# regardless of which, or how many, redundant per-key `false` lines ride
-# along). Building the drift gate the trigger above anticipates means first
-# deciding whether this suite's ADR-0787 enumeration should grow to cover
-# `prometheus` too — a decision, not a typo fix, filed rather than made
-# here.
-THE_FIVE_OPERATOR_SUB_KEYS = ("certManager", "keda", "mariadbOperator", "envoyGateway", "argoCd")
+# `test_a_platform_that_dropped_an_operator_reddens_the_sub_key_gate` is the
+# gate's own red case: it drops the `prometheus` dependency from a COPY of the
+# vendored `platform/Chart.yaml` and asserts the declared set no longer equals
+# this tuple — proving `operator_sub_keys_platform_declares` is sensitive to a
+# real `platform`-side change and not a hardcoded echo of this tuple.
+THE_OPERATOR_SUB_KEYS = (
+    "certManager",
+    "keda",
+    "mariadbOperator",
+    "envoyGateway",
+    "argoCd",
+    "prometheus",
+)
+
+
+def vendored_platform_chart(chart: Path, destination: Path) -> Path:
+    """Unpacks the one vendored `platform` tarball under `<chart>/charts/` into
+    `destination` and returns the extracted `platform/` directory.
+
+    ONE TARBALL, ASSERTED — same discipline as
+    `chart_with_a_vendored_line_rewritten`: a glob matching zero or two
+    tarballs would make this helper silently read nothing, or the wrong one.
+    """
+    import tarfile
+
+    tarballs = sorted(chart.glob(f"charts/{THE_VENDORED_SUBCHART}-*.tgz"))
+    assert len(tarballs) == 1, (
+        f"`{chart}/charts/` holds {len(tarballs)} `{THE_VENDORED_SUBCHART}` "
+        f"tarball(s) — {[path.name for path in tarballs]} — and this helper reads "
+        f"exactly one. Run `helm dependency update chart` first; nothing under "
+        f"`chart/charts/` is committed."
+    )
+    with tarfile.open(tarballs[0], "r:gz") as archive:
+        archive.extractall(destination)
+    return destination / THE_VENDORED_SUBCHART
+
+
+def operator_sub_keys_platform_declares(platform: Path) -> set[str]:
+    """The operator sub-keys `platform`'s own `Chart.yaml` names, read off its
+    dependencies' `condition:` paths — never off `THE_OPERATOR_SUB_KEYS`.
+
+    EACH OPERATOR DEPENDENCY'S `condition` IS THE TWO-PATH STRING
+    `operators.<key>.create,operators.create`; the middle segment of the
+    first path is the sub-key. A dependency with a different shape (`nats`'s
+    `condition` is `nats.create` alone, one path) names no sub-key and is
+    excluded — this is what keeps the count at the operators, not at every
+    dependency `platform` carries.
+    """
+    chart_yaml = yaml.safe_load((platform / "Chart.yaml").read_text())
+    keys: set[str] = set()
+    for dependency in chart_yaml.get("dependencies", []):
+        paths = str(dependency.get("condition", "")).split(",")
+        if len(paths) != 2 or paths[1] != "operators.create":
+            continue
+        segments = paths[0].split(".")
+        if len(segments) == 3 and segments[0] == "operators" and segments[2] == "create":
+            keys.add(segments[1])
+    return keys
+
+
+def test_the_operator_sub_keys_are_the_ones_the_pinned_platform_declares(
+    tmp_path: Path,
+) -> None:
+    """ADR-0787's drift gate (ledger 1083, opus review ruling: in scope for this
+    tuple). Reads `platform/Chart.yaml` off the vendored tarball directly, so
+    a `platform` pin that adds or drops an operator dependency, or a tuple
+    edit that falls out of step with one, reddens this — not a restatement of
+    `THE_OPERATOR_SUB_KEYS`, an independent census of what `platform` itself
+    declares.
+    """
+    platform = vendored_platform_chart(CHART, tmp_path / "platform")
+    declared = operator_sub_keys_platform_declares(platform)
+    assert declared == set(THE_OPERATOR_SUB_KEYS), (declared, THE_OPERATOR_SUB_KEYS)
+
+
+def test_a_platform_that_dropped_an_operator_reddens_the_sub_key_gate(
+    tmp_path: Path,
+) -> None:
+    """The gate above's own red case, in the OTHER direction from a tuple edit:
+    a `platform` that stopped declaring one operator dependency must fail the
+    equality above, proving `operator_sub_keys_platform_declares` reads the
+    real `Chart.yaml` rather than echoing `THE_OPERATOR_SUB_KEYS` back at
+    itself. `chart_with_a_vendored_line_deleted` drops the `prometheus`
+    dependency's four lines from a COPY of the vendored `platform/Chart.yaml`;
+    nothing else in the copy changes.
+    """
+    copy = chart_with_a_vendored_line_deleted(
+        tmp_path,
+        "platform/Chart.yaml",
+        "- condition: operators.prometheus.create,operators.create\n"
+        "  name: prometheus\n"
+        "  repository: https://prometheus-community.github.io/helm-charts\n"
+        "  version: 29.27.0\n",
+    )
+    platform = vendored_platform_chart(copy, tmp_path / "mutated-platform")
+    declared = operator_sub_keys_platform_declares(platform)
+    assert "prometheus" not in declared, declared
+    assert declared != set(THE_OPERATOR_SUB_KEYS), (
+        "dropping `prometheus` from the vendored platform/Chart.yaml left the "
+        f"declared set equal to THE_OPERATOR_SUB_KEYS: {declared}"
+    )
+    assert declared == set(THE_OPERATOR_SUB_KEYS) - {"prometheus"}, declared
+
 
 # THE OVERLAY SETS `platform.enabled` AND THE ADMIN TOKEN, AND BOTH ARE
 # LOAD-BEARING RATHER THAN TIDY. Without them the top-level case proves nothing:
@@ -3187,7 +3275,7 @@ def test_every_operator_key_stated_false_still_renders_the_whole_estate(
                 "platform:\n  operators:\n    create: false\n"
                 + "".join(
                     f"    {operator}:\n      create: false\n"
-                    for operator in THE_FIVE_OPERATOR_SUB_KEYS
+                    for operator in THE_OPERATOR_SUB_KEYS
                 ),
             )
         ),
@@ -3642,7 +3730,7 @@ def test_a_refusal_that_read_the_top_level_key_alone_would_let_a_sub_key_through
         copy,
         tmp_path,
         "narrowed-sub-key.yaml",
-        operators_overlay(sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+        operators_overlay(sub_key_block(THE_OPERATOR_SUB_KEYS[0])),
     )
     assert through.returncode == 0, (
         "the narrowed refusal still refused a sub-key, so this red case is not "
@@ -3671,7 +3759,7 @@ def test_removing_the_operators_refusal_lets_both_shapes_render(tmp_path: Path) 
     )
     for name, block in [
         ("removed-top-level.yaml", TOP_LEVEL_BLOCK),
-        ("removed-sub-key.yaml", sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+        ("removed-sub-key.yaml", sub_key_block(THE_OPERATOR_SUB_KEYS[0])),
     ]:
         result = rendered(copy, tmp_path, name, operators_overlay(block))
         assert result.returncode == 0, (
@@ -3701,7 +3789,7 @@ def test_the_operators_refusal_is_nil_safe_with_every_subchart_removed(tmp_path:
         copy,
         tmp_path,
         "stripped-sub-key.yaml",
-        operators_overlay(sub_key_block(THE_FIVE_OPERATOR_SUB_KEYS[0])),
+        operators_overlay(sub_key_block(THE_OPERATOR_SUB_KEYS[0])),
     )
     assert result.returncode != 0, (
         "the operators clause refused nothing over a tree with no subchart values"
@@ -3712,7 +3800,7 @@ def test_the_operators_refusal_is_nil_safe_with_every_subchart_removed(tmp_path:
         )
     assert THE_OPERATORS_REFUSAL in result.stderr, result.stderr
     assert (
-        f"platform.operators.{THE_FIVE_OPERATOR_SUB_KEYS[0]}.create" in result.stderr
+        f"platform.operators.{THE_OPERATOR_SUB_KEYS[0]}.create" in result.stderr
     ), result.stderr
 
 
