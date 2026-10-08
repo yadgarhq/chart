@@ -5124,10 +5124,6 @@ def operators_chart(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tarball
 
 
-def operators_render(chart: Path, values_object: dict, destination: Path) -> list[dict]:
-    return [document for _, document in operators_sources(chart, values_object, destination)]
-
-
 def operators_sources(chart: Path, values_object: dict, destination: Path) -> list[tuple[str, dict]]:
     """Each rendered object with the chart it came from: a subchart name, or a platform template."""
     values = overlay(destination / "operators-values.yaml", yaml.safe_dump(values_object))
@@ -5288,12 +5284,42 @@ def test_every_operators_example_key_is_one_platform_declares(operators_chart: P
     assert undeclared_leaves(values_object, platform_declared(operators_chart), "platform") == []
 
 
-def test_a_misspelt_argo_cd_key_is_named_and_would_install_argo_cd(operators_chart: Path, tmp_path: Path) -> None:
-    """THE RED CASE: `argoCD` is ignored by helm, so Argo CD installs; the gate names it."""
+def schema_refusal_names(stderr: str, chart: str, path_segment: str, key: str) -> bool:
+    """`stderr` is a helm schema refusal naming `chart`, `path_segment` and `key`. PURE.
+
+    TOLERANT OF BOTH VALIDATOR SHAPES, so a helm bump does not redden this on
+    its own: helm 4.3.0 writes `at '/<path_segment>': additional properties
+    '<key>' not allowed`, and helm 3.18.4 writes `<path_segment>: Additional
+    property <key> is not allowed`, with no quotes around either name. Plain
+    substrings catch both; a regex anchored to one shape would not.
+    """
+    return (
+        "values don't meet the specifications of the schema(s)" in stderr
+        and f"{chart}:" in stderr
+        and path_segment in stderr
+        and key in stderr
+    )
+
+
+def test_a_misspelt_argo_cd_key_reddens_the_closed_operators_schema(operators_chart: Path, tmp_path: Path) -> None:
+    """THE RED CASE: `platform`'s `operators` schema is closed (since 0.1.33), so a typo refuses.
+
+    `argoCD` no longer installs Argo CD by being ignored — that was true before
+    the pin closed the schema, and the render refuses before anything installs.
+    Two gates still name the same typo for two different reasons:
+    `undeclared_leaves` against `platform_declared` (this suite's own
+    leaf-recognition check, independent of any chart's schema), and the
+    `operators` schema's own refusal.
+    """
     values_object = {"operators": {"create": True, "argoCD": {"create": False}}}
     failures = undeclared_leaves(values_object, platform_declared(operators_chart), "platform")
     assert len(failures) == 1 and "`operators.argoCD.create`" in failures[0], failures
-    assert argo_cd_objects(operators_render(operators_chart, values_object, tmp_path)) != []
+    values = overlay(tmp_path / "operators-values.yaml", yaml.safe_dump(values_object))
+    result = helm(
+        "template", "operators", str(operators_chart), "-n", OPERATORS_NAMESPACE, "--include-crds", "-f", str(values)
+    )
+    assert result.returncode != 0, result.stdout
+    assert schema_refusal_names(result.stderr, "platform", "operators", "argoCD"), result.stderr
 
 
 # ─── the kind example ──────────────────────────────────────────────────────────
