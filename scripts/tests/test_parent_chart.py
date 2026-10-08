@@ -1692,8 +1692,8 @@ def overlay(destination: Path, body: str) -> Path:
     """One variant, written as a second `-f` on top of R5 rather than as a copy.
 
     A COPY WOULD DRIFT. Every red case below changes one thing about the adopter
-    values, and a second full file is a second place the ten `create` toggles and
-    the twelve leaves have to be kept in step with `example/values.yaml`.
+    values, and a second full file is a second place the eleven `create` toggles
+    and the twelve leaves have to be kept in step with `example/values.yaml`.
     """
     destination.write_text(body)
     return destination
@@ -2233,7 +2233,7 @@ def rungs(documents: list[dict]) -> dict[str, list[str]]:
     """Ladder value -> every certificate holding it. PURE.
 
     SCOPED TO THE CERTIFICATES THAT ARE NOT `isCA`, which is the difference between
-    twelve objects and eleven values rather than an omission.
+    fourteen objects and thirteen values rather than an omission.
     """
     index: dict[str, list[str]] = {}
     for document in certificates(documents):
@@ -2311,9 +2311,10 @@ def test_a_fifteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None
 def test_two_leaves_sharing_a_rung_redden_the_ladder_gate(tmp_path: Path) -> None:
     """THE OTHER HALF OF THE INVARIANT, which a count alone cannot see.
 
-    Twelve objects holding eleven distinct values is what the gate asserts. Two
-    leaves moved onto one rung keeps the object count at twelve and collapses the
-    ladder, and the pairwise clause is the only thing that reports it.
+    Fourteen objects holding thirteen distinct values is what the gate asserts.
+    Two leaves moved onto one rung keeps the object count at fourteen and
+    collapses the ladder, and the pairwise clause is the only thing that reports
+    it.
     """
     values = overlay(
         tmp_path / "a-shared-rung.yaml",
@@ -2569,7 +2570,7 @@ def test_a_probe_the_estate_gained_with_no_pair_reddens_the_denominator() -> Non
 
 
 def test_every_probe_agrees_with_the_toggle_that_renders_what_it_probes(tmp_path: Path) -> None:
-    """THREE PAIRS, and three is the permanent number — `AGREEMENT_PAIRS_AT_R5` says why."""
+    """FOUR PAIRS, and four is the permanent number — `AGREEMENT_PAIRS_AT_R5` says why."""
     failures = agreement_failures(tmp_path)
     assert failures == [], "\n".join(failures)
 
@@ -2601,7 +2602,7 @@ def test_an_object_with_no_probe_reddens_the_agreement_gate(tmp_path: Path) -> N
 
     An explicit `false` is always honoured — losing a diagnostic is a choice an
     adopter is entitled to make — so this is the constructible way to have the
-    objects without the probe. The gate must see the twelve Certificates and the
+    objects without the probe. The gate must see the fourteen Certificates and the
     absent probe and name both.
     """
     documents = adopter_render(
@@ -3688,7 +3689,7 @@ def test_the_operators_refusal_is_nil_safe_with_every_subchart_removed(tmp_path:
 def test_the_adopter_values_ask_for_no_operator() -> None:
     """ADR-0784 excludes `operators.create` from `example/values.yaml` BY NAME.
 
-    R5 stays 81 and the register key is excluded, so the adopter file must carry no
+    R5 stays 83 and the register key is excluded, so the adopter file must carry no
     operators key of any kind. Asserted on the parsed file rather than on a grep,
     because a commented-out key is not a key and a nested one under another block
     is.
@@ -4641,7 +4642,24 @@ def test_a_pin_with_no_global_at_all_names_an_unrecognised_hostname(tmp_path: Pa
 
 
 def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
-    """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone."""
+    """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone.
+
+    A SECOND, INDEPENDENT ASSERTION JOINS THE ORIGINAL ONE (ledger 1083's D-C3
+    sweep), and the original stays rather than being replaced. `missing` is
+    `[kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]`, so a
+    member DROPPED from `WHOLE_ESTATE_KINDS` is dropped from `missing`'s own
+    search space in the same edit: that check cannot see a drop of ANY of the
+    six, Gateway/EnvoyProxy/MariaDB included, once this second assertion is the
+    only one left — measured by removing the first and confirming all six drops
+    survive. `EXPECTED` is independent of `WHOLE_ESTATE_KINDS` (it is the
+    modules-only census, asserted elsewhere on its own renders), so comparing
+    against it catches a drop of Certificate, ScaledObject or Job — the three
+    the first assertion's subset never named — while the first assertion keeps
+    catching a drop of Gateway, EnvoyProxy or MariaDB, which this one alone
+    does not (it would still read true with any one of those three gone from
+    both `EXPECTED` and the render, and `EXPECTED` cannot be edited to add a
+    platform-layer kind without breaking every other test that reads it).
+    """
     tarball = pulled(A_PRE_B6_PIN, tmp_path / "old")
     result = example_render(tarball, example_source()["helm"]["valuesObject"], tmp_path)
     assert result.returncode == 0, result.stderr
@@ -4649,6 +4667,10 @@ def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
     assert len(documents) == A_PRE_B6_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
     missing = [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]
     assert {"Gateway", "EnvoyProxy", "MariaDB"} <= set(missing), missing
+    assert set(kinds(documents)) == set(EXPECTED), (
+        "the pre-B6 pin's render carries a kind outside the modules-only set, so "
+        f"it is not proof the whole-estate layer is absent: {dict(kinds(documents))}"
+    )
 
 
 # ------------- 10. the operators and kind examples, and every example's retry (ADR-0820)
