@@ -72,19 +72,19 @@ dependencies:
     version: 0.9.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
-    version: 0.8.0
+    version: 0.9.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
     version: 0.2.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.4.0
+    version: 0.5.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.6.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.7.0
+    version: 0.8.0
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.
