@@ -243,7 +243,7 @@ API_VERSIONS = tuple(
 # moves BOTH, since every module renders in both. Update whichever moved in the
 # same commit as the pin, and say in the pull request which chart moved it.
 ADOPTER_EXPECTED = {
-    "Certificate": 12,
+    "Certificate": 14,
     "ConfigMap": 4,
     "Deployment": 8,
     "EnvoyProxy": 1,
@@ -262,7 +262,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 10,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 81
+ADOPTER_OBJECTS = 83
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -291,7 +291,7 @@ ADOPTER_OBJECTS = 81
 # below. `platform.preflight.probes.envoyGateway: false` is always honoured (an
 # explicit `false` on a probe always is, and `platform`'s own `values.yaml` says
 # so at length), and it drops the second preflight Job: the render falls to three
-# Jobs, two triples and 77 objects. So one flip reddens these two constants,
+# Jobs, two triples and 79 objects. So one flip reddens these two constants,
 # `ADOPTER_OBJECTS` and `ADOPTER_EXPECTED` together, and that test asserts all
 # three of those numbers rather than leaving this paragraph to carry them.
 #
@@ -313,7 +313,7 @@ HOOK_JOBS_AT_R5 = 4
 RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE = ["bootstrap-secrets", "preflight"]
 
 # THE FOUR OBJECTS THE SECOND PREFLIGHT JOB BRINGS: its Job, its Role, its
-# RoleBinding and its ServiceAccount — one each, which is why 81 becomes 77.
+# RoleBinding and its ServiceAccount — one each, which is why 83 becomes 79.
 OBJECTS_PER_PROBE_JOB = 4
 
 # THE RENEWAL LADDER, lifted from `yadgarhq/platform`'s own `test_ladder.py` to the
@@ -321,12 +321,12 @@ OBJECTS_PER_PROBE_JOB = 4
 # DISTINCT and six hours from its neighbour, so at most one service restarts per
 # renewal instant.
 #
-# TWELVE OBJECTS AND ELEVEN VALUES, and the difference is exactly one object
+# FOURTEEN OBJECTS AND THIRTEEN VALUES, and the difference is exactly one object
 # contributing no rung: the CA root. It carries a `renewBefore` of its own — one
 # year against a ten-year duration — and nothing mounts it as a serving or client
 # credential, so its renewal re-signs with the same key rather than restarting a
 # service. The set is scoped to the Certificates that are not `isCA`.
-CERTIFICATES_AT_R5 = 12
+CERTIFICATES_AT_R5 = 14
 LADDER = {
     "720h",
     "726h",
@@ -339,6 +339,8 @@ LADDER = {
     "768h",
     "774h",
     "780h",
+    "786h",
+    "792h",
 }
 
 # THE PROBE/TOGGLE PAIRS, AND WHY THIS RENDER IS WHERE THEY BECOME ASSERTABLE.
@@ -1697,24 +1699,24 @@ def test_the_adopter_values_render_the_whole_platform_layer(adopter: list[dict])
 def test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate(tmp_path: Path) -> None:
     """THE OBJECT-SET GATE'S RED CASE, and a values flip rather than an edited chart.
 
-    A thirteenth entry in `certificates.leaves` is the constructible stand-in for
+    A fifteenth entry in `certificates.leaves` is the constructible stand-in for
     an object entering the platform layer: the chart renders one Certificate per
     entry, so the render grows by exactly one and the equality has to fail.
     """
     values = overlay(
-        tmp_path / "a-thirteenth-leaf.yaml",
+        tmp_path / "a-fifteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      thirteenth-tls:\n"
-        "        commonName: thirteenth\n"
+        "      fifteenth-tls:\n"
+        "        commonName: fifteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 786h\n",
+        "        renewBefore: 798h\n",
     )
     documents = adopter_render("-f", str(values))
     assert len(documents) == ADOPTER_OBJECTS + 1, (
-        "a thirteenth leaf did not add an object, so this red case is testing nothing"
+        "a fifteenth leaf did not add an object, so this red case is testing nothing"
     )
     assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
@@ -2214,24 +2216,24 @@ def test_the_renewal_ladder_holds_across_the_whole_estate(adopter: list[dict]) -
     assert failures == [], "\n".join(failures)
 
 
-def test_a_thirteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
-    """THE LADDER GATE'S RED CASE: a thirteenth leaf, and the equality names both numbers."""
+def test_a_fifteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
+    """THE LADDER GATE'S RED CASE: a fifteenth leaf, and the equality names both numbers."""
     values = overlay(
-        tmp_path / "a-thirteenth-leaf.yaml",
+        tmp_path / "a-fifteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      thirteenth-tls:\n"
-        "        commonName: thirteenth\n"
+        "      fifteenth-tls:\n"
+        "        commonName: fifteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 786h\n",
+        "        renewBefore: 798h\n",
     )
     failures = ladder_failures(
         adopter_render("-f", str(values)), CERTIFICATES_AT_R5, LADDER
     )
-    assert failures, "a thirteenth Certificate did not redden the ladder gate"
-    assert "expected 12 Certificate objects, found 13" in "\n".join(failures), failures
+    assert failures, "a fifteenth Certificate did not redden the ladder gate"
+    assert "expected 14 Certificate objects, found 15" in "\n".join(failures), failures
 
 
 def test_two_leaves_sharing_a_rung_redden_the_ladder_gate(tmp_path: Path) -> None:
