@@ -140,11 +140,10 @@ jobs:
   # assertions and `helm lint --strict`.
   #
   # IT IS A NOTIFICATION AND NOT A WALL, said here so nobody reads it as more.
-  # Publishing fires on the TAG through `release` below and depends on no job in
-  # this file — measured on `adf30008`, where `release / chart` SUCCEEDED while
-  # every `main / *` validation job skipped. So a broken pin makes `main` red and
-  # visible, and `charts/yadgar` still publishes. Making it a wall means changing
-  # the shared `ci-release.yaml`, which is a separate decision.
+  # Measured on `adf30008`: `release / chart` SUCCEEDED while every `main / *`
+  # validation job skipped. So a broken pin makes `main` red and visible, but
+  # does not by itself stop a publish — `tag_validation` below is the wall for
+  # that, on the TAG push `release` actually depends on (ledger 1137).
   #
   # NO `needs:`, DELIBERATELY. A job whose `if:` calls none of
   # `always()`/`success()`/`failure()`/`cancelled()` is skipped when an ancestor
@@ -203,8 +202,100 @@ jobs:
           # which is the artifact an adopter actually installs.
           python3 -m pytest scripts/tests/ -q
 
+  # THE WALL `release` BELOW NEEDS, AND `push_validation` ABOVE IS NOT IT
+  # (ledger 1137). `push_validation` is a notification on the PUSH to `main`;
+  # `release` fires on the TAG and, until this job, depended on nothing in
+  # this file at all — measured on `adf30008`, where `release / chart`
+  # SUCCEEDED while every `main / *` validation job skipped.
+  #
+  # `parent_at()` (`test_parent_chart.py`) ALREADY COPES WITH AN UNPUBLISHED
+  # PIN: when the version is strictly newer than every published GHCR tag and
+  # the event is not `pull_request`, it packages HEAD's `chart/` as that
+  # version and renders it. So this job does not deadlock on its own pin —
+  # it renders HEAD's OWN version, same as `push_validation`, and never pulls
+  # the parent's own published pin. It still resolves the nine MODULE charts
+  # from the registry, same as `push_validation` and `helm package chart -u`.
+  #
+  # RENDER REFUSALS ONLY, run twice for the fixture (directory and package)
+  # and once as a dedicated pytest FILE — `scripts/tests/test_tag_wall.py`,
+  # not the whole `scripts/tests/` directory `push_validation` runs.
+  #
+  # A MARKER EXPRESSION WAS THE FIRST DRAFT, AND MAX RULED IT OUT. The design
+  # needed to deselect two kinds of test — one that pulls the parent's own
+  # published pin (not yet pullable while this very tag is being cut, and
+  # racy against a concurrent bump) and one that asserts a literal a module's
+  # pin moves (a bot pin commit never updates it) — so the first draft ran the
+  # whole directory with the two marks excluded by name, as a single flag's
+  # argument to the test runner.
+  # `yadgarhq/actions`' `no-test-skips` hook (ledger 837) refuses that outright
+  # in every repository, with no exemption: "a test would stop running, and
+  # nothing would say so" is exactly what a marker-narrowed invocation is. The
+  # hook's own stated exception is a POSITIONAL path or filename argument —
+  # "no scan can tell a directory that IS the suite from one that is a slice
+  # of it" — so `test_tag_wall.py` is a dedicated FILE moved out of
+  # `test_parent_chart.py` (shared helpers imported, never copied), and that
+  # file's own `test_this_file_pulls_no_published_pin_and_asserts_no_count_literal`
+  # keeps it honest to run alone.
+  #
+  # NO `needs:`, for the same reason `push_validation` declares none: a job
+  # whose `if:` calls none of `always()`/`success()`/`failure()`/`cancelled()`
+  # is skipped when any ancestor — including an INDIRECT one — did not
+  # conclude `success`. With no `needs:` nothing can turn this off.
+  # `test_the_tag_job_admits_a_push_to_a_tag_and_refuses_everything_else`
+  # asserts both the condition and the absence of `needs:`.
+  tag_validation:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+      - name: the render refusals this tag must not publish past
+        # NO `${{ }}` IN THIS BLOCK, same reason as `push_validation` above.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "pytest==9.1.1" "pyyaml==6.0.3" "shellcheck-py==0.11.0.1"
+          helm dependency update chart
+          helm lint --strict chart -f chart/ci/values.yaml
+          # THE GROUPS `chart/ci/api-versions.txt` DECLARES (ADR-0806), DERIVED
+          # rather than hardcoded, by the same rules `scripts/api_versions.py`
+          # (`yadgarhq/actions`) reads the file with: `#` starts a comment, a
+          # blank line is nothing. Every render check in the package reads
+          # `.Capabilities.APIVersions` for one of these, so a bare `helm
+          # template` refuses at the first one a toggle in the fixture reaches.
+          python3 > /tmp/api-version-flags.txt <<'PY'
+          for line in open("chart/ci/api-versions.txt"):
+              entry = line.split("#", 1)[0].strip()
+              if entry:
+                  print("--api-versions")
+                  print(entry)
+          PY
+          mapfile -t API_VERSION_FLAGS < /tmp/api-version-flags.txt
+          helm template yadgar chart -f chart/ci/values.yaml "${API_VERSION_FLAGS[@]}" > /dev/null
+          # THE PACKAGED ARTIFACT, THE SAME WAY `ci-release.yaml` BUILDS IT
+          # (ADR-0725): `helm package chart -u`. The version is a throwaway —
+          # this proves the package renders, not what it is published as.
+          helm package chart -u --version 0.1.0 --app-version 0.1.0
+          helm template yadgar yadgar-0.1.0.tgz -f chart/ci/values.yaml "${API_VERSION_FLAGS[@]}" > /dev/null
+          # A DEDICATED FILE, NOT A MARKER — see the job's own header above.
+          python3 -m pytest scripts/tests/test_tag_wall.py -q
+      - name: a red tag gate must say why, where release's own logs are read
+        if: failure()
+        run: |
+          echo "::error::tag_validation failed; release needs it and will not publish this tag."
+          echo "tag_validation failed; release needs it and will not publish this tag." >> "$GITHUB_STEP_SUMMARY"
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
+    needs: tag_validation
     uses: yadgarhq/actions/.github/workflows/ci-release.yaml@main
     with:
       version: ${{ github.ref_name }}
