@@ -170,6 +170,10 @@ spec:
         iam:
           tls:
             enabled: true
+            # B-U5E EXPAND (K-8's "fixture" step, ledger 925): the off
+            # posture of a key no binary here reads yet (B-U5 is the
+            # contract). See `../values.yaml` for the full comment.
+            clientAuth: "off"
           iamDb:
             tls:
               enabled: true
@@ -179,24 +183,29 @@ spec:
         iam-db:
           tls:
             enabled: true
+            clientAuth: "off"
         task:
           tls:
             enabled: true
+            clientAuth: "off"
           taskDb:
             tls:
               enabled: true
         task-db:
           tls:
             enabled: true
+            clientAuth: "off"
         project:
           tls:
             enabled: true
+            clientAuth: "off"
           projectDb:
             tls:
               enabled: true
         project-db:
           tls:
             enabled: true
+            clientAuth: "off"
         platform:
           edgeTLS:
             # YOUR ISSUER. The chart creates none. Both halves are required.

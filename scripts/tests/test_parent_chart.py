@@ -4001,6 +4001,20 @@ ADOPTER_ONLY_KEYS = {
     "platform.valkey.tls.enabled",
     "platform.valkey.tls.clientAuth",
     "platform.valkey.tls.plaintext",
+    # B-P1, K-8's "fixture" step for `tls.clientAuth` (ledger 925): one key
+    # per gRPC server, folded into C-SVb (iam, task, project) and C-DB1
+    # (iam-db, task-db, project-db) as the B-U5E expand. No template reads
+    # `.Values.tls.clientAuth` against a binary yet — B-U5 is the contract
+    # that does — so this fixture states the off posture only, the same way
+    # the twelve `tls.enabled` switches above were stated before C-SVb and
+    # C-DB1 made them required. The parent's `values.yaml` must never be
+    # this value's tenth writer either.
+    "iam.tls.clientAuth",
+    "iam-db.tls.clientAuth",
+    "task.tls.clientAuth",
+    "task-db.tls.clientAuth",
+    "project.tls.clientAuth",
+    "project-db.tls.clientAuth",
 }
 
 # THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
@@ -5223,15 +5237,30 @@ def test_every_parent_example_renders_once_a_module_requires_tls_enabled(tmp_pat
 EIGHT_NATS_VALKEY_TLS_KEYS = {key for key in ADOPTER_ONLY_KEYS if ".nats.tls." in key or ".valkey.tls." in key}
 assert len(EIGHT_NATS_VALKEY_TLS_KEYS) == 8, sorted(EIGHT_NATS_VALKEY_TLS_KEYS)
 
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (B-P1, K-8's "fixture"
+# step for `tls.clientAuth`, ledger 925) — the same reason the two sets above
+# and below are derived rather than copied: a literal here drifts silently the
+# day a seventh `clientAuth` key joins `ADOPTER_ONLY_KEYS` without joining
+# this set too. SUBTRACTING `EIGHT_NATS_VALKEY_TLS_KEYS` rather than matching
+# on module name: that set already owns `platform.nats.tls.clientAuth` and
+# `platform.valkey.tls.clientAuth`, which also end in `.tls.clientAuth` but
+# are not one of the six gRPC servers' own listener keys. Defined BEFORE
+# `TWELVE_TLS_SWITCHES` so that set can subtract it out too, the same way it
+# already subtracts the two edge-issuer keys and the eight NATS/valkey keys.
+SIX_TLS_CLIENT_AUTH_KEYS = {
+    key for key in ADOPTER_ONLY_KEYS if key.endswith(".tls.clientAuth")
+} - EIGHT_NATS_VALKEY_TLS_KEYS
+assert len(SIX_TLS_CLIENT_AUTH_KEYS) == 6, sorted(SIX_TLS_CLIENT_AUTH_KEYS)
+
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
 # exception list `default_disagreements` walks past (the two edge-issuer keys,
-# the eight NATS/valkey keys above, plus these twelve), and copying the twelve
-# out by hand would be a second place for the list to drift from the one
-# `ADOPTER_ONLY_KEYS` already names.
+# the eight NATS/valkey keys above, the six `clientAuth` keys above, plus
+# these twelve), and copying the twelve out by hand would be a second place
+# for the list to drift from the one `ADOPTER_ONLY_KEYS` already names.
 TWELVE_TLS_SWITCHES = ADOPTER_ONLY_KEYS - {
     "platform.edgeTLS.issuerRef.name",
     "platform.edgeTLS.issuerRef.kind",
-} - EIGHT_NATS_VALKEY_TLS_KEYS
+} - EIGHT_NATS_VALKEY_TLS_KEYS - SIX_TLS_CLIENT_AUTH_KEYS
 
 
 def twelve_switches_of(values: dict) -> dict[str, object]:
@@ -5291,6 +5320,45 @@ def test_the_nats_and_valkey_tls_keys_agree_across_every_adopter_source() -> Non
     stated = {name: nats_valkey_tls_keys_of(values) for name, values in sources.items()}
     missing = {name: sorted(EIGHT_NATS_VALKEY_TLS_KEYS - switches.keys()) for name, switches in stated.items()}
     assert missing == {name: [] for name in sources}, missing
+    assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+
+
+def six_tls_client_auth_keys_of(values: dict) -> dict[str, object]:
+    """Every one of the six `tls.clientAuth` keys `values` states, by path, with its value. PURE."""
+    return {path: value_at(values, path) for path in SIX_TLS_CLIENT_AUTH_KEYS if value_at(values, path) is not _ABSENT}
+
+
+def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> None:
+    """B-P1, K-8's "fixture" step for `tls.clientAuth` (ledger 925): the same six
+    `tls.clientAuth` keys — one per gRPC server (iam, iam-db, task, task-db,
+    project, project-db) — are PRESENT and agree on the same value, wherever an
+    adopter reads them from — `example/values.yaml`, both parent examples'
+    `valuesObject`, and `chart/ci/values.yaml` (K-8's fixture). The twin of
+    `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
+    key first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
+    `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand).
+
+    ASSERTS `str`, NOT JUST PRESENCE AND AGREEMENT: `yaml.safe_load` resolves
+    YAML 1.1, so a value that loses its quotes (`clientAuth: off` rather than
+    `clientAuth: "off"`) parses as the bool `False` rather than the string
+    `"off"` — the exact regression B-U5E's convention names. A bare `False`
+    still agrees with five other bare `False`s, so presence-and-agreement
+    alone would not catch it; the `str` check does.
+    """
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    stated = {name: six_tls_client_auth_keys_of(values) for name, values in sources.items()}
+    missing = {name: sorted(SIX_TLS_CLIENT_AUTH_KEYS - switches.keys()) for name, switches in stated.items()}
+    assert missing == {name: [] for name in sources}, missing
+    not_quoted_strings = {
+        name: sorted(path for path, value in switches.items() if not isinstance(value, str))
+        for name, switches in stated.items()
+    }
+    assert not_quoted_strings == {name: [] for name in sources}, not_quoted_strings
     assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
 
 

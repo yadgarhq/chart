@@ -305,6 +305,12 @@ iam:
   # chart's section.
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925): the off posture of a
+    # key this chart cannot default for you either, same reason as the
+    # twelve switches above. No binary in this repository enforces it yet
+    # (B-U5 is the contract); the render check refuses any value but this
+    # one until then.
+    clientAuth: "off"
   iamDb:
     tls:
       enabled: true
@@ -318,6 +324,8 @@ project:
     enabled: true
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
+    clientAuth: "off"
   projectDb:
     tls:
       enabled: true
@@ -326,6 +334,8 @@ task:
     enabled: true
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
+    clientAuth: "off"
   taskDb:
     tls:
       enabled: true
@@ -341,6 +351,8 @@ iam-db:
   # WHAT THIS SERVICE SERVES, iam's own `iamDb.tls.enabled` dial above.
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
+    clientAuth: "off"
 project-db:
   autoscaling:
     enabled: true
@@ -348,6 +360,8 @@ project-db:
     create: true
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
+    clientAuth: "off"
 task-db:
   autoscaling:
     enabled: true
@@ -355,3 +369,5 @@ task-db:
     create: true
   tls:
     enabled: true
+    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
+    clientAuth: "off"
