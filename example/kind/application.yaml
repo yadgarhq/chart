@@ -68,6 +68,15 @@ spec:
           project:
             tls:
               enabled: true
+          # THE BROKER AND CACHE DIALS (B-P2, K-8's "fixture" step). `platform`
+          # declares these but renders neither hop yet, so `true` is refused.
+          # See `../values.yaml` for the full comment.
+          nats:
+            tls:
+              enabled: false
+          valkey:
+            tls:
+              enabled: false
         iam:
           enrolment:
             # THE HOST PORT IN `kind-config.yaml`.
@@ -77,6 +86,9 @@ spec:
           iamDb:
             tls:
               enabled: true
+          nats:
+            tls:
+              enabled: false
         iam-db:
           tls:
             enabled: true
@@ -111,6 +123,17 @@ spec:
                   - key: node-role.kubernetes.io/control-plane
                     operator: Exists
                     effect: NoSchedule
+          # THE BROKER AND CACHE THEMSELVES, at their off posture for the same
+          # reason as the gateway/iam dials above (B-P2).
+          nats:
+            tls:
+              enabled: false
+              clientAuth: "off"
+          valkey:
+            tls:
+              enabled: false
+              clientAuth: "off"
+              plaintext: true
   destination:
     server: https://kubernetes.default.svc
     namespace: yadgar

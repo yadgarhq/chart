@@ -178,13 +178,15 @@ ADOPTER_VALUES = REPO / "example" / "values.yaml"
 # `tls.enabled` read switches, explicit, because the parent's OWN defaults do not
 # and will not state them — a per-repository contract (C-SVb, C-DB1) requires
 # each one with no default once it lands, and a parent default would be a tenth
-# writer for a value that has to come from the adopter. `example/values.yaml`
-# states the same twelve explicitly for the same reason (`ADOPTER_ONLY_KEYS`
-# below), so most renders over `ADOPTER_VALUES` already carry them; this constant
-# is for the renders in this suite that do not — a plain default render, or one
-# built over `MODULES_ONLY_VALUES` before it also named them — so that THIS
-# suite does not go red the moment a module's own chart starts refusing the key
-# it already declares with a default today.
+# writer for a value that has to come from the adopter. PLUS the eight NATS and
+# valkey TLS keys at their off posture, for the same reason (B-P2, K-8's
+# "fixture" step again, this time ahead of B-N2/B-V2/B-N3/B-V3). `example/values.yaml`
+# states the same twelve, plus the same eight, explicitly for the same reason
+# (`ADOPTER_ONLY_KEYS` below), so most renders over `ADOPTER_VALUES` already carry
+# them; this constant is for the renders in this suite that do not — a plain
+# default render, or one built over `MODULES_ONLY_VALUES` before it also named
+# them — so that THIS suite does not go red the moment a module's own chart
+# starts refusing a key it already declares with a default today.
 EXPLICIT_TLS = CHART / "ci" / "values.yaml"
 
 # EVERY API GROUP THAT RENDER MUST BE HANDED, and a LITERAL rather than a list
@@ -3867,6 +3869,22 @@ ADOPTER_ONLY_KEYS = {
     "project.tls.enabled",
     "project.projectDb.tls.enabled",
     "project-db.tls.enabled",
+    # B-P2, K-8's "fixture" step (ADR-0857): the NATS and valkey TLS keys
+    # first declared in `platform` 0.1.36 (B-L1's folded platform expand),
+    # `gateway` 0.10.1 (B-N3E / B-V3E) and `iam` 0.9.1 (B-N3E). No template
+    # renders them yet. Each is read-and-refused at its off posture the same
+    # way the twelve `tls.enabled` switches above are: a later contract
+    # release (B-N2, B-V2, B-N3 x2, B-V3) makes it required with no default,
+    # and the parent's own `values.yaml` must never be that value's tenth
+    # writer.
+    "gateway.nats.tls.enabled",
+    "gateway.valkey.tls.enabled",
+    "iam.nats.tls.enabled",
+    "platform.nats.tls.enabled",
+    "platform.nats.tls.clientAuth",
+    "platform.valkey.tls.enabled",
+    "platform.valkey.tls.clientAuth",
+    "platform.valkey.tls.plaintext",
 }
 
 # THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
@@ -5081,14 +5099,28 @@ def test_every_parent_example_renders_once_a_module_requires_tls_enabled(tmp_pat
         assert result.returncode == 0, (name, result.stderr)
 
 
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL — the same reason
+# `TWELVE_TLS_SWITCHES` below is derived rather than copied (B-P2, K-8
+# "fixture" step). A LITERAL here drifts silently the day a ninth NATS/valkey
+# key joins `ADOPTER_ONLY_KEYS` without joining this set too (or the reverse):
+# the filter and the length assert below are what catch that, where a literal
+# would just go quietly wrong. A SEPARATE constant rather than a widened
+# `TWELVE_TLS_SWITCHES`: "twelve" names ruling 11's settled count, and folding
+# these eight in would make that name wrong rather than bigger. Defined BEFORE
+# `TWELVE_TLS_SWITCHES` so that set can subtract it out, the same way it
+# already subtracts the two edge-issuer keys.
+EIGHT_NATS_VALKEY_TLS_KEYS = {key for key in ADOPTER_ONLY_KEYS if ".nats.tls." in key or ".valkey.tls." in key}
+assert len(EIGHT_NATS_VALKEY_TLS_KEYS) == 8, sorted(EIGHT_NATS_VALKEY_TLS_KEYS)
+
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
-# exception list `default_disagreements` walks past (the two edge-issuer keys
-# plus these twelve), and copying the twelve out by hand would be a second
-# place for the list to drift from the one `ADOPTER_ONLY_KEYS` already names.
+# exception list `default_disagreements` walks past (the two edge-issuer keys,
+# the eight NATS/valkey keys above, plus these twelve), and copying the twelve
+# out by hand would be a second place for the list to drift from the one
+# `ADOPTER_ONLY_KEYS` already names.
 TWELVE_TLS_SWITCHES = ADOPTER_ONLY_KEYS - {
     "platform.edgeTLS.issuerRef.name",
     "platform.edgeTLS.issuerRef.kind",
-}
+} - EIGHT_NATS_VALKEY_TLS_KEYS
 
 
 def twelve_switches_of(values: dict) -> dict[str, object]:
@@ -5111,6 +5143,42 @@ def test_the_twelve_tls_switches_agree_across_every_adopter_source() -> None:
         sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
     stated = {name: twelve_switches_of(values) for name, values in sources.items()}
     missing = {name: sorted(TWELVE_TLS_SWITCHES - switches.keys()) for name, switches in stated.items()}
+    assert missing == {name: [] for name in sources}, missing
+    assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+
+
+def nats_valkey_tls_keys_of(values: dict) -> dict[str, object]:
+    """Every one of the eight NATS/valkey TLS keys `values` states, by path, with its value. PURE."""
+    return {path: value_at(values, path) for path in EIGHT_NATS_VALKEY_TLS_KEYS if value_at(values, path) is not _ABSENT}
+
+
+def test_the_nats_and_valkey_tls_keys_agree_across_every_adopter_source() -> None:
+    """B-P2, K-8's "fixture" step (ADR-0857): the same eight NATS and valkey TLS
+    keys are PRESENT, and agree on the same value, wherever an adopter reads
+    them from — `example/values.yaml`, both parent examples' `valuesObject`,
+    and `chart/ci/values.yaml`. The twin of
+    `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
+    keys first declared in `platform` 0.1.36, `gateway` 0.10.1 and `iam` 0.9.1,
+    after that gate was written.
+
+    CHECKS PRESENCE AND AGREEMENT ONLY, not that the stated value is the one
+    the binary enforces — there is no binary enforcement yet to check. Today
+    every value here is guarded by the child charts' own EXPAND refusals
+    (`platform`'s render check, gateway/iam's `deployment.yaml` guards): each
+    one refuses any value but the off posture. That guard, not this test, is
+    what keeps a values file from looking encrypted while nothing renders. It
+    lifts chart by chart as B-N2 / B-V2 / B-N3 / B-V3 land their CONTRACT
+    step, at which point a value other than the off posture becomes possible
+    again, read by a binary that actually enforces it.
+    """
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    stated = {name: nats_valkey_tls_keys_of(values) for name, values in sources.items()}
+    missing = {name: sorted(EIGHT_NATS_VALKEY_TLS_KEYS - switches.keys()) for name, switches in stated.items()}
     assert missing == {name: [] for name in sources}, missing
     assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
 

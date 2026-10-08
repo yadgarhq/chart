@@ -149,10 +149,23 @@ platform:
 
   # THE CACHE AND THE BROKER, each with the NetworkPolicy that fences it to the
   # release namespace. `nats` is the upstream chart, adopted rather than forked.
+  #
+  # `tls` ON EACH IS THE OFF POSTURE OF A KEY THIS CHART CANNOT DEFAULT FOR
+  # YOU EITHER (B-L1's folded platform expand, ADR-0852, ADR-0845, B-P2). See
+  # the eight-key comment below the twelve `tls.enabled` one: `platform`
+  # declares these, no template renders them yet, and B-N2 / B-V2 will make
+  # each required with no default.
   valkey:
     create: true
+    tls:
+      enabled: false
+      clientAuth: "off"
+      plaintext: true
   nats:
     create: true
+    tls:
+      enabled: false
+      clientAuth: "off"
 
   # THE BOOTSTRAP JOBS. They mint the estate's machine credentials and the FIRST
   # administrator's token before any module starts, as `pre-install` hooks.
@@ -214,8 +227,9 @@ platform:
 # set `platform.preflight.probes.keda` AND `platform.preflight.probes.prometheus`
 # false with the last one.
 
-# THE TWELVE `tls.enabled` SWITCHES BELOW ARE THE ONE OTHER THING THE CHART
-# CANNOT DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above.
+# THE TWELVE `tls.enabled` SWITCHES BELOW ARE ANOTHER THING THE CHART CANNOT
+# DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above — and
+# the eight NATS/valkey TLS keys further down join them (B-P2).
 # STATED TRUE HERE, AS THE REFERENCE INSTALL ON kind RUNS THEM: every server
 # in the six pairs below serves TLS today, and argocd sets all twelve true.
 # A per-repository contract (`C-SVb` for the three logic services, `C-DB1`
@@ -233,6 +247,24 @@ platform:
 #   iam.iamDb.tls.enabled         + iam-db.tls.enabled      (iam → iam-db)
 #   task.taskDb.tls.enabled       + task-db.tls.enabled     (task → task-db)
 #   project.projectDb.tls.enabled + project-db.tls.enabled  (project → project-db)
+
+# THE EIGHT NATS AND VALKEY TLS KEYS BELOW JOIN THE SAME EXCEPTION, AND STAY
+# AT THEIR OFF POSTURE, UNLIKE THE TWELVE ABOVE (B-P2, K-8's "fixture" step,
+# ADR-0852, ADR-0845). First declared in `platform` 0.1.36 (B-L1's folded
+# platform expand), `gateway` 0.10.1 (B-N3E / B-V3E) and `iam` 0.9.1
+# (B-N3E); no template in any of the three renders them yet as of the pins
+# this parent holds today, so `enabled: true` is refused — the broker and
+# the cache still serve plaintext only until B-N2 / B-V2 / B-N3 / B-V3
+# land. Stating the off posture now —
+# `enabled: false`, `clientAuth: "off"` and, for valkey, `plaintext: true` —
+# is what lets a later contract make each one required with no default
+# without breaking this parent's own renders:
+#
+#   gateway.nats.tls.enabled    (gateway → broker)
+#   gateway.valkey.tls.enabled  (gateway → cache)
+#   iam.nats.tls.enabled        (iam → broker)
+#   platform.nats.tls.{enabled,clientAuth}             (the broker itself)
+#   platform.valkey.tls.{enabled,clientAuth,plaintext}  (the cache itself)
 
 gateway:
   adminBootstrap:
@@ -256,6 +288,15 @@ gateway:
   project:
     tls:
       enabled: true
+  # THE BROKER AND CACHE DIALS THIS GATEWAY MAKES, stated at the off posture
+  # for the reason given above: `platform` declares these but renders
+  # neither TLS hop yet.
+  nats:
+    tls:
+      enabled: false
+  valkey:
+    tls:
+      enabled: false
 
 iam:
   autoscaling:
@@ -267,6 +308,11 @@ iam:
   iamDb:
     tls:
       enabled: true
+  # THE BROKER DIAL THIS SERVICE MAKES, stated at the off posture for the
+  # same reason gateway's is above.
+  nats:
+    tls:
+      enabled: false
 project:
   autoscaling:
     enabled: true

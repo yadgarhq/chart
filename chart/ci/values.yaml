@@ -18,6 +18,12 @@
 # and its iam-db dial, iam-db's own switch, task's own switch and its
 # task-db dial, task-db's own switch, project's own switch and its
 # project-db dial, and project-db's own switch.
+#
+# THE EIGHT NATS AND VALKEY TLS KEYS BELOW JOIN THE SAME EXCEPTION, AT THEIR
+# OFF POSTURE rather than `true` (B-P2, K-8's "fixture" step, ADR-0852,
+# ADR-0845): first declared in `platform` 0.1.36 / `gateway` 0.10.1 / `iam`
+# 0.9.1, which render neither hop yet, so `enabled: true` is refused. See
+# `example/values.yaml` for the full comment.
 gateway:
   task:
     tls:
@@ -28,12 +34,21 @@ gateway:
   project:
     tls:
       enabled: true
+  nats:
+    tls:
+      enabled: false
+  valkey:
+    tls:
+      enabled: false
 iam:
   tls:
     enabled: true
   iamDb:
     tls:
       enabled: true
+  nats:
+    tls:
+      enabled: false
 iam-db:
   tls:
     enabled: true
@@ -55,3 +70,13 @@ project:
 project-db:
   tls:
     enabled: true
+platform:
+  nats:
+    tls:
+      enabled: false
+      clientAuth: "off"
+  valkey:
+    tls:
+      enabled: false
+      clientAuth: "off"
+      plaintext: true
