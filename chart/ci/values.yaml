@@ -21,8 +21,8 @@
 #
 # THE EIGHT NATS AND VALKEY TLS KEYS BELOW JOIN THE SAME EXCEPTION, AT THEIR
 # OFF POSTURE rather than `true` (B-P2, K-8's "fixture" step, ADR-0852,
-# ADR-0845): `platform`, `gateway` and `iam` declare them but render neither
-# hop yet, so `enabled: true` is refused by this pin. See
+# ADR-0845): first declared in `platform` 0.1.36 / `gateway` 0.10.1 / `iam`
+# 0.9.1, which render neither hop yet, so `enabled: true` is refused. See
 # `example/values.yaml` for the full comment.
 gateway:
   task:

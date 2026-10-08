@@ -227,8 +227,9 @@ platform:
 # set `platform.preflight.probes.keda` AND `platform.preflight.probes.prometheus`
 # false with the last one.
 
-# THE TWELVE `tls.enabled` SWITCHES BELOW ARE THE ONE OTHER THING THE CHART
-# CANNOT DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above.
+# THE TWELVE `tls.enabled` SWITCHES BELOW ARE ANOTHER THING THE CHART CANNOT
+# DEFAULT FOR YOU (ruling 11, ADR-0845), beside the edge issuer above — and
+# the eight NATS/valkey TLS keys further down join them (B-P2).
 # STATED TRUE HERE, AS THE REFERENCE INSTALL ON kind RUNS THEM: every server
 # in the six pairs below serves TLS today, and argocd sets all twelve true.
 # A per-repository contract (`C-SVb` for the three logic services, `C-DB1`
@@ -249,11 +250,12 @@ platform:
 
 # THE EIGHT NATS AND VALKEY TLS KEYS BELOW JOIN THE SAME EXCEPTION, AND STAY
 # AT THEIR OFF POSTURE, UNLIKE THE TWELVE ABOVE (B-P2, K-8's "fixture" step,
-# ADR-0852, ADR-0845). `platform` 0.1.36 (B-L1's folded platform expand),
-# `gateway` 0.10.1 and `iam` 0.9.1 (B-N3E / B-V3E) DECLARE these keys; no
-# template in any of the three renders them yet, so `enabled: true` is
-# REFUSED by this pin — the broker and the cache still serve plaintext only
-# until B-N2 / B-V2 / B-N3 / B-V3 land. Stating the off posture now —
+# ADR-0852, ADR-0845). First declared in `platform` 0.1.36 (B-L1's folded
+# platform expand), `gateway` 0.10.1 (B-N3E / B-V3E) and `iam` 0.9.1
+# (B-N3E); no template in any of the three renders them yet as of the pins
+# this parent holds today, so `enabled: true` is refused — the broker and
+# the cache still serve plaintext only until B-N2 / B-V2 / B-N3 / B-V3
+# land. Stating the off posture now —
 # `enabled: false`, `clientAuth: "off"` and, for valkey, `plaintext: true` —
 # is what lets a later contract make each one required with no default
 # without breaking this parent's own renders:
