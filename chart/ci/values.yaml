@@ -24,6 +24,14 @@
 # ADR-0845): first declared in `platform` 0.1.36 / `gateway` 0.10.1 / `iam`
 # 0.9.1, which render neither hop yet, so `enabled: true` is refused. See
 # `example/values.yaml` for the full comment.
+#
+# THE SIX `tls.clientAuth` KEYS BELOW, ONE PER gRPC SERVER, JOIN THE SAME
+# EXCEPTION TOO, AT THEIR OFF POSTURE (B-P1, K-8's "fixture" step, ledger
+# 925): first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
+# `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand,
+# folded into C-SVb and C-DB1). No binary in any of the six reads it yet —
+# B-U5 is the contract — so `"off"` is the only value the render check
+# accepts today. See `example/values.yaml` for the full comment.
 gateway:
   task:
     tls:
@@ -43,6 +51,7 @@ gateway:
 iam:
   tls:
     enabled: true
+    clientAuth: "off"
   iamDb:
     tls:
       enabled: true
@@ -52,24 +61,29 @@ iam:
 iam-db:
   tls:
     enabled: true
+    clientAuth: "off"
 task:
   tls:
     enabled: true
+    clientAuth: "off"
   taskDb:
     tls:
       enabled: true
 task-db:
   tls:
     enabled: true
+    clientAuth: "off"
 project:
   tls:
     enabled: true
+    clientAuth: "off"
   projectDb:
     tls:
       enabled: true
 project-db:
   tls:
     enabled: true
+    clientAuth: "off"
 platform:
   nats:
     tls:
