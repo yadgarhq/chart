@@ -235,6 +235,7 @@ suite needs the registry reachable rather than running offline.
 | a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only                                                       |
 | no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path                                                               |
 | a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`                                                          |
+| a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                                                                    |
 | it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                |
 
 The object count is an equality rather than a ceiling on purpose. A module release
@@ -249,10 +250,30 @@ the pull request which module moved them.
 eight pins straight to `main` over the Contents API, which passes through no pull
 request, and every validation job of the shared `ci-pr.yaml` skips on a push — so
 until it existed the one commit that ever changes the pins was checked by nothing.
-**It is a notification and not a wall.** Publishing fires on the TAG through
-`ci-release.yaml` and depends on no job in this file, so a broken pin makes `main`
-red and visible while `charts/yadgar` still publishes. Making it a wall means
-changing the shared release workflow.
+**It is a notification and not a wall.** A broken pin makes `main` red and
+visible, but publishing fires on the TAG, not on this push.
+
+That tag's own wall is `tag_validation`, a twin job with the same render
+assertions and `helm lint --strict`, run against HEAD rather than the registry.
+Its suite is a dedicated file, `scripts/tests/test_tag_wall.py`, not the whole
+`scripts/tests/` directory `push_validation` runs: `yadgarhq/actions`'
+`no-test-skips` hook (ledger 837) refuses any `pytest` invocation narrowed by
+`-m`/`-k`/`--deselect`, in every repository, with no exemption — so the tests
+this wall CAN carry are moved to their own file, and the ones it cannot (one
+that pulls the parent's own published pin, not yet pullable while a release
+is being cut; one that asserts an OBJECT-COUNT literal a module's pin moves —
+`ADOPTER_OBJECTS`, `EXPECTED` and the like, never a refusal's own phrase or
+which chart answered it) stay in `test_parent_chart.py`, rather than being
+deselected by marker. Two render-refusal tests split on exactly that line:
+each asserts a refusal's message AND, in a second, separately-named test, an
+`ADOPTER_OBJECTS` green case — the refusal half moved, the count half stayed.
+`test_tag_wall.py`'s own
+`test_this_file_pulls_no_published_pin_and_asserts_no_count_literal` and
+`test_no_test_in_this_file_requests_a_published_pin` keep that honest, the
+second over pytest's own resolved fixture graph rather than this file's
+source text. `ci.yaml`'s own `release` job, which calls `ci-release.yaml`, now
+`needs: tag_validation`, so a red tag gate blocks the publish rather than
+only reporting one.
 
 ## What lives elsewhere
 
