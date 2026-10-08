@@ -353,14 +353,15 @@ LADDER = {
 # visible — `autoscaling.enabled` and `database.create` are sibling charts' keys —
 # so each probe is asserted against the OBJECTS in the same render.
 #
-# THREE PAIRS, AND THREE IS PERMANENT RATHER THAN PENDING A PIN.
-# `plans/the-platform-layer-in-the-charts.md` now also states three, for the same
-# reason: the fourth is `probes.envoyGateway` against `gatewayListener.create`, and
-# it does not belong at this scope. BOTH halves of that pair are `platform`'s OWN
-# keys. `platform` can see them both, and its own suite already pairs them, with a
-# red case at `gatewayListener.create: false`. The three above are here for the
-# opposite reason — no chart alone can see both halves of any of them, because
-# `autoscaling.enabled` and `database.create` are SIBLING charts' keys. The parent
+# FOUR PAIRS (three until ADR-0820), AND THE COUNT IS PERMANENT RATHER THAN
+# PENDING A PIN. `plans/the-platform-layer-in-the-charts.md` states three,
+# written before ADR-0820, for the same reason: `probes.envoyGateway` against
+# `gatewayListener.create` does not belong at this scope. BOTH halves of that
+# pair are `platform`'s OWN keys. `platform` can see them both, and its own
+# suite already pairs them, with a red case at `gatewayListener.create: false`.
+# The examples above are here for the opposite reason — no chart alone can see
+# both halves of any of them, because `autoscaling.enabled` and
+# `database.create` are SIBLING charts' keys. The parent
 # asserts the pairs it alone can see; a pair whose two halves live inside one chart
 # is that chart's own obligation.
 #
@@ -2189,10 +2190,10 @@ def test_a_mutation_helm_never_reads_is_refused_rather_than_passing_silently(
     chart's upgrade notes — so the mutation IS applied, the tarball IS repacked and
     the render is unmoved. That is the silent form, and this arm shows
     `assert_the_mutation_reddened_the_gate` refusing it by name. It carries a
-    second property the first arm cannot: the render staying at exactly 81
-    objects after `platform/charts/nats/UPGRADING.md` is edited proves the
-    tarball this helper writes with Python's `w:gz` is one helm can read at all,
-    not only that the mutation inside it went unread.
+    second property the first arm cannot: the render staying at exactly
+    `ADOPTER_OBJECTS` objects after `platform/charts/nats/UPGRADING.md` is
+    edited proves the tarball this helper writes with Python's `w:gz` is one
+    helm can read at all, not only that the mutation inside it went unread.
     """
     with pytest.raises(AssertionError) as absent:
         chart_with_a_vendored_line_deleted(
@@ -3092,6 +3093,33 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
 # tarball would therefore be red today rather than green, so none is built. When a
 # `platform` version carrying `operators` is pinned here, that gate becomes
 # constructible and this comment is its trigger.
+#
+# LEDGER 1083's D-C3 SWEEP MEASURED THAT TRIGGER AS MET AND LEFT THE GATE
+# UNBUILT, deliberately. `platform` 0.1.36, the pin today, DOES carry
+# `operators`, and its `Chart.yaml` dependencies name SIX condition paths,
+# not five: `certManager`, `keda`, `mariadbOperator`, `envoyGateway`,
+# `argoCd` AND `prometheus` (read off `platform/Chart.yaml` directly).
+# `prometheus` joined at `platform` 0.1.21 (ADR-0820), after this tuple was
+# written, and this tuple was never grown to six. The section header above
+# ("refuses six keys") is NOT the same six: `test_tag_wall.py`'s
+# `test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys`
+# spells out "SIX RENDERS, NOT ONE" as one top-level `operators.create`
+# render plus the five sub-key renders this tuple drives — so the header's
+# six and this tuple's five already agree; `prometheus` is absent from
+# BOTH, not a header/tuple mismatch.
+#
+# Dropping `argoCd` from this five-member tuple survives this file's full
+# suite (measured on this worktree: `1 failed, 246 passed`, the one failure
+# being `test_kind_up.py`'s environmental `shellcheck`-off-`PATH` case,
+# unrelated) — every usage either takes `THE_FIVE_OPERATOR_SUB_KEYS[0]`
+# alone (unaffected by what the rest of the tuple holds) or iterates the
+# whole tuple to render `operators.create: false` beside every per-key
+# `false` (ADR-0787's global toggle already renders the all-off estate
+# regardless of which, or how many, redundant per-key `false` lines ride
+# along). Building the drift gate the trigger above anticipates means first
+# deciding whether this suite's ADR-0787 enumeration should grow to cover
+# `prometheus` too — a decision, not a typo fix, filed rather than made
+# here.
 THE_FIVE_OPERATOR_SUB_KEYS = ("certManager", "keda", "mariadbOperator", "envoyGateway", "argoCd")
 
 # THE OVERLAY SETS `platform.enabled` AND THE ADMIN TOKEN, AND BOTH ARE
@@ -4662,21 +4690,19 @@ def test_a_pin_with_no_global_at_all_names_an_unrecognised_hostname(tmp_path: Pa
 def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
     """B7's red case: the same `valuesObject` at 0.2.38 renders the 32 modules alone.
 
-    A SECOND, INDEPENDENT ASSERTION JOINS THE ORIGINAL ONE (ledger 1083's D-C3
-    sweep), and the original stays rather than being replaced. `missing` is
-    `[kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]`, so a
-    member DROPPED from `WHOLE_ESTATE_KINDS` is dropped from `missing`'s own
-    search space in the same edit: that check cannot see a drop of ANY of the
-    six, Gateway/EnvoyProxy/MariaDB included, once this second assertion is the
-    only one left — measured by removing the first and confirming all six drops
-    survive. `EXPECTED` is independent of `WHOLE_ESTATE_KINDS` (it is the
-    modules-only census, asserted elsewhere on its own renders), so comparing
-    against it catches a drop of Certificate, ScaledObject or Job — the three
-    the first assertion's subset never named — while the first assertion keeps
-    catching a drop of Gateway, EnvoyProxy or MariaDB, which this one alone
-    does not (it would still read true with any one of those three gone from
-    both `EXPECTED` and the render, and `EXPECTED` cannot be edited to add a
-    platform-layer kind without breaking every other test that reads it).
+    THE SECOND EQUALITY IS AN EXACT, INDEPENDENT LITERAL (ledger 1083's D-C3
+    sweep), in the style of `RBAC_TRIPLE_NAMES_WITHOUT_THE_SECOND_PROBE`:
+    `missing` is `[kind for kind in WHOLE_ESTATE_KINDS if kind not in
+    kinds(documents)]`, so a member DROPPED from `WHOLE_ESTATE_KINDS` is dropped
+    from `missing`'s own search space in the same edit — the subset check alone
+    (`{"Gateway", "EnvoyProxy", "MariaDB"} <= set(missing)`) cannot see a drop of
+    Certificate, ScaledObject or Job (measured: each of the three survived
+    every test in this file with only that check and this test's earlier,
+    now-replaced second assertion in place). The literal below is NOT derived
+    from `WHOLE_ESTATE_KINDS` — it is this test's own measured record of the
+    six kinds absent at this pin, written out by name — so a member dropped
+    from the tuple no longer has a counterpart here. Measured after adding it:
+    dropping each of the six, one at a time, now reddens this test by name.
     """
     tarball = pulled(A_PRE_B6_PIN, tmp_path / "old")
     result = example_render(tarball, example_source()["helm"]["valuesObject"], tmp_path)
@@ -4685,10 +4711,7 @@ def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
     assert len(documents) == A_PRE_B6_PIN_OBJECTS, (A_PRE_B6_PIN, len(documents))
     missing = [kind for kind in WHOLE_ESTATE_KINDS if kind not in kinds(documents)]
     assert {"Gateway", "EnvoyProxy", "MariaDB"} <= set(missing), missing
-    assert set(kinds(documents)) == set(EXPECTED), (
-        "the pre-B6 pin's render carries a kind outside the modules-only set, so "
-        f"it is not proof the whole-estate layer is absent: {dict(kinds(documents))}"
-    )
+    assert set(missing) == {"Gateway", "EnvoyProxy", "Certificate", "ScaledObject", "MariaDB", "Job"}, missing
 
 
 # ------------- 10. the operators and kind examples, and every example's retry (ADR-0820)
