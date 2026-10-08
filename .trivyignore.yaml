@@ -1,0 +1,37 @@
+# Reviewed ignore list for the render-what-it-scans trivy gate (ledger 1150,
+# D-A1, ADR-0847). `scripts/trivy_gate.py` in yadgarhq/actions is the only
+# reader: it does NOT trust trivy's own `--ignorefile` auto-detection (trivy
+# 0.74.0 does not auto-detect this file at all), so this file only takes
+# effect once D-A1 passes it explicitly with `--ignorefile`. An entry ignores
+# a finding only when `id` matches AND the finding's `Target` matches one of
+# `paths` AND `expired_at` is still in the future; a `paths` glob outside
+# `chart/charts/platform/charts/**` (this repo's upstream scope, ADR-0645),
+# an entry matching no finding, an entry with no `paths`, or an expired entry
+# all fail the gate as stale (unitcards-D, reaudit-D).
+#
+# Measured on origin/main@9f8ae275a2bc680e0f4ba30ec16a2cc61b471e3b, trivy
+# 0.74.0, after `helm dependency update chart`:
+#   trivy config --format json --exit-code 0 --severity HIGH,CRITICAL \
+#     --helm-values chart/ci/values.yaml \
+#     --helm-api-versions "$(paste -sd, chart/ci/api-versions.txt)" .
+# Both findings sit in the platform dependency's vendored nats subchart
+# (nats 2.14.6, platform 0.1.32), rendered because `platform.nats.create`
+# defaults to true; neither template is estate-authored. Re-review at the
+# next nats chart bump regardless of the expiry date below.
+misconfigurations:
+  - id: KSV-0014
+    paths:
+      - "chart/charts/platform/charts/**"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6, via platform 0.1.32)
+      ships no readOnlyRootFilesystem on its containers; not an
+      estate-authored template (ADR-0645/ADR-0847 upstream scope).
+    expired_at: 2027-01-08
+  - id: KSV-0118
+    paths:
+      - "chart/charts/platform/charts/**"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6, via platform 0.1.32)
+      relies on Helm's default pod/container security context; not an
+      estate-authored template (ADR-0645/ADR-0847 upstream scope).
+    expired_at: 2027-01-08
