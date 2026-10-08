@@ -767,6 +767,48 @@ def test_helm_lint_strict_passes() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# --------------------------- 1b. this chart's own closed schema (ADR-0847, ADR-0850)
+#
+# `chart/values.schema.json` closes the root and `global` — the only block this
+# chart's OWN source declares a key under (`global.hostname`, ADR-0808) — and
+# declares each of the nine child sections (`gateway`, `iam`, `iam-db`, `project`,
+# `project-db`, `task`, `task-db`, `platform`, `config`) an open object `{}`. A typo
+# INSIDE one of those nine is that child's own schema's refusal, never this file's
+# (ADR-0850): closing a child section here would refuse the parent's own default
+# render, since Helm validates a parent's schema against the WHOLE coalesced tree,
+# every child's defaults included. So the two red cases below are the only two
+# shapes this schema itself can refuse: an unknown key at the root, and an unknown
+# key under `global`.
+
+
+def test_a_root_level_typo_is_refused_by_the_parents_own_schema(tmp_path: Path) -> None:
+    """THE RED CASE: an unrecognised top-level key refuses, named, on both pinned helms.
+
+    Before this schema existed, a stray top-level key — `iamm` for `iam`, say —
+    rendered silently; nothing but this suite's own `unrecognised_keys()` could
+    have named it, and only against a published pin, never a working tree.
+    """
+    values = overlay(tmp_path / "a-root-level-typo.yaml", "iamm: {}\n")
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert schema_refusal_names(result.stderr, "yadgar", "", "iamm"), result.stderr
+
+
+def test_a_global_typo_is_refused_by_the_parents_own_schema(tmp_path: Path) -> None:
+    """THE RED CASE: an unrecognised key under `global` refuses, named, on both pinned helms.
+
+    `global` is the one block this chart declares a leaf under, unlike a module
+    chart's own copy of `global` (which stays open, ADR-0850, because every OTHER
+    subchart's keys may live there too). `global.hostnmae` is the exact typo
+    ledger 1153 names at the test-suite layer (`unrecognised_keys()`); this is the
+    schema layer naming the same typo, independently.
+    """
+    values = overlay(tmp_path / "a-global-typo.yaml", "global:\n  hostnmae: x\n")
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert schema_refusal_names(result.stderr, "yadgar", "global", "hostnmae"), result.stderr
+
+
 # --------------------------- 2. the packaged artifact, and it matches the tree
 
 
