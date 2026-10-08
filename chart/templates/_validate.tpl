@@ -554,15 +554,15 @@ VALUES AND SCHEMA RATHER THAN ASSUMED: `gateway.clientCertificate.secret`
 (one leaf shared across gateway's three upstream dials — iam, task and
 project, each gated by that dial's own `tls.enabled`), `iam.iamDb.tls.clientCertSecret`,
 `task.taskDb.tls.clientCertSecret` and `project.projectDb.tls.clientCertSecret`
-— measured at the pinned `gateway` 0.10.2, `iam` 0.9.2, `task` 0.6.1 and
-`project` 0.2.1. Each is the Secret a caller mounts to PRESENT its own client
+— measured at the pinned `gateway` 0.10.2, `iam` 0.10.0, `task` 0.7.0 and
+`project` 0.3.0. Each is the Secret a caller mounts to PRESENT its own client
 certificate, the opposite direction from `<dial>.tls.caSecret`, which VERIFIES
 the server and is a different key this clause says nothing about.
 
 NO NATS OR VALKEY CLIENT SECRET KEY EXISTS YET, so none is checked here. B-P2
 (chart#39) stated the broker's and the cache's TLS POSTURE at the platform
 layer; it added no client-side secret-naming key to `gateway` or `iam` —
-measured against their 0.10.2 and 0.9.2 schemas, `nats.tls` and `valkey.tls`
+measured against their 0.10.2 and 0.10.0 schemas, `nats.tls` and `valkey.tls`
 each declare only a boolean `enabled`. The day one of those charts gains a
 `clientCertSecret`-shaped key, add it to `$clientSecrets` below the same way
 the four gRPC ones are.
@@ -698,8 +698,8 @@ ENFORCE A HANDSHAKE ITS ONLY CALLER NEVER PRESENTS.
 EACH OF THE SIX gRPC SERVERS HAS EXACTLY ONE CALLER IN THIS ESTATE, VERIFIED
 AGAINST EACH CHART'S OWN DIAL CONFIG: `gateway` 0.10.2 dials `iam`, `task` and
 `project` (one `clientCertificate` shared across all three, gated per-dial by
-that dial's own `tls.enabled`); `iam` 0.9.2 dials `iam-db`; `task` 0.6.1 dials
-`task-db`; `project` 0.2.1 dials `project-db`. A server whose `tls.clientAuth`
+that dial's own `tls.enabled`); `iam` 0.10.0 dials `iam-db`; `task` 0.7.0 dials
+`task-db`; `project` 0.3.0 dials `project-db`. A server whose `tls.clientAuth`
 is `optional` or `required` while its one caller is not wired to present
 anything is an install that looks protected and is not: the server VERIFIES a
 certificate its caller never sends, which either refuses every call
@@ -824,7 +824,7 @@ than in `platform`.
 NATS HAS NO OPTIONAL CLIENT-CERTIFICATE MODE (ADR-0854): its `verify` is
 require-and-verify only, so its `clientAuth` set is `off | required` rather
 than the three-way set every gRPC server and valkey carry — mirroring
-`platform`'s own render check. `gateway` 0.10.2 and `iam` 0.9.2 are NATS's
+`platform`'s own render check. `gateway` 0.10.2 and `iam` 0.10.0 are NATS's
 only two clients in this estate (`iam` publishes cache-invalidation events;
 `gateway` subscribes), each with its own `nats.tls.enabled`. `valkey`'s only
 client in this estate is `gateway` (`gateway.valkey.tls.enabled`); no other
