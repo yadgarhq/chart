@@ -1,0 +1,42 @@
+# Reviewed ignore list for the render-what-it-scans trivy gate (ledger 1150,
+# D-A1, ADR-0847). trivy 0.74.0 does not auto-detect this file, and D-A1
+# does not pass it to trivy: D-A1 scans unfiltered and `scripts/trivy_gate.py`
+# (yadgarhq/actions) applies it, so an entry that matches no finding is
+# detectable as stale. An entry ignores a finding only when `id` matches AND
+# the finding's `Target` matches one of `paths` AND `expired_at` is still in
+# the future; a `paths` glob outside this repo's upstream scope (ADR-0847;
+# upstream glob per plan D-A1), an entry matching no finding, an entry with
+# no `paths`, or an expired entry all fail the gate as stale (unitcards-D,
+# reaudit-D).
+#
+# Measured on origin/main@9f8ae275a2bc680e0f4ba30ec16a2cc61b471e3b, trivy
+# 0.74.0, after `helm dependency update chart`:
+#   trivy config --format json --exit-code 0 --severity HIGH,CRITICAL \
+#     --helm-values chart/ci/values.yaml \
+#     --helm-api-versions "$(paste -sd, chart/ci/api-versions.txt)" .
+# Re-measured on 0b22240 (platform 0.1.33): identical. Both findings sit in
+# the vendored nats subchart (nats chart 2.14.6), rendered because
+# `platform.nats.create` defaults to true; neither template is
+# estate-authored. Expiry is the only enforced re-review; a nats bump that
+# changes the findings fails the D-A1 gate as stale or unignored.
+misconfigurations:
+  - id: KSV-0014
+    paths:
+      - "chart/charts/platform/charts/nats/templates/stateful-set.yaml"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6) ships no
+      `readOnlyRootFilesystem: true` on the nats and reloader containers;
+      settable through platform's nats `container.merge` / `reloader.merge`
+      values, not yet done.
+    expired_at: 2027-01-08
+  - id: KSV-0118
+    paths:
+      - "chart/charts/platform/charts/nats/templates/stateful-set.yaml"
+    statement: >-
+      Upstream nats StatefulSet (nats chart 2.14.6) sets no pod or
+      container securityContext, so the pod and the nats/reloader
+      containers run with the Kubernetes default, which allows root. Not
+      an estate-authored template (ADR-0847; upstream glob per plan D-A1);
+      platform can close it through the nats chart's `podTemplate.merge` /
+      `container.merge` / `reloader.merge` values and has not yet.
+    expired_at: 2027-01-08
