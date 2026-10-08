@@ -34,18 +34,16 @@
 #
 # ─── what happens if you set something no child declares ─────────────────────
 #
-# IT IS ACCEPTED AND IGNORED, silently, in eight cases out of nine. THIS PARENT
-# CARRIES NO `values.schema.json` — see `chart/values.yaml` upstream for why one
-# would have to enumerate every child's knobs and would then drift from them — and
-# eight of the nine charts carry no schema either. So `gateway:
-# replicaCont: 3` renders exit 0, no warning, and no replicas changed.
+# IT IS REFUSED, BY NAME. The parent's `values.schema.json` closes its root and
+# `global` and declares each child section open (ADR-0850). A typo at the root
+# or under `global` is refused by the parent, and a typo inside a child section
+# is refused by that child's own closed schema (ADR-0847). So `gateway:
+# replicaCont: 3` refuses at render, naming `replicaCont`, and so does a typo at
+# this file's own top level.
 #
-# `config` IS THE EXCEPTION and it is worth knowing which way round it is. That
-# chart's schema is closed at every level, so a typo under `config:` is REFUSED BY
-# NAME and your sync fails rather than quietly doing nothing.
-#
-# UNTIL A PARENT SCHEMA EXISTS, THE CHECK IS YOURS: render before you sync, and
-# read the object you meant to change.
+# RENDER BEFORE YOU SYNC ANYWAY: a schema closes key sets, not value types, so
+# a toggle of the wrong type is a render-check refusal (ADR-0847) rather than a
+# schema one, and reading the object you meant to change is still on you.
 #
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar \
 #     --version <your targetRevision> -f values.yaml | less

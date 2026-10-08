@@ -809,6 +809,36 @@ def test_a_global_typo_is_refused_by_the_parents_own_schema(tmp_path: Path) -> N
     assert schema_refusal_names(result.stderr, "yadgar", "global", "hostnmae"), result.stderr
 
 
+def test_global_image_and_labels_still_render(tmp_path: Path) -> None:
+    """THE GREEN CASE beside the red one above: `global` stays closed, not shut.
+
+    `global.image` and `global.labels` are open objects, not refused leaves:
+    the vendored `platform/charts/nats` chart reads both directly
+    (`templates/_helpers.tpl`, `files/*/pod-template.yaml`) as its own
+    documented private-registry and common-labels interface, and an adopter
+    setting either renders today. Closing `global` to `hostname` alone — this
+    schema's first draft — refused both; this is that regression's red case,
+    passing.
+    """
+    documents = render(
+        str(CHART),
+        *API_VERSIONS,
+        "-f",
+        str(ADOPTER_VALUES),
+        "--set",
+        "global.image.pullSecretNames[0]=regcred",
+        "--set",
+        "global.labels.team=x",
+    )
+    assert len(documents) == ADOPTER_OBJECTS
+    statefulsets = [d for d in documents if d.get("kind") == "StatefulSet"]
+    assert statefulsets, documents
+    assert all(d["spec"]["template"]["metadata"]["labels"].get("team") == "x" for d in statefulsets), statefulsets
+    assert all(
+        {"name": "regcred"} in (d["spec"]["template"]["spec"].get("imagePullSecrets") or []) for d in statefulsets
+    ), statefulsets
+
+
 # --------------------------- 2. the packaged artifact, and it matches the tree
 
 

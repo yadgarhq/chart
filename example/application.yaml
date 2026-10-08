@@ -74,9 +74,11 @@
 #
 # WHAT ELSE YOU MAY SET: every knob any of the nine charts defines, under that
 # chart's own name. `example/values.yaml` beside this file restates the defaults
-# with a comment on each. There is NO parent schema, so a key no child declares
-# is accepted and silently ignored — `config` is the one child that refuses a
-# typo by name. Render before you sync:
+# with a comment on each. The parent's `values.schema.json` closes its root and
+# `global` and declares each child section open (ADR-0850); a typo at the root
+# or under `global` is refused by the parent, and a typo inside a child section
+# is refused by that child's own closed schema (ADR-0847). Render before you
+# sync:
 #
 #   helm template yadgar oci://ghcr.io/yadgarhq/charts/yadgar --version <your targetRevision> \
 #     -f values.yaml | less
