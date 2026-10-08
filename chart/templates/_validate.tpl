@@ -586,37 +586,6 @@ already states for the admin-token pair above.
 */}}
 {{- if hasKey .Subcharts "platform" -}}
 {{- $platformValues := (default dict .Subcharts.platform).Values -}}
-{{- $certsCreate := default false (default dict $platformValues.certificates).create -}}
-{{- if eq $certsCreate true -}}
-{{- $leaves := default dict (default dict $platformValues.certificates).leaves -}}
-{{- $clientSecrets := list -}}
-{{- $gatewayCallerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
-{{- if $gatewayCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "gateway.clientCertificate.secret" "name" $gatewayCallerSecret) -}}
-{{- end -}}
-{{- $iamCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
-{{- if $iamCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret) -}}
-{{- end -}}
-{{- $taskCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
-{{- if $taskCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "task.taskDb.tls.clientCertSecret" "name" $taskCallerSecret) -}}
-{{- end -}}
-{{- $projectCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).clientCertSecret -}}
-{{- if $projectCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret) -}}
-{{- end -}}
-{{- range $clientSecrets -}}
-{{- if not (hasKey $leaves .name) -}}
-{{- $refusals = append $refusals (printf (join "" (list
-      "%s names the Secret %q as the client certificate it presents, and %q is not a key of "
-      "platform.certificates.leaves. The parent issues every client leaf this estate mounts under "
-      "platform.certificates.leaves (ledger 925), so a name that is not one of its keys is a Secret "
-      "cert-manager never creates: the pod mounting it sticks in ContainerCreating. Check the name "
-      "against platform.certificates.leaves for a typo in %s."))
-      .key .name .name .key) -}}
-{{- end -}}
-{{- end -}}
 
 {{/*
 B-U6, PART 1b (ruling R7, coordinator update 2026-10-08): THE SIX SERVERS' OWN
@@ -635,13 +604,22 @@ convention, not a requirement this clause enforces — any leaf key renders a
 usable bundle.
 
 `platform.internalCA.name` IS REFUSED BY NAME, EXPLICITLY, RATHER THAN LEFT TO
-THE GENERIC "not a key of platform.certificates.leaves" MESSAGE ABOVE. That
+THE GENERIC "not a key of platform.certificates.leaves" CHECK BELOW. That
 Secret is NOT a leaf — it is the CA's OWN Certificate, and cert-manager writes
 the CA's PRIVATE KEY into it (`tls.key`), not only a public bundle. Mounting
 it as a client-CA bundle hands the pod the authority to SIGN new certificates,
 a materially different risk from a typo'd name, so it gets its own sentence
-rather than sharing the generic one — checked FIRST, so a values file naming
-it gets only this sentence and not both.
+rather than sharing the generic one.
+
+THIS CHECK SITS OUTSIDE `certificates.create`, DELIBERATELY (coordinator
+review 2026-10-09): the danger is `platform.internalCA.create` minting that
+Secret at all, which is independent of whether THIS chart also issues the
+leaves under `certificates.leaves` — an adopter running `internalCA.create:
+true` with `certificates.create: false` (their own CA, somebody else's
+leaves) still must not point a `clientCaSecret` at the one Secret that holds
+the CA's private key. The GENERIC not-a-leaf check, below, still needs
+`certificates.leaves` to exist and stays inside that guard; this one does not
+read `leaves` at all, so it does not need it.
 */}}
 {{- $internalCaName := default "yadgar-internal-ca" (default dict $platformValues.internalCA).name -}}
 {{- $clientCaSecrets := list -}}
@@ -678,7 +656,50 @@ it gets only this sentence and not both.
       "issuing CA's ca.crt into every Certificate's target Secret, so any key of "
       "platform.certificates.leaves carries the same bundle this one does."))
       .key .name) -}}
-{{- else if not (hasKey $leaves .name) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $certsCreate := default false (default dict $platformValues.certificates).create -}}
+{{- if eq $certsCreate true -}}
+{{- $leaves := default dict (default dict $platformValues.certificates).leaves -}}
+{{- $clientSecrets := list -}}
+{{- $gatewayCallerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if $gatewayCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "gateway.clientCertificate.secret" "name" $gatewayCallerSecret) -}}
+{{- end -}}
+{{- $iamCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
+{{- if $iamCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret) -}}
+{{- end -}}
+{{- $taskCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
+{{- if $taskCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "task.taskDb.tls.clientCertSecret" "name" $taskCallerSecret) -}}
+{{- end -}}
+{{- $projectCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).clientCertSecret -}}
+{{- if $projectCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret) -}}
+{{- end -}}
+{{- range $clientSecrets -}}
+{{- if not (hasKey $leaves .name) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names the Secret %q as the client certificate it presents, and %q is not a key of "
+      "platform.certificates.leaves. The parent issues every client leaf this estate mounts under "
+      "platform.certificates.leaves (ledger 925), so a name that is not one of its keys is a Secret "
+      "cert-manager never creates: the pod mounting it sticks in ContainerCreating. Check the name "
+      "against platform.certificates.leaves for a typo in %s."))
+      .key .name .name .key) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+THE GENERIC not-a-leaf CHECK FOR `clientCaSecret`, NOW REUSING `$clientCaSecrets`
+GATHERED ABOVE. Every entry already matched against `$internalCaName`; an
+entry that WAS that name already carries its own refusal and is skipped here
+(`ne .name $internalCaName`) so a values file naming it gets one sentence,
+not two.
+*/}}
+{{- range $clientCaSecrets -}}
+{{- if and (ne .name $internalCaName) (not (hasKey $leaves .name)) -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "%s names the Secret %q as the bundle it verifies a caller against, and %q is not a key of "
       "platform.certificates.leaves. Every leaf's Secret carries the issuing CA's ca.crt, so any "
@@ -713,11 +734,13 @@ client leg presents no identity — the Secret that would carry it was never
 named.
 
 `kindIs "string"` GUARDS EVERY `clientAuth` READ BEFORE ANY COMPARISON
-(B-U5E convention item 1): the server's own schema does not yet type this key
-(B-U5 is what types it), so a bare `off`/`optional`/`required` read unquoted
-is a bool here and `has`/`eq` against a bool rather than a string would abort
-the whole render on an incompatible-types panic instead of reaching that
-server's own named refusal first.
+(B-U5E convention item 1): the server's own schema deliberately never types
+this key (ruling R1, ADR-0847 — an `enum`/`type` would pre-empt the render
+check's own named refusal for a bare, unquoted `off`), so a bare
+`off`/`optional`/`required` read unquoted is a bool here and `has`/`eq`
+against a bool rather than a string would abort the whole render on an
+incompatible-types panic instead of reaching that server's own named
+refusal first.
 
 EACH SERVER'S OWN `clientAuth` RENDER CHECK USED TO REFUSE `optional` AND
 `required` UNCONDITIONALLY, until its own B-U5 contract lifted that refusal
@@ -834,14 +857,18 @@ only two clients in this estate (`iam` publishes cache-invalidation events;
 client in this estate is `gateway` (`gateway.valkey.tls.enabled`); no other
 module dials it.
 
-`allow_non_tls` IS NOT YET A KEY ANY PINNED CHART DECLARES — searched across
-every repository in the org on 2026-10-08, zero hits — so this clause reads
-`platform.nats.tls.allowNonTls`, camelCased to match `clientAuth`'s own
-convention inside the same `tls:` block rather than the upstream nats-server
-config's native `allow_non_tls` spelling. THIS IS AN ASSUMED NAME, FLAGGED
-FOR REVIEW, not a verified one: there is no B-N2 contract yet to read it off
-of. Whichever name the real contract lands with, this clause's shape (not its
-one identifier) is the part the fixture states ahead of time.
+`allow_non_tls` IS A PASSTHROUGH TO THE UPSTREAM nats-server CONFIG, not a
+`platform`-owned key the way `nats.tls.enabled`/`clientAuth` are — confirmed
+against the plan (plan-final.md B-N2: "for the transport step only,
+`nats.config.merge.allow_non_tls`") and against the pinned schema: `nats.tls`
+is CLOSED (`additionalProperties: false`, only `enabled`/`clientAuth`), so
+`platform.nats.tls.allowNonTls` is refused by `platform`'s own schema before
+this template ever runs — measured 2026-10-09, `--set
+platform.nats.tls.allowNonTls=true` exits 1 with `additional properties
+'allowNonTls' not allowed`. `nats` itself (one level up) is OPEN, so
+`nats.config.merge.allow_non_tls` reaches the broker's own config the same
+way `nats.config.merge.authorization` already does for the two accounts
+`platform`'s own `values.yaml` declares.
 
 THE gRPC CLAUSES ABOVE LOST THIS GAP WHEN B-U5 LANDED; `platform` STILL HAS
 IT, because B-N2/B-V2 have not: `platform` 0.1.36 refuses any `clientAuth`
@@ -855,8 +882,8 @@ self-refusal.
 */}}
 {{- if hasKey .Subcharts "platform" -}}
 {{- $platformTlsValues := (default dict .Subcharts.platform).Values -}}
-{{- $natsTls := default dict $platformTlsValues.nats.tls -}}
-{{- $valkeyTls := default dict $platformTlsValues.valkey.tls -}}
+{{- $natsTls := default dict (default dict $platformTlsValues.nats).tls -}}
+{{- $valkeyTls := default dict (default dict $platformTlsValues.valkey).tls -}}
 
 {{- if and (kindIs "string" $natsTls.clientAuth) (eq $natsTls.clientAuth "required") -}}
 {{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).enabled -}}
@@ -898,17 +925,18 @@ self-refusal.
 {{- end -}}
 
 {{- if and (kindIs "bool" $natsTls.enabled) $natsTls.enabled -}}
-{{- if not (eq true (default false $natsTls.allowNonTls)) -}}
+{{- $allowNonTls := (default dict (default dict (default dict $platformTlsValues.nats).config).merge).allow_non_tls -}}
+{{- if not (and (kindIs "bool" $allowNonTls) $allowNonTls) -}}
 {{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).enabled -}}
 {{- $iamEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).enabled -}}
 {{- if or (not $gatewayEnabled) (not $iamEnabled) -}}
 {{- $refusals = append $refusals (printf (join "" (list
-      "platform.nats.tls.enabled is true and platform.nats.tls.allowNonTls is not true, so the "
-      "broker accepts only TLS connections, and gateway.nats.tls.enabled is %t and "
+      "platform.nats.tls.enabled is true and platform.nats.config.merge.allow_non_tls is not true, "
+      "so the broker accepts only TLS connections, and gateway.nats.tls.enabled is %t and "
       "iam.nats.tls.enabled is %t — NATS's only two clients in this estate. A client whose own "
       "nats.tls.enabled is false dials in cleartext and the broker would refuse it at the socket. "
-      "Set both clients' nats.tls.enabled true, or set platform.nats.tls.allowNonTls true to let a "
-      "plaintext client through the same port."))
+      "Set both clients' nats.tls.enabled true, or set platform.nats.config.merge.allow_non_tls "
+      "true to let a plaintext client through the same port."))
       $gatewayEnabled $iamEnabled) -}}
 {{- end -}}
 {{- end -}}
@@ -917,13 +945,19 @@ self-refusal.
 
 {{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
-AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Every refusal above `{{- if $creating -}}` is guarded on an adopter
-setting a `platform.<name>.create`; the operators clause is not, because the values
-file it exists for sets none. Raising here rather than inside the guard is what
-makes both reachable from one `fail`, which is the accumulation rule this file
-opens with. The guard itself is unmoved and still decides which refusals are
-COLLECTED — `test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
-with `{{- if true -}}` and reddens the modules-only render.
+AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Of the refusals ABOVE
+`{{- if $creating -}}` (the admin-token and `iam-keys` pair), both are guarded
+on an adopter setting a `platform.<name>.create`; the operators clause is
+not, because the values file it exists for sets none. Raising here rather
+than inside the guard is what makes both reachable from one `fail`, which is
+the accumulation rule this file opens with. The guard itself is unmoved and
+still decides which of THOSE TWO refusals are COLLECTED —
+`test_breaking_the_guard_makes_the_modules_only_render_refuse` replaces it
+with `{{- if true -}}` and reddens the modules-only render. B-U6's own
+clauses, further above still, answer to none of this: each guards itself on
+`hasKey .Subcharts "<name>"` or a sibling's own dial flag, independent of
+`$creating` — they reach this same `fail` only because every refusal in this
+file accumulates into the one `$refusals` list.
 */}}
 {{- if $refusals -}}
 {{- fail (printf "\n\nyadgar: this parent chart refuses to render.\n\n%s\n" (join "\n\n" $refusals)) -}}

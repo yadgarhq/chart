@@ -2057,9 +2057,10 @@ def chart_with_a_vendored_line_rewritten(
     and repack it under the same name so the pin in `chart/Chart.yaml` still
     resolves.
 
-    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): the NATS/valkey
-    enforce-without-presenter clauses simulate `platform`'s own B-N2/B-V2
-    contract landing, the one case this helper's original caller also covers.
+    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): most callers
+    simulate `platform`'s own B-N2/B-V2 contract landing. `test_a_nats_client_auth_case_where_only_one_caller_presents`
+    vendors `gateway` too, through `chart_with_a_vendored_member_rewritten_in_place`
+    below — the two share a chart copy rather than each starting a fresh one.
 
     IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
     whole chart, `charts/` included, and every edit lands inside `destination`.
@@ -2077,20 +2078,35 @@ def chart_with_a_vendored_line_rewritten(
     twice would be half-rewritten and the render would show a mutation nobody
     designed.
     """
-    import io
-    import tarfile
-
     copy = destination / "chart"
     shutil.copytree(CHART, copy)
+    chart_with_a_vendored_member_rewritten_in_place(copy, member, was, now, subchart)
+    return copy
+
+
+def chart_with_a_vendored_member_rewritten_in_place(
+    copy: Path, member: str, was: str, now: str, subchart: str = THE_VENDORED_SUBCHART
+) -> None:
+    """THE SAME EDIT AS ABOVE, against a chart copy that already exists (B-U6).
+
+    Split out so a red case needing TWO subcharts vendored — one tarball's
+    self-refusal lifted, a SECOND sibling's lifted too — can call this twice
+    against the one copy `chart_with_a_vendored_line_rewritten` made, rather
+    than `shutil.copytree` overwriting that copy on a second call (it refuses
+    onto an existing directory, by design: `copy` already exists in `destination`
+    by the time a second call would run, and overwriting it silently would be
+    the "edit lands nobody can see" failure the whole family of gates exists to
+    refuse).
+    """
+    import io
+    import tarfile
 
     # ONE TARBALL, ASSERTED. A glob that matches zero files would otherwise make
     # this helper a no-op, and a glob that matches two would mutate whichever
     # sorted first. `[0-9]` AFTER THE HYPHEN (B-U6), not `*`: `charts/iam-*.tgz`
     # would also match a sibling `iam-db-*.tgz`, since `iam-db-...` starts with
     # `iam-` too. The version always starts with a digit, so anchoring on that is
-    # what would tell them apart — `platform`, this helper's only caller today,
-    # has no such sibling and does not exercise the ambiguity, but the anchor
-    # costs nothing and is correct for either shape.
+    # what tells them apart.
     tarballs = sorted(copy.glob(f"charts/{subchart}-[0-9]*.tgz"))
     assert len(tarballs) == 1, (
         f"`charts/` holds {len(tarballs)} `{subchart}` tarball(s) — "
@@ -2126,7 +2142,6 @@ def chart_with_a_vendored_line_rewritten(
             archive.addfile(entry, io.BytesIO(body) if body is not None else None)
 
     tarballs[0].write_bytes(rewritten.getvalue())
-    return copy
 
 
 def assert_the_mutation_reddened_the_gate(documents: list[dict]) -> list[str]:
@@ -2291,10 +2306,14 @@ GRPC_ENFORCE_WITHOUT_PRESENTER_CASES = [
         id="task-db-from-task",
     ),
     pytest.param(
-        "project-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: project-db-tls\n"
+        # `optional`, not `required` — the only one of the six, so a mutant
+        # that narrowed `has $tls.clientAuth (list "optional" "required")` to
+        # `eq $tls.clientAuth "required"` still reddens somewhere (coordinator
+        # review 2026-10-09: all six used `required` before this).
+        "project-db:\n  tls:\n    clientAuth: optional\n    clientCaSecret: project-db-tls\n"
         "    clientCaSecretKey: ca.crt\nproject:\n  projectDb:\n    tls:\n      enabled: false\n",
-        ['project-db.tls.clientAuth is "required"', "project.projectDb.tls.enabled is false"],
-        id="project-db-from-project",
+        ['project-db.tls.clientAuth is "optional"', "project.projectDb.tls.enabled is false"],
+        id="project-db-from-project-optional",
     ),
 ]
 
@@ -2318,24 +2337,45 @@ def test_a_server_enforcing_clientauth_with_no_presenter_refuses(
         assert substring in result.stderr, result.stderr
 
 
-def test_an_empty_caller_secret_also_counts_as_no_presenter(tmp_path: Path) -> None:
+# ONE gRPC-TO-SERVER PAIR AND ONE -DB PAIR (coordinator review 2026-10-09):
+# the shared `gateway.clientCertificate.secret` and a server-specific
+# `<dial>.tls.clientCertSecret` are two different key shapes in
+# `_validate.tpl`'s `$callerSecret` read, and a single pair tested the shared
+# one only.
+EMPTY_CALLER_SECRET_CASES = [
+    pytest.param(
+        "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
+        "gateway:\n  iam:\n    tls:\n      enabled: true\n",
+        'iam.tls.clientAuth is "required"',
+        "gateway.clientCertificate.secret is \"\"",
+        id="iam-from-gateway",
+    ),
+    pytest.param(
+        "iam-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
+        "iam:\n  iamDb:\n    tls:\n      enabled: true\n",
+        'iam-db.tls.clientAuth is "required"',
+        "iam.iamDb.tls.clientCertSecret is \"\"",
+        id="iam-db-from-iam",
+    ),
+]
+
+
+@pytest.mark.parametrize(("overlay_body", "clientauth_substring", "empty_secret_substring"), EMPTY_CALLER_SECRET_CASES)
+def test_an_empty_caller_secret_also_counts_as_no_presenter(
+    tmp_path: Path, overlay_body: str, clientauth_substring: str, empty_secret_substring: str
+) -> None:
     """THE OTHER HALF OF "presents nothing": `tls.enabled` true, the Secret name empty.
 
     `gateway.iam.tls.enabled: true` with `gateway.clientCertificate.secret` left
     at its default `""` is an encrypted hop whose client leg names no identity —
     cert-manager mounts nothing, so the handshake is wired for mTLS and carries
-    none. Only `iam` here, as the representative case; the other five pairs
-    share the same two-armed `or` in `_validate.tpl`.
+    none. The other four pairs share the same two-armed `or` in `_validate.tpl`.
     """
-    values = overlay(
-        tmp_path / "enabled-but-empty-secret.yaml",
-        "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
-        "gateway:\n  iam:\n    tls:\n      enabled: true\n",
-    )
+    values = overlay(tmp_path / "enabled-but-empty-secret.yaml", overlay_body)
     result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
-    assert 'iam.tls.clientAuth is "required"' in result.stderr, result.stderr
-    assert 'gateway.clientCertificate.secret is ""' in result.stderr, result.stderr
+    assert clientauth_substring in result.stderr, result.stderr
+    assert empty_secret_substring in result.stderr, result.stderr
 
 
 def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp_path: Path) -> None:
@@ -2360,21 +2400,53 @@ def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp
     assert documents
 
 
-def test_a_typo_in_a_client_secret_name_refuses_against_the_leaf_map(tmp_path: Path) -> None:
+# Every one of the four keys `_validate.tpl`'s PART 1 reads, each with its own
+# typo'd name — a single key (`gateway`'s, the only one tested before
+# coordinator review 2026-10-09) could pass by accident if the template read
+# the right key by coincidence; one case per key is what rules that out.
+GRPC_CLIENT_SECRET_TYPO_CASES = [
+    pytest.param(
+        "gateway.clientCertificate.secret",
+        "gateway:\n  clientCertificate:\n    secret: gatewy-client-tls\n",
+        "gatewy-client-tls",
+        id="gateway",
+    ),
+    pytest.param(
+        "iam.iamDb.tls.clientCertSecret",
+        "iam:\n  iamDb:\n    tls:\n      clientCertSecret: iam-db-tsl\n",
+        "iam-db-tsl",
+        id="iam",
+    ),
+    pytest.param(
+        "task.taskDb.tls.clientCertSecret",
+        "task:\n  taskDb:\n    tls:\n      clientCertSecret: tsak-db-tls\n",
+        "tsak-db-tls",
+        id="task",
+    ),
+    pytest.param(
+        "project.projectDb.tls.clientCertSecret",
+        "project:\n  projectDb:\n    tls:\n      clientCertSecret: projcet-db-tls\n",
+        "projcet-db-tls",
+        id="project",
+    ),
+]
+
+
+@pytest.mark.parametrize(("key", "overlay_body", "typo"), GRPC_CLIENT_SECRET_TYPO_CASES)
+def test_a_typo_in_a_client_secret_name_refuses_against_the_leaf_map(
+    tmp_path: Path, key: str, overlay_body: str, typo: str
+) -> None:
     """B-U6 PART 1: a named client Secret that is not a key of `platform.certificates.leaves` refuses.
 
     NO VENDORING NEEDED HERE, unlike PART 2 and 3: nothing in `platform`
     refuses a mistyped Secret NAME, so this is reachable through the real,
     unmodified pin today.
     """
-    values = overlay(
-        tmp_path / "a-typo-d-client-secret.yaml",
-        "gateway:\n  clientCertificate:\n    secret: gatewy-client-tls\n",
-    )
+    values = overlay(tmp_path / "a-typo-d-client-secret.yaml", overlay_body)
     result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
-    assert "gateway.clientCertificate.secret" in result.stderr, result.stderr
-    assert '"gatewy-client-tls"' in result.stderr, result.stderr
+    assert key in result.stderr, result.stderr
+    assert f'"{typo}"' in result.stderr, result.stderr
     assert "platform.certificates.leaves" in result.stderr, result.stderr
 
 
@@ -2394,6 +2466,22 @@ def test_platform_enabled_false_does_not_check_a_client_secret_against_the_leaf_
     assert documents, "rendered nothing, so this case is not exercising a real install"
 
 
+def test_certificates_create_false_does_not_check_a_client_secret_against_the_leaf_map(tmp_path: Path) -> None:
+    """B-U6 PART 1's OTHER SKIP: `platform.certificates.create: false` leaves no `leaves` to check.
+
+    `platform.enabled` stays true here — `platform` IS a key of `.Subcharts` —
+    so this is a different premise from the skip above: an adopter running
+    their own CA, with `platform` otherwise on, mints these Secrets under a
+    name this chart never sees, and PART 1 has nothing to say about it either.
+    """
+    values = overlay(
+        tmp_path / "certs-create-false-with-a-typo-d-secret.yaml",
+        "platform:\n  certificates:\n    create: false\ngateway:\n  clientCertificate:\n    secret: gatewy-client-tls\n",
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents, "rendered nothing, so this case is not exercising a real install"
+
+
 def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Path) -> None:
     """B-U6 PART 1's OTHER SKIP: an empty Secret name means "presents nothing", not "named wrong".
 
@@ -2409,12 +2497,12 @@ def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Pa
 
 # ── B-U6 PART 1b: the six servers' own `tls.clientCaSecret` (ruling R7) ──────
 #
-# NO VENDORING NEEDED HERE, UNLIKE PART 2. `tls.clientCaSecret` and
-# `tls.clientCaSecretKey` were rendered by the B-U5E expand, before the B-U5
-# contract this suite's PART 2 cases have to simulate — measured 2026-10-08,
-# both keys already render against the chart's CURRENT pins. `clientCaSecret`
-# needs `clientCaSecretKey` set alongside it (the module's own render check);
-# every case below sets both.
+# NO VENDORING NEEDED HERE, SAME AS PART 2 NOW THAT THE B-U5 CONTRACTS HAVE
+# MERGED. `tls.clientCaSecret` and `tls.clientCaSecretKey` were rendered by
+# the B-U5E expand, before either the contract or this unit's own work —
+# measured 2026-10-08, both keys already render against the chart's CURRENT
+# pins. `clientCaSecret` needs `clientCaSecretKey` set alongside it (the
+# module's own render check); every case below sets both.
 
 GRPC_SERVER_CLIENT_CA_SECRET_KEYS = [
     pytest.param("iam.tls.clientCaSecret", "iam:\n  tls:\n    clientCaSecret: %s\n    clientCaSecretKey: ca.crt\n", id="iam"),
@@ -2475,6 +2563,27 @@ def test_the_internal_cas_own_secret_is_refused_by_name_as_a_clientcasecret(tmp_
     assert "holds the CA's private key" in result.stderr, result.stderr
     # THE GENERIC MESSAGE DOES NOT ALSO FIRE — one problem, one sentence.
     assert "cert-manager never creates" not in result.stderr, result.stderr
+
+
+def test_the_internal_cas_own_secret_refuses_even_with_certificates_create_false(tmp_path: Path) -> None:
+    """THE RESTRUCTURE'S OWN RED CASE (coordinator review 2026-10-09): this check sits outside
+    `platform.certificates.create`, so it fires on `platform.internalCA.create: true` alone.
+
+    `platform.certificates.create: false` here — an adopter bringing their own
+    leaves — would make the GENERIC not-a-leaf check inert (no `leaves` to
+    check against), but the CA's own Secret is dangerous regardless of who
+    issues the leaves, because `platform.internalCA.create` is what mints it.
+    """
+    values = overlay(
+        tmp_path / "internalca-true-certs-create-false.yaml",
+        "platform:\n  certificates:\n    create: false\n"
+        "iam:\n  tls:\n    clientCaSecret: yadgar-internal-ca\n    clientCaSecretKey: ca.crt\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert "iam.tls.clientCaSecret" in result.stderr, result.stderr
+    assert '"yadgar-internal-ca"' in result.stderr, result.stderr
+    assert "holds the CA's private key" in result.stderr, result.stderr
 
 
 def test_a_real_leaf_name_as_a_clientcasecret_does_not_refuse(tmp_path: Path) -> None:
@@ -2555,6 +2664,56 @@ def test_nats_clientauth_required_with_a_client_not_presenting_refuses(tmp_path:
     assert "iam.nats.tls.enabled is false" in result.stderr, result.stderr
 
 
+# `gateway` ALSO refuses `nats.tls.enabled: true` UNCONDITIONALLY TODAY
+# (its own B-N3E expand, `templates/deployment.yaml`: "the binary reads
+# NATS_TLS_ENABLED only from B-N3"), the same unconditional-self-refusal shape
+# `platform` has for `nats`/`valkey` — so testing `or (not $gatewayEnabled)
+# (not $iamEnabled)` with exactly one side true needs `gateway`'s OWN tarball
+# vendored too, not only `platform`'s. `chart_with_a_vendored_member_rewritten_in_place`
+# is what lets both edits land in the one chart copy.
+GATEWAY_NATS_ENABLED_SELF_REFUSAL_LINE = (
+    '{{- if and $natsTlsStated (kindIs "bool" .Values.nats.tls.enabled) .Values.nats.tls.enabled }}'
+    '{{ fail "nats.tls.enabled: true is refused by this chart version: it declares the key, but the '
+    "binary reads NATS_TLS_ENABLED only from B-N3 and the broker serves no TLS until B-L1. Set it to "
+    'false (ADR-0845, ADR-0852)" }}{{ end }}\n'
+)
+
+
+def test_a_nats_client_auth_case_where_only_one_caller_presents(tmp_path: Path) -> None:
+    """MUTANT-KILLER (coordinator review 2026-10-09): `or`, not `and`, between the two callers.
+
+    Both false already reddens the test above; a mutant that narrowed the
+    clause's `or (not $gatewayEnabled) (not $iamEnabled)` to `and` would still
+    pass it, because both sides being false satisfies `and` too. Exactly one
+    side false is the only input that tells the two operators apart.
+    """
+    chart = chart_with_a_vendored_line_rewritten(
+        tmp_path,
+        "platform/templates/render-checks.yaml",
+        NATS_CLIENTAUTH_UNRENDERED_LINE_WAS,
+        NATS_CLIENTAUTH_UNRENDERED_LINE_NOW,
+        "platform",
+    )
+    chart_with_a_vendored_member_rewritten_in_place(
+        chart,
+        "gateway/templates/deployment.yaml",
+        GATEWAY_NATS_ENABLED_SELF_REFUSAL_LINE,
+        "{{- if false }}{{ end }}\n",
+        "gateway",
+    )
+    values = overlay(
+        tmp_path / "nats-required-one-presenter.yaml",
+        "platform:\n  nats:\n    tls:\n      clientAuth: required\n"
+        "gateway:\n  nats:\n    tls:\n      enabled: true\n"
+        "iam:\n  nats:\n    tls:\n      enabled: false\n",
+    )
+    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
+    assert "gateway.nats.tls.enabled is true" in result.stderr, result.stderr
+    assert "iam.nats.tls.enabled is false" in result.stderr, result.stderr
+
+
 def test_valkey_clientauth_with_its_one_client_not_presenting_refuses(tmp_path: Path) -> None:
     """valkey's `clientAuth` set is `off | optional | required`, unlike NATS's two-way one."""
     chart = chart_with_a_vendored_line_rewritten(
@@ -2600,11 +2759,11 @@ def test_valkey_plaintext_false_with_its_one_client_still_in_cleartext_refuses(t
 
 
 def test_nats_enabled_with_no_allow_non_tls_and_a_client_in_cleartext_refuses(tmp_path: Path) -> None:
-    """`platform.nats.tls.allowNonTls` IS AN ASSUMED KEY NAME, flagged for review in `_validate.tpl`'s
-
-    own comment: no chart in the org declares `allow_non_tls` in any spelling
-    today (searched 2026-10-08), so this clause — and this red case — state the
-    shape ahead of the B-N2 contract that will give the key a real home.
+    """`platform.nats.config.merge.allow_non_tls` is the REAL upstream key (coordinator review 2026-10-09,
+    plan-final.md B-N2), confirmed against the plan and against `platform.nats.tls`'s own CLOSED
+    schema: `platform.nats.tls.allowNonTls` — this clause's first, assumed name — is refused by
+    `platform`'s own schema before this template ever runs (`additional properties 'allowNonTls' not
+    allowed`), so that spelling could never have been used even once B-N2 landed.
     """
     chart = chart_with_a_vendored_line_rewritten(
         tmp_path,
@@ -2622,9 +2781,34 @@ def test_nats_enabled_with_no_allow_non_tls_and_a_client_in_cleartext_refuses(tm
     result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert "platform.nats.tls.enabled is true" in result.stderr, result.stderr
-    assert "platform.nats.tls.allowNonTls is not true" in result.stderr, result.stderr
+    assert "platform.nats.config.merge.allow_non_tls is not true" in result.stderr, result.stderr
     assert "gateway.nats.tls.enabled is false" in result.stderr, result.stderr
     assert "iam.nats.tls.enabled is false" in result.stderr, result.stderr
+
+
+def test_nats_enabled_with_allow_non_tls_true_does_not_refuse(tmp_path: Path) -> None:
+    """THE MUTATION CHECK'S GREEN HALF: the real escape, used correctly, renders.
+
+    Same vendored `platform` copy as the red case above — the "enabled"
+    unrendered arm lifted the same way — with `platform.nats.config.merge.allow_non_tls: true`
+    and BOTH clients still in cleartext. If this clause's `or` were a mutant
+    that always refused, this would redden too; it does not.
+    """
+    chart = chart_with_a_vendored_line_rewritten(
+        tmp_path,
+        "platform/templates/render-checks.yaml",
+        ENABLED_SWITCH_UNRENDERED_LINE_WAS,
+        ENABLED_SWITCH_UNRENDERED_LINE_NOW,
+        "platform",
+    )
+    values = overlay(
+        tmp_path / "nats-enabled-allow-non-tls-true.yaml",
+        "platform:\n  nats:\n    tls:\n      enabled: true\n    config:\n      merge:\n        allow_non_tls: true\n"
+        "gateway:\n  nats:\n    tls:\n      enabled: false\n"
+        "iam:\n  nats:\n    tls:\n      enabled: false\n",
+    )
+    documents = render(str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
 
 
 # ── the renewal ladder, lifted from `yadgarhq/platform` to the whole estate ──
