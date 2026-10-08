@@ -719,15 +719,19 @@ is a bool here and `has`/`eq` against a bool rather than a string would abort
 the whole render on an incompatible-types panic instead of reaching that
 server's own named refusal first.
 
-EACH SERVER'S OWN `clientAuth` RENDER CHECK ALREADY REFUSES `optional` AND
-`required` UNCONDITIONALLY, AT TODAY'S PINS, until its own B-U5 contract lands
-and lifts that refusal (B-U5E convention). So at today's pins every one of
-these six clauses is unreachable through a real render — measured 2026-10-08:
-`--set iam.tls.clientAuth=optional` exits 1 inside `iam`'s own
-`templates/render-checks.yaml` before this template runs. This is the K-8
-"fixture ahead of contract" shape, and `test_parent_chart.py` exercises each
-clause by rewriting the one line of a VENDORED copy of the server's own chart
-that performs that self-refusal — never by waiting for the real contract pin.
+EACH SERVER'S OWN `clientAuth` RENDER CHECK USED TO REFUSE `optional` AND
+`required` UNCONDITIONALLY, until its own B-U5 contract lifted that refusal
+(B-U5E convention) — all six landed during this unit's own work (iam#95,
+iam-db#86, task#74, task-db#87, project#30, project-db#56), and the parent's
+pin was bumped to match before this file's test suite was finished. So
+`test_parent_chart.py` exercises each of these six clauses against the real,
+unmodified pin: `--set iam.tls.clientAuth=required` now reaches THIS
+template, not `iam`'s own `templates/render-checks.yaml`, measured
+2026-10-08. Each server's own contract ALSO now requires `tls.clientCaSecret`
+whenever `clientAuth` is `optional`/`required` — a check of its OWN, about
+which authority it verifies a caller against, not about whether a caller
+presents one — so a red case for this clause names a real leaf there too, or
+the server's own refusal fires first and names nothing this clause is about.
 */}}
 {{- $iamTls := default dict (default dict (default dict .Subcharts.iam).Values).tls -}}
 {{- if and (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
@@ -839,10 +843,11 @@ FOR REVIEW, not a verified one: there is no B-N2 contract yet to read it off
 of. Whichever name the real contract lands with, this clause's shape (not its
 one identifier) is the part the fixture states ahead of time.
 
-THE SAME "UNCONDITIONAL SELF-REFUSAL" GAP THE gRPC CLAUSES ABOVE HAVE applies
-here too: `platform` 0.1.36 refuses any `clientAuth` other than `"off"`, and
-`enabled: true` / `plaintext: false`, UNCONDITIONALLY — measured 2026-10-08,
-`helm template ... --set platform.nats.tls.clientAuth=required` exits 1 at
+THE gRPC CLAUSES ABOVE LOST THIS GAP WHEN B-U5 LANDED; `platform` STILL HAS
+IT, because B-N2/B-V2 have not: `platform` 0.1.36 refuses any `clientAuth`
+other than `"off"`, and `enabled: true` / `plaintext: false`, UNCONDITIONALLY
+— measured 2026-10-08, `helm template ... --set
+platform.nats.tls.clientAuth=required` exits 1 at
 `platform/templates/render-checks.yaml:648` before this template runs. Each
 clause below is fixture work ahead of B-N2/B-V2, exercised in the test suite
 by rewriting the one line of a vendored `platform` chart that performs that
