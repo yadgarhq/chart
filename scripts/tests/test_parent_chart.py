@@ -81,6 +81,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -4094,6 +4095,12 @@ HOSTNAME_KEYS = (
     "iam.enrolment.gateway",
 )
 BUILT_IN_HOSTNAME = "gateway.yadgar.internal"
+# `iam`'s OWN HISTORICAL DEFAULT CARRIES A PORT (`iam`'s `_hostname.tpl`'s step
+# 3), where the other four sites' built-in is the bare `BUILT_IN_HOSTNAME`. A
+# check that only looks for `BUILT_IN_HOSTNAME` as a substring of the whole
+# render passes here too — the port-bearing URL contains the bare hostname —
+# so it cannot tell this site apart from the other four (ledger 1153).
+BUILT_IN_IAM_ENROLMENT_GATEWAY = f"https://{BUILT_IN_HOSTNAME}:18443"
 
 # THE LAST PARENT BEFORE ADR-0808's THREE PINS (platform 0.1.18, gateway 0.9.53,
 # iam 0.8.45 arrived in 0.3.3, 0.3.4 and 0.3.5). Its children do not read
@@ -4147,17 +4154,15 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
         def values_of(member: str) -> dict:
             return yaml.safe_load(archive.extractfile(member).read()) or {}
 
+        # `global` IS DECLARED BY THE TARBALL'S OWN `yadgar/values.yaml` ALONE
+        # (ledger 1153). Every example today pins 0.3.39 or later, and every pin
+        # that recent already packages `chart/values.yaml`'s `global.hostname`
+        # (ADR-0808), so `values_of` above already carries it. Grafting it again
+        # from THIS REPOSITORY'S working tree, as this unit used to, let a typo
+        # recognise itself: a misspelling made on HEAD and repeated in a
+        # `valuesObject` matched the graft's own (equally misspelt) copy, and a
+        # pin that declares no `global` at all borrowed HEAD's regardless.
         defaults = values_of("yadgar/values.yaml")
-        # `global` IS DECLARED BY THIS REPOSITORY'S `chart/values.yaml`, not by any
-        # child: the children READ `global.hostname` with a fallback and declare
-        # nothing. A pinned parent older than that declaration (0.3.5 predates it by
-        # one release, the release this repository's own change cuts) would name
-        # `global.hostname` unrecognised although every child in it reads the key,
-        # so the declaration is taken from the source. A typo under `global` is
-        # still named, because only the declared leaves are recognised.
-        declared_global = (yaml.safe_load((CHART / "values.yaml").read_text()) or {}).get("global")
-        if declared_global:
-            defaults = merged({"global": declared_global}, defaults)
         for name in {m.split("/")[2] for m in archive.getnames() if m.count("/") >= 3 and m.startswith("yadgar/charts/")}:
             member = f"yadgar/charts/{name}/values.yaml"
             if member in archive.getnames():
@@ -4175,6 +4180,25 @@ def unrecognised_keys(values_object: dict, tarball: Path) -> list[str]:
                 defaults = merged({name: schema_skeleton(json.loads(archive.extractfile(schema).read()))}, defaults)
 
     return undeclared_leaves(values_object, defaults, "no chart in the pinned parent")
+
+
+def minimal_parent_tarball(destination: Path, values: dict) -> Path:
+    """A tarball `unrecognised_keys()` can read, declaring `values` and no children. PURE-ish.
+
+    Only `yadgar/values.yaml` is read when no `yadgar/charts/<name>/` member
+    exists, so this is enough to put a chosen (or absent) `global` block in
+    front of `unrecognised_keys()` without pulling or packaging anything real.
+    """
+    import io
+    import tarfile
+
+    tarball = destination / "synthetic.tgz"
+    body = yaml.safe_dump(values).encode()
+    with tarfile.open(tarball, "w:gz") as archive:
+        info = tarfile.TarInfo("yadgar/values.yaml")
+        info.size = len(body)
+        archive.addfile(info, io.BytesIO(body))
+    return tarball
 
 
 def schema_skeleton(schema: dict) -> dict:
@@ -4400,6 +4424,22 @@ def derived_from(host: str) -> dict[str, object]:
     }
 
 
+def built_in_sites() -> dict[str, object]:
+    """Each site's value with `global.hostname` unset and no per-chart override either. PURE.
+
+    NOT four copies of `BUILT_IN_HOSTNAME` and a fifth that merely contains it:
+    `iam`'s own default carries a port the other four never had, so the per-site
+    map is the only check that cannot mistake the URL for the bare hostname.
+    """
+    return {
+        "platform.gatewayListener.hostname": BUILT_IN_HOSTNAME,
+        "platform.edgeTLS.commonName": BUILT_IN_HOSTNAME,
+        "platform.edgeTLS.dnsNames": [BUILT_IN_HOSTNAME],
+        "gateway.gateway.hostname": BUILT_IN_HOSTNAME,
+        "iam.enrolment.gateway": BUILT_IN_IAM_ENROLMENT_GATEWAY,
+    }
+
+
 def five_key_form(values_object: dict, host: str) -> dict:
     """The same `valuesObject` with the hostname written into the five keys instead. PURE."""
     five = {key: value for key, value in values_object.items() if key != "global"}
@@ -4458,7 +4498,12 @@ def pre_0808(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_a_pre_0808_pin_reddens_the_derivation(pre_0808: Path, tmp_path: Path) -> None:
-    """THE RED CASE: at 0.3.2 no child reads `global`, so every site keeps the built-in."""
+    """THE RED CASE: at 0.3.2 no child reads `global`, so every site keeps its own built-in.
+
+    PER-SITE, not a substring (ledger 1153): `BUILT_IN_HOSTNAME in result.stdout`
+    passed even though `iam.enrolment.gateway` carries a port none of the other
+    four sites do, because the substring is still there inside that URL.
+    """
     values_object = example_source()["helm"]["valuesObject"]
     host = value_at(values_object, HOSTNAME_KEY)
     tarball = pre_0808
@@ -4468,7 +4513,7 @@ def test_a_pre_0808_pin_reddens_the_derivation(pre_0808: Path, tmp_path: Path) -
     documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
     sites = hostname_sites(documents)
     assert all(sites[key] != derived_from(host)[key] for key in HOSTNAME_KEYS), sites
-    assert BUILT_IN_HOSTNAME in result.stdout
+    assert sites == built_in_sites(), sites
 
 
 def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
@@ -4485,6 +4530,40 @@ def test_a_misspelt_example_key_reddens_the_recognition_gate(pinned: Path) -> No
     declared["hostnme"] = declared.pop("hostname")
     failures = unrecognised_keys(values_object, pinned)
     assert len(failures) == 1 and "`global.hostnme`" in failures[0], failures
+
+
+def test_a_typo_this_repository_also_makes_is_still_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: Path
+) -> None:
+    """THE RED CASE (ledger 1153): the gate must trust the pinned tarball, not HEAD.
+
+    The deleted graft read `global` from THIS REPOSITORY'S working-tree
+    `chart/values.yaml`. Point `CHART` at a copy carrying `global.hostnmae: x`
+    (the same misspelling ledger 1153 names) and ask for the identical typo in a
+    `valuesObject`: before the fix the graft recognised it, because it was
+    comparing the typo to itself rather than to anything the pinned parent
+    declares.
+    """
+    fake_chart = tmp_path / "chart"
+    fake_chart.mkdir()
+    (fake_chart / "values.yaml").write_text(yaml.safe_dump({"global": {"hostnmae": "x"}}))
+    monkeypatch.setattr(sys.modules[__name__], "CHART", fake_chart)
+    failures = unrecognised_keys({"global": {"hostnmae": "x"}}, pinned)
+    assert len(failures) == 1 and "`global.hostnmae`" in failures[0], failures
+
+
+def test_a_pin_with_no_global_at_all_names_an_unrecognised_hostname(tmp_path: Path) -> None:
+    """THE RED CASE (ledger 1153): a pin that declares no `global` lends it none.
+
+    A pinned parent that predates ADR-0808 has no `global` member in its own
+    `yadgar/values.yaml` at all. Before the fix, THIS REPOSITORY'S
+    `chart/values.yaml` — which does declare `global.hostname` — was grafted in
+    regardless, so a key the pinned parent itself never declared was recognised
+    anyway.
+    """
+    tarball = minimal_parent_tarball(tmp_path, {"platform": {"enabled": True}})
+    failures = unrecognised_keys({"global": {"hostname": "x"}}, tarball)
+    assert len(failures) == 1 and "`global.hostname`" in failures[0], failures
 
 
 def test_a_pre_b6_pin_reddens_the_whole_estate_gate(tmp_path: Path) -> None:
