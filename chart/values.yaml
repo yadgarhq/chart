@@ -80,10 +80,12 @@
 #
 # A CHILD'S OWN KEY, WHEN SET, STILL WINS over this one, so an existing values
 # file that names the five keys keeps working unchanged. EMPTY HERE, and empty
-# everywhere renders `gateway.yadgar.internal` in all five places — the chart's
-# behaviour before ADR-0808. `iam.enrolment.enabled: false` is how you turn
-# IssueEnrolment off; an empty `iam.enrolment.gateway` now means "derive", not
-# "off".
+# everywhere renders `gateway.yadgar.internal` at the four `platform` and
+# `gateway` sites, and `https://gateway.yadgar.internal:18443` at
+# `iam.enrolment.gateway` — iam's own built-in carries kind's host-mapped port,
+# where the other four never did. That is the chart's behaviour before
+# ADR-0808. `iam.enrolment.enabled: false` is how you turn IssueEnrolment off;
+# an empty `iam.enrolment.gateway` now means "derive", not "off".
 #
 # THIS IS THE ONE KEY HERE THAT RESTATES NO CHILD'S DEFAULT. No child declares
 # `global.hostname`; each reads it with a fallback. It is stated so that

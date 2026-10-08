@@ -126,8 +126,11 @@ The shared gates in `yadgarhq/actions` read the same file (ADR-0806).
 **State your hostname once, in `global.hostname` (ADR-0808).** The five places
 that carry it — `platform`'s listener hostname, the edge certificate's common name
 and DNS names, `gateway`'s HTTPRoute and `iam`'s enrolment URL — derive from it,
-so they cannot disagree. Left empty, all five render `gateway.yadgar.internal`,
-which resolves for nobody. A per-chart key you set still wins over the global.
+so they cannot disagree. Left empty, the four `platform` and `gateway` sites
+render `gateway.yadgar.internal`, and `iam`'s enrolment URL renders
+`https://gateway.yadgar.internal:18443` — `iam`'s own built-in carries a port
+the other four never had. Neither resolves for anybody. A per-chart key you
+set still wins over the global.
 
 - `iam`'s enrolment URL is derived as `https://<hostname>` with **no port**: it
   assumes the edge listener on 443. `iam` copies it into every enrolment token and
