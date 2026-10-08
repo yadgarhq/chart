@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "yadgarhq/chart",
+  "$comment": "ADR-0847 (closed schemas; render checks own types) and ADR-0850 (closure is per chart). THE PARENT RENDERS NOTHING OF ITS OWN (this file's own docstring item 1 in scripts/tests/test_parent_chart.py), so this schema closes only two things: the root itself, and `global`, the one block this chart's own source (`chart/values.yaml`, README) declares a key under. Every other key an adopter might type belongs to a child chart, and ADR-0850 measured that a parent schema closing a child's section refuses that child's own default render before the child's own schema ever sees the values — so the nine sections below are each declared `{}`, an open object, and the typo inside one is THAT CHILD'S schema's refusal, not this file's (measured: `autoscaling.enabeld` is refused by the child; `autoscalng` at this root is refused here). `global` IS CLOSED, unlike a module chart's own copy of it (which stays open — ADR-0850 — because every OTHER subchart's keys may live there too): this repository is the one chart that actually DECLARES a key under `global` (`global.hostname`, ADR-0808), so `global.hostnmae` is a typo this schema can and does name, both at the schema layer and at `unrecognised_keys()`'s tarball-scoped check in the test suite (ledger 1153). Two more leaves under `global` are open objects rather than refused: `global.image` and `global.labels` are the vendored `nats` subchart's own documented pass-through interface (`platform/charts/nats/templates/_helpers.tpl`, `files/*/pod-template.yaml`) — `global.image.pullSecretNames` names a private-registry pull secret and `global.image.registry`/`.pullPolicy` override the image source, `global.labels` merges onto every rendered object — and closing them would refuse an adopter's `--set global.image.pullSecretNames[0]=regcred` or `global.labels.team=x`, both of which render today. The nine sections: `gateway`, `iam`, `iam-db`, `project`, `project-db`, `task`, `task-db` and `platform` are keys `chart/values.yaml` states; `config` is not. `config` IS a dependency (`chart/Chart.yaml`) whose defaults coalesce under `config` the same way every other child's do, and `chart/values.yaml` states no `config:` block to carry it in this file's own properties. Leaving it undeclared refuses the default render (measured: `additional properties 'config' not allowed` on helm 4.3.0, `Additional property config is not allowed` on helm 3.18.4) — the exact ADR-0850 failure mode this file exists to avoid, on a dependency that is live today rather than hypothetical.",
+  "properties": {
+    "global": {
+      "properties": {
+        "hostname": {},
+        "image": {},
+        "labels": {}
+      },
+      "additionalProperties": false
+    },
+    "gateway": {},
+    "iam": {},
+    "iam-db": {},
+    "project": {},
+    "project-db": {},
+    "task": {},
+    "task-db": {},
+    "platform": {},
+    "config": {}
+  },
+  "additionalProperties": false
+}

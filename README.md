@@ -55,15 +55,11 @@ that outcome in its own `revisit_trigger`. `chart/templates/` exists only becaus
 `helm lint --strict` refuses a chart without it, and the one file in there is a
 partial that defines nothing.
 
-**It carries no `values.schema.json`, and that is a decision.** A parent schema
-would have to enumerate every knob of all eight children to avoid refusing a
-legitimate one, and it would then drift from them on the first module release that
-adds a knob. The cost is real and it is stated where an adopter meets it: seven of
-the eight module charts have no schema of their own, so a key no child declares is
-accepted and silently ignored. `config` is the exception — its schema is closed at
-every level, so a typo under `config:` is refused by name. Closing the gap for the
-other seven belongs in those seven charts, not in a file here that would own their
-interfaces from outside them.
+**It carries a `values.schema.json` that closes its own keys, not the children's.**
+The parent's `values.schema.json` closes its root and `global` and declares each
+child section open (ADR-0850). A typo at the root or under `global` is refused by
+the parent, and a typo inside a child section is refused by that child's own closed
+schema (ADR-0847).
 
 ## One machine, one command
 

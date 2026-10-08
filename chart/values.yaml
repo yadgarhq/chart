@@ -26,16 +26,10 @@
 # through the child's own name — `config.shared.tlsRotation.pollSeconds`,
 # `gateway.replicaCount`, and so on.
 #
-# NO `values.schema.json`, AND THE ABSENCE IS A DECISION RATHER THAN AN OVERSIGHT.
-# A parent schema would have to enumerate every knob of all eight children to
-# avoid refusing a legitimate one, and it would then drift from them on the first
-# module release that adds a knob — a refusal of a key the child accepts, from a
-# file nobody thought to update. Seven of the eight module charts carry no schema
-# of their own, so a typo in an adopter's values for those seven is silently
-# ignored today; that gap is real and it is filed as its own row rather than
-# solved here, because solving it in this file means owning every child's
-# interface from outside it. `config` is the one child with a closed schema, and
-# a typo under `config:` is still refused BY NAME through this parent.
+# THE PARENT'S `values.schema.json` CLOSES ITS ROOT AND `global` AND DECLARES
+# each child section open (ADR-0850). A typo at the root or under `global` is
+# refused by the parent, and a typo inside a child section is refused by that
+# child's own closed schema (ADR-0847).
 #
 # EVERY KEY BELOW RESTATES OR OVERRIDES A CHILD'S DEFAULT, which is two writers for
 # one value, and here is why each one is here anyway.
