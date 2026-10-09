@@ -2057,10 +2057,10 @@ def chart_with_a_vendored_line_rewritten(
     and repack it under the same name so the pin in `chart/Chart.yaml` still
     resolves.
 
-    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): most callers
-    simulate `platform`'s own B-N2/B-V2 contract landing. `test_a_nats_client_auth_case_where_only_one_caller_presents`
-    vendors `gateway` too, through `chart_with_a_vendored_member_rewritten_in_place`
-    below — the two share a chart copy rather than each starting a fresh one.
+    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): the callers
+    simulate `platform`'s own B-V2 contract landing. A caller that must edit a
+    second vendored chart in the same copy uses
+    `chart_with_a_vendored_member_rewritten_in_place` below.
 
     IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
     whole chart, `charts/` included, and every edit lands inside `destination`.
@@ -2614,69 +2614,45 @@ def test_platform_enabled_false_does_not_check_a_clientcasecret_against_the_leaf
 
 # ── B-U6 PART 3: NATS and valkey, whose TLS keys are `platform`-owned ────────
 
-NATS_CLIENTAUTH_UNRENDERED_LINE_WAS = (
-    '{{- else if ne $mode "off" }}\n'
-    '{{- $tlsUnrendered = append $tlsUnrendered (printf "`nats.tls.clientAuth: %q`" $mode) }}\n'
+# NATS NEEDS NO VENDORED-LINE REWRITE SINCE `platform` B-N2 (ledger 925): platform
+# renders the broker's TLS itself, so each NATS case below states a posture
+# platform's OWN contract accepts — the platform switch plus the upstream keys
+# that agree with it — and the parent's cross-check is the only refusal left.
+# Valkey stays at platform's expand until B-V2, so its cases still lift a line.
+NATS_UPSTREAM_TLS = (
+    "    config:\n      nats:\n        tls:\n          enabled: true\n          secretName: nats-tls\n"
 )
-NATS_CLIENTAUTH_UNRENDERED_LINE_NOW = (
-    '{{- else if false }}\n'
-    '{{- $tlsUnrendered = append $tlsUnrendered (printf "`nats.tls.clientAuth: %q`" $mode) }}\n'
+NATS_UPSTREAM_VERIFIED_TLS = (
+    "    config:\n      nats:\n        tls:\n          enabled: true\n          secretName: nats-tls\n"
+    "          merge:\n            verify: true\n            ca_file: /etc/nats-certs/nats/ca.crt\n"
 )
-VALKEY_CLIENTAUTH_UNRENDERED_LINE_WAS = (
-    '{{- else if ne $mode "off" }}\n'
-    '{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.clientAuth: %q`" $tlsServer $mode) }}\n'
-)
-VALKEY_CLIENTAUTH_UNRENDERED_LINE_NOW = (
-    '{{- else if false }}\n'
-    '{{- $tlsUnrendered = append $tlsUnrendered (printf "`%s.tls.clientAuth: %q`" $tlsServer $mode) }}\n'
-)
-ENABLED_SWITCH_UNRENDERED_LINE_WAS = '{{- else if and (eq $switch "enabled") $value }}'
-ENABLED_SWITCH_UNRENDERED_LINE_NOW = "{{- else if false }}"
-PLAINTEXT_SWITCH_UNRENDERED_LINE_WAS = '{{- else if and (eq $switch "plaintext") (not $value) }}'
-PLAINTEXT_SWITCH_UNRENDERED_LINE_NOW = "{{- else if false }}"
+# NO `$tlsUnrendered` REWRITE CONSTANTS LEFT (platform chart-followup for
+# B-N2 + B-V2, ledger 925/1402): `platform` renders `nats.tls.clientAuth`,
+# the `enabled`/`plaintext` switches, and `valkey.tls.clientAuth` for real
+# now — none of those lines exist in `render-checks.yaml` to vendor-rewrite
+# any more, and every test below that used to lift one renders the real
+# pinned `platform` directly instead.
 
 
 def test_nats_clientauth_required_with_a_client_not_presenting_refuses(tmp_path: Path) -> None:
     """NATS has no `optional` mode (ADR-0854): its only enforced value is `required`.
 
-    `platform`'s own "asks for TLS no template renders" arm is lifted for the
-    `nats.tls.clientAuth` line alone — `test_valkey_*` below lift a different
-    line each, so none of these four cases unlocks more of `platform`'s guard
-    than its own scenario needs.
+    `platform` B-N2's own contract accepts the posture below (TLS on, `verify`
+    against the leaf's CA, no `allow_non_tls`), so the parent's refusal is the
+    one that arrives — no vendored line is rewritten.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        NATS_CLIENTAUTH_UNRENDERED_LINE_WAS,
-        NATS_CLIENTAUTH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
     values = overlay(
         tmp_path / "nats-required-no-presenter.yaml",
-        "platform:\n  nats:\n    tls:\n      clientAuth: required\n"
-        "gateway:\n  nats:\n    tls:\n      enabled: false\n"
+        "platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: required\n"
+        + NATS_UPSTREAM_VERIFIED_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: false\n"
         "iam:\n  nats:\n    tls:\n      enabled: false\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
     assert "gateway.nats.tls.enabled is false" in result.stderr, result.stderr
     assert "iam.nats.tls.enabled is false" in result.stderr, result.stderr
-
-
-# `gateway` ALSO refuses `nats.tls.enabled: true` UNCONDITIONALLY TODAY
-# (its own B-N3E expand, `templates/deployment.yaml`: "the binary reads
-# NATS_TLS_ENABLED only from B-N3"), the same unconditional-self-refusal shape
-# `platform` has for `nats`/`valkey` — so testing `or (not $gatewayEnabled)
-# (not $iamEnabled)` with exactly one side true needs `gateway`'s OWN tarball
-# vendored too, not only `platform`'s. `chart_with_a_vendored_member_rewritten_in_place`
-# is what lets both edits land in the one chart copy.
-GATEWAY_NATS_ENABLED_SELF_REFUSAL_LINE = (
-    '{{- if and $natsTlsStated (kindIs "bool" .Values.nats.tls.enabled) .Values.nats.tls.enabled }}'
-    '{{ fail "nats.tls.enabled: true is refused by this chart version: it declares the key, but the '
-    "binary reads NATS_TLS_ENABLED only from B-N3 and the broker serves no TLS until B-L1. Set it to "
-    'false (ADR-0845, ADR-0852)" }}{{ end }}\n'
-)
 
 
 def test_a_nats_client_auth_case_where_only_one_caller_presents(tmp_path: Path) -> None:
@@ -2687,27 +2663,17 @@ def test_a_nats_client_auth_case_where_only_one_caller_presents(tmp_path: Path) 
     pass it, because both sides being false satisfies `and` too. Exactly one
     side false is the only input that tells the two operators apart.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        NATS_CLIENTAUTH_UNRENDERED_LINE_WAS,
-        NATS_CLIENTAUTH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
-    chart_with_a_vendored_member_rewritten_in_place(
-        chart,
-        "gateway/templates/deployment.yaml",
-        GATEWAY_NATS_ENABLED_SELF_REFUSAL_LINE,
-        "{{- if false }}{{ end }}\n",
-        "gateway",
-    )
+    # NO VENDORED EDIT (ledger 1402): `gateway` 0.11.x renders `nats.tls.enabled:
+    # true` itself (B-N3), so its old self-refusal line is gone, and `platform`
+    # B-N2 accepts this posture through its own contract.
     values = overlay(
         tmp_path / "nats-required-one-presenter.yaml",
-        "platform:\n  nats:\n    tls:\n      clientAuth: required\n"
-        "gateway:\n  nats:\n    tls:\n      enabled: true\n"
+        "platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: required\n"
+        + NATS_UPSTREAM_VERIFIED_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: true\n"
         "iam:\n  nats:\n    tls:\n      enabled: false\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
     assert "gateway.nats.tls.enabled is true" in result.stderr, result.stderr
@@ -2715,19 +2681,18 @@ def test_a_nats_client_auth_case_where_only_one_caller_presents(tmp_path: Path) 
 
 
 def test_valkey_clientauth_with_its_one_client_not_presenting_refuses(tmp_path: Path) -> None:
-    """valkey's `clientAuth` set is `off | optional | required`, unlike NATS's two-way one."""
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        VALKEY_CLIENTAUTH_UNRENDERED_LINE_WAS,
-        VALKEY_CLIENTAUTH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
+    """valkey's `clientAuth` set is `off | optional | required`, unlike NATS's two-way one.
+
+    NO VENDORED REWRITE ANY MORE (platform chart-followup, B-V2): `platform`
+    renders `valkey.tls.clientAuth` for real, so this renders the real pinned
+    `platform` directly and reaches B-U6 Part 3's own agreement check without
+    lifting anything first.
+    """
     values = overlay(
         tmp_path / "valkey-clientauth-no-presenter.yaml",
         "platform:\n  valkey:\n    tls:\n      clientAuth: optional\ngateway:\n  valkey:\n    tls:\n      enabled: false\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert 'platform.valkey.tls.clientAuth is "optional"' in result.stderr, result.stderr
     assert "gateway.valkey.tls.enabled is false" in result.stderr, result.stderr
@@ -2741,18 +2706,18 @@ def test_valkey_plaintext_false_with_its_one_client_still_in_cleartext_refuses(t
     cleartext. Nobody here presents a WRONG certificate — the connection would
     never reach the TLS handshake at all.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        PLAINTEXT_SWITCH_UNRENDERED_LINE_WAS,
-        PLAINTEXT_SWITCH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
     values = overlay(
         tmp_path / "valkey-plaintext-false-client-cleartext.yaml",
-        "platform:\n  valkey:\n    tls:\n      plaintext: false\ngateway:\n  valkey:\n    tls:\n      enabled: false\n",
+        # `enabled: true` IS NOW REQUIRED ALONGSIDE `plaintext: false` (platform
+        # chart-followup, B-V2): `platform`'s own render-checks.yaml refuses
+        # `enabled: false` + `plaintext: false` together as a listener-less
+        # cache before this B-U6 Part 3 agreement check ever runs.
+        "platform:\n  valkey:\n    tls:\n      enabled: true\n      plaintext: false\ngateway:\n  valkey:\n    tls:\n      enabled: false\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    # NO VENDORED REWRITE ANY MORE (platform chart-followup, B-V2): `platform`
+    # renders `valkey.tls.plaintext` for real, so this is the real pinned
+    # `platform`, direct.
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert "platform.valkey.tls.plaintext is false" in result.stderr, result.stderr
     assert "gateway.valkey.tls.enabled is false" in result.stderr, result.stderr
@@ -2765,20 +2730,14 @@ def test_nats_enabled_with_no_allow_non_tls_and_a_client_in_cleartext_refuses(tm
     `platform`'s own schema before this template ever runs (`additional properties 'allowNonTls' not
     allowed`), so that spelling could never have been used even once B-N2 landed.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        ENABLED_SWITCH_UNRENDERED_LINE_WAS,
-        ENABLED_SWITCH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
     values = overlay(
         tmp_path / "nats-enabled-no-allow-non-tls.yaml",
-        "platform:\n  nats:\n    tls:\n      enabled: true\n"
-        "gateway:\n  nats:\n    tls:\n      enabled: false\n"
+        'platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: "off"\n'
+        + NATS_UPSTREAM_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: false\n"
         "iam:\n  nats:\n    tls:\n      enabled: false\n",
     )
-    result = helm("template", "yadgar", str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert result.returncode != 0, result.stdout
     assert "platform.nats.tls.enabled is true" in result.stderr, result.stderr
     assert "platform.nats.config.merge.allow_non_tls is not true" in result.stderr, result.stderr
@@ -2789,25 +2748,20 @@ def test_nats_enabled_with_no_allow_non_tls_and_a_client_in_cleartext_refuses(tm
 def test_nats_enabled_with_allow_non_tls_true_does_not_refuse(tmp_path: Path) -> None:
     """THE MUTATION CHECK'S GREEN HALF: the real escape, used correctly, renders.
 
-    Same vendored `platform` copy as the red case above — the "enabled"
-    unrendered arm lifted the same way — with `platform.nats.config.merge.allow_non_tls: true`
+    The same posture as the red case above — accepted by `platform` B-N2's own
+    contract, no vendored line rewritten — with `platform.nats.config.merge.allow_non_tls: true`
     and BOTH clients still in cleartext. If this clause's `or` were a mutant
     that always refused, this would redden too; it does not.
     """
-    chart = chart_with_a_vendored_line_rewritten(
-        tmp_path,
-        "platform/templates/render-checks.yaml",
-        ENABLED_SWITCH_UNRENDERED_LINE_WAS,
-        ENABLED_SWITCH_UNRENDERED_LINE_NOW,
-        "platform",
-    )
     values = overlay(
         tmp_path / "nats-enabled-allow-non-tls-true.yaml",
-        "platform:\n  nats:\n    tls:\n      enabled: true\n    config:\n      merge:\n        allow_non_tls: true\n"
+        'platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: "off"\n'
+        + NATS_UPSTREAM_TLS
+        + "      merge:\n        allow_non_tls: true\n"
         "gateway:\n  nats:\n    tls:\n      enabled: false\n"
         "iam:\n  nats:\n    tls:\n      enabled: false\n",
     )
-    documents = render(str(chart), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert documents
 
 
