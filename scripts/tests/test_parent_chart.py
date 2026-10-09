@@ -2497,6 +2497,46 @@ def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Pa
     assert documents
 
 
+# A FIFTH key joins PART 1's `$clientSecrets` (ADR-0885, ledger 1403):
+# `iam.nats.tls.clientCertSecret`, iam's own leaf for the broker hop,
+# independent of `iamDb.tls.clientCertSecret`. `gateway`'s NATS and valkey
+# hops present no separate key of their own — `gateway.clientCertificate.secret`
+# already covers them — so no case is needed for `gateway` here.
+
+
+def test_a_typo_in_iams_nats_client_secret_name_refuses_against_the_leaf_map(tmp_path: Path) -> None:
+    """B-U6 PART 1, the new fifth key: a mistyped `iam.nats.tls.clientCertSecret` refuses.
+
+    Unconditional on `nats.tls.enabled`, the same as the four gRPC keys above:
+    a named Secret is checked against the leaf map whether or not the hop
+    that would present it is turned on.
+    """
+    values = overlay(
+        tmp_path / "a-typo-d-iam-nats-client-secret.yaml",
+        "iam:\n  nats:\n    tls:\n      clientCertSecret: iam-cilent-tls\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert "iam.nats.tls.clientCertSecret" in result.stderr, result.stderr
+    assert '"iam-cilent-tls"' in result.stderr, result.stderr
+    assert "platform.certificates.leaves" in result.stderr, result.stderr
+
+
+def test_an_empty_iam_nats_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Path) -> None:
+    """THE MUTATION CHECK'S GREEN HALF, and the premise is worth stating explicitly here.
+
+    Unlike `gateway.clientCertificate.secret`, `iam.nats.tls.clientCertSecret`
+    defaults to a NON-empty, real leaf name (`iam-client-tls`, ADR-0885), so
+    the adopter render's own default never exercises the empty-name skip for
+    this key the way it does for `gateway`'s. This case states it on purpose.
+    """
+    values = overlay(
+        tmp_path / "an-empty-iam-nats-client-secret.yaml", 'iam:\n  nats:\n    tls:\n      clientCertSecret: ""\n'
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
+
+
 # ── B-U6 PART 1b: the six servers' own `tls.clientCaSecret` (ruling R7) ──────
 #
 # NO VENDORING NEEDED HERE, SAME AS PART 2 NOW THAT THE B-U5 CONTRACTS HAVE
@@ -2612,6 +2652,124 @@ def test_platform_enabled_false_does_not_check_a_clientcasecret_against_the_leaf
     )
     documents = render(str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
     assert documents, "rendered nothing, so this case is not exercising a real install"
+
+
+# THE OPPOSITE DIRECTION OF PART 1b (ADR-0885, ledger 1403): `$upstreamCaSecrets`
+# gathers the bundle a CLIENT verifies the broker or the cache against —
+# `gateway.nats.tls.caSecret`, `gateway.valkey.tls.caSecret` and
+# `iam.nats.tls.caSecret` — checked against the same leaf map, with its own
+# message naming what each one verifies rather than "a caller".
+UPSTREAM_CLIENT_CA_SECRET_KEYS = [
+    pytest.param(
+        "gateway.nats.tls.caSecret",
+        "gateway:\n  nats:\n    tls:\n      caSecret: a-typo-d-name\n",
+        "verifies the broker against",
+        id="gateway-nats",
+    ),
+    pytest.param(
+        "gateway.valkey.tls.caSecret",
+        "gateway:\n  valkey:\n    tls:\n      caSecret: a-typo-d-name\n",
+        "verifies the cache against",
+        id="gateway-valkey",
+    ),
+    pytest.param(
+        "iam.nats.tls.caSecret",
+        "iam:\n  nats:\n    tls:\n      caSecret: a-typo-d-name\n",
+        "verifies the broker against",
+        id="iam-nats",
+    ),
+]
+
+
+@pytest.mark.parametrize(("key", "overlay_body", "verifies_substring"), UPSTREAM_CLIENT_CA_SECRET_KEYS)
+def test_a_typo_in_an_upstream_ca_secret_name_refuses_against_the_leaf_map(
+    tmp_path: Path, key: str, overlay_body: str, verifies_substring: str
+) -> None:
+    """B-U6 PART 1b's new, opposite-direction check: a mistyped upstream `caSecret` refuses.
+
+    Unconditional on the dial's own `tls.enabled`, the same as `$clientCaSecrets`
+    above: a named bundle is checked against the leaf map whether or not the
+    hop that would use it is turned on.
+    """
+    values = overlay(tmp_path / "a-typo-d-upstream-ca-secret.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert key in result.stderr, result.stderr
+    assert '"a-typo-d-name"' in result.stderr, result.stderr
+    assert "platform.certificates.leaves" in result.stderr, result.stderr
+    assert verifies_substring in result.stderr, result.stderr
+
+
+def test_the_real_nats_and_valkey_ca_secret_defaults_do_not_refuse(tmp_path: Path) -> None:
+    """THE MUTATION CHECK'S GREEN HALF: the adopter render's own defaults are all real leaves.
+
+    `gateway.nats.tls.caSecret` and `iam.nats.tls.caSecret` default to
+    `nats-tls`; `gateway.valkey.tls.caSecret` defaults to `valkey-tls`. Both
+    are keys of `platform.certificates.leaves` (B-L1), so the new check stays
+    silent on the estate's own defaults with no overlay at all.
+    """
+    documents = adopter_render()
+    assert documents
+
+
+def test_a_bring_your_own_broker_names_its_own_ca_with_no_false_refusal(tmp_path: Path) -> None:
+    """THE FALSE-POSITIVE THIS CHECK MUST NOT CREATE: `platform.nats.create: false` is bring-your-own.
+
+    MEASURED BEFORE `.runs` EXISTED: `platform.nats.create: false` plus a
+    `gateway.nats.tls.caSecret` naming the adopter's OWN external broker's CA
+    — correctly NOT a key of `platform.certificates.leaves`, because this
+    chart never issues it — rendered exit 1, refusing a correct
+    configuration. `test_the_parent_refuses_a_renamed_iam_keys_secret`'s own
+    docstring states why that is worse than no check: "a refusal that fires
+    on a correct configuration is worse than none."
+    """
+    values = overlay(
+        tmp_path / "bring-your-own-broker.yaml",
+        "platform:\n  nats:\n    create: false\ngateway:\n  nats:\n    tls:\n      caSecret: my-broker-ca\n",
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
+
+
+def test_the_internal_cas_own_secret_is_refused_by_name_as_an_upstream_ca_secret(tmp_path: Path) -> None:
+    """THE DANGEROUS NAME, refused by its own sentence, same as PART 1b's `$clientCaSecrets` case.
+
+    `yadgar-internal-ca` is `platform.internalCA.name` — the CA's OWN
+    Certificate, which carries the CA's PRIVATE KEY — never a leaf, whichever
+    direction the bundle verifies. Only `gateway.nats.tls.caSecret` here, as
+    the representative case; the other two `$upstreamCaSecrets` entries share
+    the same clause in `_validate.tpl`.
+    """
+    values = overlay(
+        tmp_path / "upstream-ca-secret-is-the-ca-itself.yaml",
+        "gateway:\n  nats:\n    tls:\n      caSecret: yadgar-internal-ca\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert "gateway.nats.tls.caSecret" in result.stderr, result.stderr
+    assert '"yadgar-internal-ca"' in result.stderr, result.stderr
+    assert "holds the CA's private key" in result.stderr, result.stderr
+    assert "verifies the broker" in result.stderr, result.stderr
+    # THE GENERIC MESSAGE DOES NOT ALSO FIRE — one problem, one sentence.
+    assert "cert-manager never creates" not in result.stderr, result.stderr
+
+
+def test_the_internal_cas_own_secret_refuses_as_an_upstream_ca_secret_even_with_certificates_create_false(
+    tmp_path: Path,
+) -> None:
+    """THE SAME CARVE-OUT PART 1b's `$clientCaSecrets` CASE HAS: this check sits outside
+    `platform.certificates.create` too, so it fires on the dangerous name alone.
+    """
+    values = overlay(
+        tmp_path / "upstream-ca-secret-is-the-ca-itself-certs-create-false.yaml",
+        "platform:\n  certificates:\n    create: false\n"
+        "gateway:\n  nats:\n    tls:\n      caSecret: yadgar-internal-ca\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert "gateway.nats.tls.caSecret" in result.stderr, result.stderr
+    assert '"yadgar-internal-ca"' in result.stderr, result.stderr
+    assert "holds the CA's private key" in result.stderr, result.stderr
 
 
 # ── B-U6 PART 3: NATS and valkey, whose TLS keys are `platform`-owned ────────
@@ -2761,6 +2919,107 @@ def test_nats_enabled_with_allow_non_tls_true_does_not_refuse(tmp_path: Path) ->
         + "      merge:\n        allow_non_tls: true\n"
         "gateway:\n  nats:\n    tls:\n      enabled: false\n"
         "iam:\n  nats:\n    tls:\n      enabled: false\n",
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
+
+
+# ADR-0885 (ledger 1403): "ENABLED" ALONE IS NOT "PRESENTS A CERTIFICATE" for
+# NATS and valkey either — the same gap PART 2's `$callerSecret` closed for
+# the six gRPC servers. Each case below turns BOTH `tls.enabled` flags on (so
+# the two cases above's premise is satisfied) and empties one presenting
+# client's own leaf-secret key instead.
+NATS_CLIENTAUTH_EMPTY_SECRET_CASES = [
+    pytest.param(
+        # `gateway.clientCertificate.secret` stays at its default `""`;
+        # `iam.nats.tls.clientCertSecret` stays at its default, real leaf.
+        "platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: required\n"
+        + NATS_UPSTREAM_VERIFIED_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: true\n"
+        "iam:\n  nats:\n    tls:\n      enabled: true\n",
+        'gateway.clientCertificate.secret is ""',
+        id="gateway-empty",
+    ),
+    pytest.param(
+        # `gateway.clientCertificate.secret` named at a real leaf, nested under
+        # the SAME top-level `gateway:` mapping as its `nats.tls.enabled`, and
+        # likewise `iam.nats.tls.clientCertSecret` under the same `iam:`
+        # mapping as its `enabled` — two top-level keys of the same name in
+        # one YAML overlay would have the second clobber the first.
+        "platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: required\n"
+        + NATS_UPSTREAM_VERIFIED_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: true\n"
+        "  clientCertificate:\n    secret: gateway-client-tls\n"
+        "iam:\n  nats:\n    tls:\n      enabled: true\n      clientCertSecret: \"\"\n",
+        'iam.nats.tls.clientCertSecret is ""',
+        id="iam-empty",
+    ),
+]
+
+
+@pytest.mark.parametrize(("overlay_body", "empty_secret_substring"), NATS_CLIENTAUTH_EMPTY_SECRET_CASES)
+def test_nats_clientauth_required_with_an_empty_presenting_secret_refuses(
+    tmp_path: Path, overlay_body: str, empty_secret_substring: str
+) -> None:
+    """B-U6 PART 3's new secret-presence check: both NATS clients `tls.enabled`, one secret empty.
+
+    With both `nats.tls.enabled` true the OLD half of this clause's `or` is
+    false on both arms — this reaches the refusal on the NEW half alone.
+    """
+    values = overlay(tmp_path / "nats-required-empty-presenting-secret.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
+    assert "gateway.nats.tls.enabled is true" in result.stderr, result.stderr
+    assert "iam.nats.tls.enabled is true" in result.stderr, result.stderr
+    assert empty_secret_substring in result.stderr, result.stderr
+
+
+def test_nats_clientauth_required_with_both_clients_presenting_does_not_refuse(tmp_path: Path) -> None:
+    """THE MUTATION CHECK'S GREEN HALF: both clients enabled AND both secrets named.
+
+    Same posture as the two red cases above, with `gateway.clientCertificate.secret`
+    named at a real leaf and `iam.nats.tls.clientCertSecret` left at its own
+    real default. If the new secret check's `or` arms were mutated to always
+    fire, this would redden too; it does not.
+    """
+    values = overlay(
+        tmp_path / "nats-required-both-present.yaml",
+        "platform:\n  nats:\n    tls:\n      enabled: true\n      clientAuth: required\n"
+        + NATS_UPSTREAM_VERIFIED_TLS
+        + "gateway:\n  nats:\n    tls:\n      enabled: true\n"
+        "  clientCertificate:\n    secret: gateway-client-tls\n"
+        "iam:\n  nats:\n    tls:\n      enabled: true\n",
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
+
+
+def test_valkey_clientauth_with_an_empty_presenting_secret_refuses(tmp_path: Path) -> None:
+    """THE SAME NEW CHECK FOR valkey: `tls.enabled` true, `clientCertificate.secret` empty.
+
+    `gateway.clientCertificate.secret` stays at its default `""`, so the OLD
+    half of this clause's `or` is false (enabled is true) and the refusal
+    arrives on the NEW half alone.
+    """
+    values = overlay(
+        tmp_path / "valkey-clientauth-empty-presenting-secret.yaml",
+        "platform:\n  valkey:\n    tls:\n      clientAuth: optional\ngateway:\n  valkey:\n    tls:\n      enabled: true\n",
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert 'platform.valkey.tls.clientAuth is "optional"' in result.stderr, result.stderr
+    assert "gateway.valkey.tls.enabled is true" in result.stderr, result.stderr
+    assert 'gateway.clientCertificate.secret is ""' in result.stderr, result.stderr
+
+
+def test_valkey_clientauth_with_a_real_presenting_secret_does_not_refuse(tmp_path: Path) -> None:
+    """THE MUTATION CHECK'S GREEN HALF: `tls.enabled` true AND a real leaf named."""
+    values = overlay(
+        tmp_path / "valkey-clientauth-real-presenting-secret.yaml",
+        "platform:\n  valkey:\n    tls:\n      clientAuth: optional\n"
+        "gateway:\n  valkey:\n    tls:\n      enabled: true\n"
+        "  clientCertificate:\n    secret: gateway-client-tls\n",
     )
     documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert documents
