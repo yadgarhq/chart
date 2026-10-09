@@ -549,7 +549,7 @@ D80's all-off pass is unaffected: it writes `platform.enabled` as a bool false.
 B-U6, PART 1 (ledger 925/770): EVERY CLIENT SECRET A MODULE NAMES MUST BE A KEY
 OF `platform.certificates.leaves`.
 
-FOUR KEYS NAME A CLIENT SECRET TODAY, VERIFIED AGAINST EACH CHART'S OWN
+FIVE KEYS NAME A CLIENT SECRET TODAY, VERIFIED AGAINST EACH CHART'S OWN
 VALUES AND SCHEMA RATHER THAN ASSUMED: `gateway.clientCertificate.secret`
 (one leaf shared across gateway's three upstream dials — iam, task and
 project, each gated by that dial's own `tls.enabled`), `iam.iamDb.tls.clientCertSecret`,
@@ -559,13 +559,29 @@ project, each gated by that dial's own `tls.enabled`), `iam.iamDb.tls.clientCert
 certificate, the opposite direction from `<dial>.tls.caSecret`, which VERIFIES
 the server and is a different key this clause says nothing about.
 
-NO NATS OR VALKEY CLIENT SECRET KEY EXISTS YET, so none is checked here. B-P2
-(chart#39) stated the broker's and the cache's TLS POSTURE at the platform
-layer; it added no client-side secret-naming key to `gateway` or `iam` —
-measured against their 0.10.2 and 0.10.0 schemas, `nats.tls` and `valkey.tls`
-each declare only a boolean `enabled`. The day one of those charts gains a
-`clientCertSecret`-shaped key, add it to `$clientSecrets` below the same way
-the four gRPC ones are.
+A FIFTH KEY NOW JOINS THEM (ADR-0885): `iam.nats.tls.clientCertSecret`, iam's
+own client leaf for the broker hop — measured at the pinned `iam` 0.11.0
+schema, `nats.tls` now declares `clientCertSecret` alongside `enabled` and
+`caSecret`. `gateway`'s NATS and valkey hops present no SEPARATE key: measured
+at the pinned `gateway` 0.12.0, `nats.tls` and `valkey.tls` each still declare
+only `enabled`/`caSecret`, and `templates/deployment.yaml` mounts the SAME
+`clientCertificate.secret` already in `$clientSecrets` below for every one of
+gateway's five dials (`$presentsIdentity`). So gateway's NATS/valkey hops are
+already covered by the `gateway.clientCertificate.secret` entry; only iam's
+new key is added here.
+
+THE OPPOSITE-DIRECTION `<dial>.tls.caSecret` KEYS NOW HAVE A NATS/VALKEY
+CROSS-CHECK TOO, in `$upstreamCaSecrets` gathered beside `$clientCaSecrets`
+below: `gateway.nats.tls.caSecret`, `gateway.valkey.tls.caSecret` and
+`iam.nats.tls.caSecret` are each the bundle a CLIENT verifies the broker or
+the cache against, not a server verifying a caller — a different clause from
+the one `$clientCaSecrets` gathers, but the same underlying invariant: every
+leaf's Secret carries the issuing CA's `ca.crt`, so the name must still be a
+key of `platform.certificates.leaves` — WHEN `platform` RUNS THAT BROKER OR
+CACHE AT ALL (`.runs`, at the gather site below): a bring-your-own broker or
+cache names its own, different CA on purpose, and this clause has nothing to
+say about it. The gRPC dials' own `<dial>.tls.caSecret` keys (`iamDb.tls.caSecret`
+and so on) remain outside every clause here.
 
 SKIPPED WHEN `platform` IS NOT A KEY OF `.Subcharts` — `platform.enabled:
 false`, or helm would not have resolved the dependency, so `leaves` does not
@@ -577,9 +593,12 @@ interface {}.Values` once `platform.enabled` is false and the pin carries
 `certificates.yaml` itself skips: an adopter running their own CA mints these
 Secrets under a name this chart never sees.
 
-A SECRET NAME LEFT EMPTY IS NOT CHECKED. Every one of the four keys defaults
-to `""`, meaning "present no client certificate on this hop" — a valid
-configuration this clause has nothing to say about. Only a NAMED secret is
+A SECRET NAME LEFT EMPTY IS NOT CHECKED. Four of the five keys default to
+`""`, meaning "present no client certificate on this hop" — a valid
+configuration this clause has nothing to say about; `iam.nats.tls.clientCertSecret`
+is the exception, DEFAULT NON-EMPTY (`iam-client-tls`, ADR-0885) because iam
+already held that leaf for a different mount before this key existed. Only
+a NAMED secret is
 checked against the leaf map, and the comparison is exact: `hasKey`, never a
 prefix or a substring, for the reason `test_the_parent_refuses_a_renamed_iam_keys_secret`
 already states for the admin-token pair above.
@@ -659,6 +678,69 @@ read `leaves` at all, so it does not need it.
 {{- end -}}
 {{- end -}}
 
+{{/*
+THE OPPOSITE DIRECTION (ADR-0885): these three keys are the bundle a CLIENT
+verifies the broker or the cache against, not a server verifying a caller,
+so they are gathered separately from `$clientCaSecrets` rather than folded
+into it — the two clauses share the invariant, not the direction, and
+`$clientCaSecrets`'s own entries and message stay exactly as they were.
+Gathered here, beside `$clientCaSecrets`, rather than inside the
+`$certsCreate` guard below, for the same reason `platform.internalCA.name`'s
+OWN check above sits outside it: the danger is `platform.internalCA.create`
+minting that Secret at all, independent of whether this chart also issues
+the leaves under `certificates.create`.
+
+EACH ENTRY ALSO CARRIES `runs`, UNLIKE `$clientCaSecrets`'s six — the six
+gRPC/-db servers are always module charts THIS parent deploys, but NATS and
+valkey are not: `platform.nats.create`/`platform.valkey.create` (defaulted
+`true` by THIS chart's own `values.yaml`, `false` by `platform`'s) toggle
+whether `platform` runs the broker or the cache at all. An adopter who sets
+either `false` brings their OWN broker or cache, with its OWN serving
+certificate from a DIFFERENT CA — `gateway.nats.tls.caSecret` then correctly
+names a Secret this chart's leaves never heard of, and the not-a-leaf check
+below must stay silent on it (measured: `platform.nats.create: false` plus a
+real external CA name there otherwise refused as a typo). The internal-CA
+loop right below needs no such gate: `platform.internalCA.name`'s Secret is
+dangerous whoever runs the broker.
+*/}}
+{{/*
+`kindIs "bool"` GUARDS BOTH READS BEFORE ANY COMPARISON (the same convention
+PART 3 below states for `clientAuth`): `platform.nats.create`/`valkey.create`
+are not schema-typed, so a quoted "yes" reaching a bare `eq ... true` would
+panic the WHOLE render with a raw Go type-mismatch error — aborting before
+`platform`'s own named refusal for that malformed value is ever reached,
+exactly the outcome `test_tag_wall.py`'s `THE_REGISTER_KEY_SHAPES` table
+exists to catch (measured: it did, on the first version of this line).
+*/}}
+{{- $natsCreateRaw := default false (default dict $platformValues.nats).create -}}
+{{- $natsRuns := and (kindIs "bool" $natsCreateRaw) $natsCreateRaw -}}
+{{- $valkeyCreateRaw := default false (default dict $platformValues.valkey).create -}}
+{{- $valkeyRuns := and (kindIs "bool" $valkeyCreateRaw) $valkeyCreateRaw -}}
+{{- $upstreamCaSecrets := list -}}
+{{- $gatewayNatsCa := default "" (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).caSecret -}}
+{{- if $gatewayNatsCa -}}
+{{- $upstreamCaSecrets = append $upstreamCaSecrets (dict "key" "gateway.nats.tls.caSecret" "name" $gatewayNatsCa "verifies" "the broker" "runs" $natsRuns) -}}
+{{- end -}}
+{{- $gatewayValkeyCa := default "" (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).valkey).tls).caSecret -}}
+{{- if $gatewayValkeyCa -}}
+{{- $upstreamCaSecrets = append $upstreamCaSecrets (dict "key" "gateway.valkey.tls.caSecret" "name" $gatewayValkeyCa "verifies" "the cache" "runs" $valkeyRuns) -}}
+{{- end -}}
+{{- $iamNatsCa := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).caSecret -}}
+{{- if $iamNatsCa -}}
+{{- $upstreamCaSecrets = append $upstreamCaSecrets (dict "key" "iam.nats.tls.caSecret" "name" $iamNatsCa "verifies" "the broker" "runs" $natsRuns) -}}
+{{- end -}}
+{{- range $upstreamCaSecrets -}}
+{{- if eq .name $internalCaName -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names %q, the Secret platform.internalCA mints for the CA ITSELF, which holds the CA's "
+      "private key. Mounting it as the bundle that verifies %s would hand this pod the authority "
+      "to sign new certificates, not just read one. Name a leaf's Secret instead: cert-manager "
+      "writes the issuing CA's ca.crt into every Certificate's target Secret, so any key of "
+      "platform.certificates.leaves carries the same bundle this one does."))
+      .key .name .verifies) -}}
+{{- end -}}
+{{- end -}}
+
 {{- $certsCreate := default false (default dict $platformValues.certificates).create -}}
 {{- if eq $certsCreate true -}}
 {{- $leaves := default dict (default dict $platformValues.certificates).leaves -}}
@@ -670,6 +752,10 @@ read `leaves` at all, so it does not need it.
 {{- $iamCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
 {{- if $iamCallerSecret -}}
 {{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret) -}}
+{{- end -}}
+{{- $iamNatsCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).clientCertSecret -}}
+{{- if $iamNatsCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "iam.nats.tls.clientCertSecret" "name" $iamNatsCallerSecret) -}}
 {{- end -}}
 {{- $taskCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
 {{- if $taskCallerSecret -}}
@@ -707,6 +793,31 @@ not two.
       "keys is a Secret cert-manager never creates. Check the name against "
       "platform.certificates.leaves for a typo in %s."))
       .key .name .name .key) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+THE SAME not-a-leaf CHECK FOR `$upstreamCaSecrets`, GATHERED ABOVE beside
+`$clientCaSecrets`. Every entry already matched against `$internalCaName`;
+an entry that WAS that name already carries its own refusal and is skipped
+here (`ne .name $internalCaName`), the same convention as the loop above for
+`$clientCaSecrets`. `.runs` IS THE DIFFERENCE FROM THAT LOOP: an entry whose
+broker or cache `platform` does not run (`platform.nats.create`/`valkey.create`
+false, bring-your-own) is skipped here too — its CA name is correctly NOT
+one of this chart's leaves, and checking it anyway would refuse a correct
+bring-your-own configuration, exactly what this suite's own convention (see
+`test_the_parent_refuses_a_renamed_iam_keys_secret`) says is worse than no
+check at all.
+*/}}
+{{- range $upstreamCaSecrets -}}
+{{- if and .runs (ne .name $internalCaName) (not (hasKey $leaves .name)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s names the Secret %q as the bundle it verifies %s against, and %q is not a key of "
+      "platform.certificates.leaves. Every leaf's Secret carries the issuing CA's ca.crt, so any "
+      "leaf name renders a usable bundle; a name that is not one of platform.certificates.leaves's "
+      "keys is a Secret cert-manager never creates. Check the name against "
+      "platform.certificates.leaves for a typo in %s."))
+      .key .name .verifies .name .key) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -887,27 +998,48 @@ first refusal — exercised in the test suite against the real, pinned
 {{- if and (kindIs "string" $natsTls.clientAuth) (eq $natsTls.clientAuth "required") -}}
 {{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).nats).tls).enabled -}}
 {{- $iamEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).enabled -}}
-{{- if or (not $gatewayEnabled) (not $iamEnabled) -}}
+{{/*
+ADR-0885: "ENABLED" ALONE IS NOT "PRESENTS A CERTIFICATE" — the dial can run
+over TLS and still mount no identity if its own leaf-secret key is empty, the
+same gap B-U5's gRPC clauses closed above (`$callerSecret` beside
+`$callerEnabled`). gateway presents the ONE shared `clientCertificate.secret`
+on this hop too (no separate NATS key, per the comment at $clientSecrets
+above); iam presents its own `nats.tls.clientCertSecret` (ADR-0885).
+*/}}
+{{- $gatewaySecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- $iamSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).clientCertSecret -}}
+{{- if or (not $gatewayEnabled) (not $iamEnabled) (not $gatewaySecret) (not $iamSecret) -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.nats.tls.clientAuth is \"required\", which verifies a client certificate on every "
-      "connection, and gateway.nats.tls.enabled is %t and iam.nats.tls.enabled is %t — NATS's only "
-      "two clients in this estate. A client whose own nats.tls.enabled is false connects in "
-      "cleartext and presents no certificate at all, so the broker cannot verify it. Set both to "
-      "true, or set platform.nats.tls.clientAuth back to \"off\"."))
-      $gatewayEnabled $iamEnabled) -}}
+      "connection, and NATS's only two clients in this estate present it like this: "
+      "gateway.nats.tls.enabled is %t and gateway.clientCertificate.secret is %q; iam.nats.tls.enabled "
+      "is %t and iam.nats.tls.clientCertSecret is %q. A client whose own nats.tls.enabled is false "
+      "connects in cleartext and presents no certificate at all, and one whose secret is empty "
+      "presents no identity even over an encrypted connection — either way the broker cannot verify "
+      "it. Set both clients' nats.tls.enabled true and name both client-certificate secrets, or set "
+      "platform.nats.tls.clientAuth back to \"off\"."))
+      $gatewayEnabled $gatewaySecret $iamEnabled $iamSecret) -}}
 {{- end -}}
 {{- end -}}
 
 {{- if and (kindIs "string" $valkeyTls.clientAuth) (has $valkeyTls.clientAuth (list "optional" "required")) -}}
 {{- $gatewayEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).valkey).tls).enabled -}}
-{{- if not $gatewayEnabled -}}
+{{/*
+ADR-0885: SAME GAP AS NATS ABOVE — gateway's valkey hop presents the same
+shared `clientCertificate.secret`, which can be empty while `tls.enabled` is
+true.
+*/}}
+{{- $gatewaySecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
+{{- if or (not $gatewayEnabled) (not $gatewaySecret) -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.valkey.tls.clientAuth is %q, which verifies a client certificate on every "
-      "connection, and gateway.valkey.tls.enabled is false — valkey's only client in this estate. "
-      "A client with tls.enabled false connects in cleartext and presents no certificate at all, "
-      "so the cache cannot verify it. Set gateway.valkey.tls.enabled true, or set "
-      "platform.valkey.tls.clientAuth back to \"off\"."))
-      $valkeyTls.clientAuth) -}}
+      "connection, and gateway — valkey's only client in this estate — presents it like this: "
+      "gateway.valkey.tls.enabled is %t and gateway.clientCertificate.secret is %q. A client with "
+      "tls.enabled false connects in cleartext and presents no certificate at all, and one with an "
+      "empty secret presents no identity even over an encrypted connection — either way the cache "
+      "cannot verify it. Set gateway.valkey.tls.enabled true and name "
+      "gateway.clientCertificate.secret, or set platform.valkey.tls.clientAuth back to \"off\"."))
+      $valkeyTls.clientAuth $gatewayEnabled $gatewaySecret) -}}
 {{- end -}}
 {{- end -}}
 
