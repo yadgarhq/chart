@@ -151,10 +151,10 @@ platform:
   # release namespace. `nats` is the upstream chart, adopted rather than forked.
   #
   # `tls` ON EACH IS THE OFF POSTURE OF A KEY THIS CHART CANNOT DEFAULT FOR
-  # YOU EITHER (B-L1's folded platform expand, ADR-0852, ADR-0845, B-P2). See
-  # the eight-key comment below the twelve `tls.enabled` one: `platform`
-  # declares these, no template renders them yet, and B-N2 / B-V2 will make
-  # each required with no default.
+  # YOU EITHER (B-L1's folded platform expand, ADR-0852, ADR-0845, B-P2).
+  # `platform` B-N2 / B-V2 (0.2.0, 0.2.1) made every key below REQUIRED with
+  # no default: omit one and `platform`'s own render check refuses the
+  # install before this chart's cross-checks ever run.
   valkey:
     create: true
     tls:
