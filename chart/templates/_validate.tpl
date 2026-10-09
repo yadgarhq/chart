@@ -870,15 +870,14 @@ platform.nats.tls.allowNonTls=true` exits 1 with `additional properties
 way `nats.config.merge.authorization` already does for the two accounts
 `platform`'s own `values.yaml` declares.
 
-THE gRPC CLAUSES ABOVE LOST THIS GAP WHEN B-U5 LANDED; `platform` STILL HAS
-IT, because B-N2/B-V2 have not: `platform` 0.1.36 refuses any `clientAuth`
-other than `"off"`, and `enabled: true` / `plaintext: false`, UNCONDITIONALLY
-— measured 2026-10-08, `helm template ... --set
-platform.nats.tls.clientAuth=required` exits 1 at
-`platform/templates/render-checks.yaml:648` before this template runs. Each
-clause below is fixture work ahead of B-N2/B-V2, exercised in the test suite
-by rewriting the one line of a vendored `platform` chart that performs that
-self-refusal.
+THE gRPC CLAUSES ABOVE LOST THIS GAP WHEN B-U5 LANDED; `platform` HAS NONE OF
+IT, because B-N2 and B-V2 (platform 0.2.0, 0.2.1) now render and require
+`nats.tls`/`valkey.tls` themselves: `platform/templates/render-checks.yaml`
+refuses any posture its own contract disagrees with, UNCONDITIONALLY, before
+this template ever runs. Each clause below cross-checks the posture
+`platform` already accepted against its two clients, so it is never the
+first refusal — exercised in the test suite against the real, pinned
+`platform` chart directly, no vendored-line rewrite needed any more.
 */}}
 {{- if hasKey .Subcharts "platform" -}}
 {{- $platformTlsValues := (default dict .Subcharts.platform).Values -}}

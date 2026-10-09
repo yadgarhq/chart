@@ -2057,9 +2057,11 @@ def chart_with_a_vendored_line_rewritten(
     and repack it under the same name so the pin in `chart/Chart.yaml` still
     resolves.
 
-    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): the callers
-    simulate `platform`'s own B-V2 contract landing. A caller that must edit a
-    second vendored chart in the same copy uses
+    `subchart` DEFAULTS TO `platform` (B-U6, ledger 925/770): every caller edits
+    a vendored `platform` member to construct a red case no values file can
+    reach — the hook-annotation gate, the minted-secret drift guard, and the
+    operator-arm render check below are the standing callers. A caller that
+    must edit a second vendored chart in the same copy uses
     `chart_with_a_vendored_member_rewritten_in_place` below.
 
     IT PERTURBS A COPY AND NEVER THE WORKING TREE. `shutil.copytree` takes the
@@ -2618,7 +2620,6 @@ def test_platform_enabled_false_does_not_check_a_clientcasecret_against_the_leaf
 # renders the broker's TLS itself, so each NATS case below states a posture
 # platform's OWN contract accepts — the platform switch plus the upstream keys
 # that agree with it — and the parent's cross-check is the only refusal left.
-# Valkey stays at platform's expand until B-V2, so its cases still lift a line.
 NATS_UPSTREAM_TLS = (
     "    config:\n      nats:\n        tls:\n          enabled: true\n          secretName: nats-tls\n"
 )
