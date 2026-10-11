@@ -741,32 +741,57 @@ exists to catch (measured: it did, on the first version of this line).
 {{- end -}}
 {{- end -}}
 
-{{- $certsCreate := default false (default dict $platformValues.certificates).create -}}
-{{- if eq $certsCreate true -}}
+{{/*
+`platform.certificates.create` IS READ RAW BEFORE THE COMPARISON, THE SAME
+`kindIs "bool"` DISCIPLINE PART 3 USES. `default false` is nil-safe and never
+type-safe: it substitutes on an EMPTY value, so a present non-bool such as a
+quoted `"yes"` reaches a bare `eq ... true` unchanged and aborts the WHOLE
+render on a Go type-mismatch — `error calling eq: incompatible types for
+comparison: string and bool` — before the `$creating` range above, which
+already names this exact shape for every `platform.<name>.create` including
+this one, is ever reached. Typing the raw value first turns the malformed
+shape into `false` here, so execution reaches the bottom `fail` carrying that
+range's OWN refusal instead of panicking on this line.
+*/}}
+{{- $certsCreateRaw := default false (default dict $platformValues.certificates).create -}}
+{{- $certsCreate := and (kindIs "bool" $certsCreateRaw) $certsCreateRaw -}}
+{{- if $certsCreate -}}
 {{- $leaves := default dict (default dict $platformValues.certificates).leaves -}}
 {{- $clientSecrets := list -}}
 {{- $gatewayCallerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
 {{- if $gatewayCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "gateway.clientCertificate.secret" "name" $gatewayCallerSecret) -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "gateway.clientCertificate.secret" "name" $gatewayCallerSecret "runs" true) -}}
 {{- end -}}
 {{- $iamCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
 {{- if $iamCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret) -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "iam.iamDb.tls.clientCertSecret" "name" $iamCallerSecret "runs" true) -}}
 {{- end -}}
+{{/*
+`iam.nats.tls.clientCertSecret` CARRIES `"runs" $natsRuns`, UNLIKE THE OTHER
+FOUR KEYS IN THIS LIST, mirroring PART 1b's `$upstreamCaSecrets` (ADR-0885,
+measured 2026-10-11). The other four name a client certificate for a server
+this parent ALWAYS deploys as a module chart; this one names the client
+identity for the BROKER, which `platform.nats.create` may turn off for a
+bring-your-own broker. An adopter in that shape mints their own leaf under a
+name this chart never issues, which is correctly NOT a key of
+`platform.certificates.leaves` — checking it anyway refused a correct
+configuration, the same false positive `.runs` already closes below for
+`$upstreamCaSecrets`.
+*/}}
 {{- $iamNatsCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).nats).tls).clientCertSecret -}}
 {{- if $iamNatsCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "iam.nats.tls.clientCertSecret" "name" $iamNatsCallerSecret) -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "iam.nats.tls.clientCertSecret" "name" $iamNatsCallerSecret "runs" $natsRuns) -}}
 {{- end -}}
 {{- $taskCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.task).Values).taskDb).tls).clientCertSecret -}}
 {{- if $taskCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "task.taskDb.tls.clientCertSecret" "name" $taskCallerSecret) -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "task.taskDb.tls.clientCertSecret" "name" $taskCallerSecret "runs" true) -}}
 {{- end -}}
 {{- $projectCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.project).Values).projectDb).tls).clientCertSecret -}}
 {{- if $projectCallerSecret -}}
-{{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret) -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret "runs" true) -}}
 {{- end -}}
 {{- range $clientSecrets -}}
-{{- if not (hasKey $leaves .name) -}}
+{{- if and .runs (not (hasKey $leaves .name)) -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "%s names the Secret %q as the client certificate it presents, and %q is not a key of "
       "platform.certificates.leaves. The parent issues every client leaf this estate mounts under "
