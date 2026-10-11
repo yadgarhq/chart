@@ -2484,6 +2484,35 @@ def test_certificates_create_false_does_not_check_a_client_secret_against_the_le
     assert documents, "rendered nothing, so this case is not exercising a real install"
 
 
+def test_a_non_boolean_certificates_create_refuses_by_name_instead_of_panicking(tmp_path: Path) -> None:
+    """B-U6 PART 1's GUARD ITSELF: `platform.certificates.create` read untyped panicked.
+
+    `$certsCreate := default false (default dict $platformValues.certificates).create`
+    then `eq $certsCreate true` compared a STRING to a BOOL whenever an adopter
+    wrote a quoted value — `default` substitutes only on an EMPTY value, so a
+    non-empty `"yes"` reaches `eq` unchanged. Measured before this guard existed:
+    `platform.certificates.create: "yes"` aborted with `error calling eq:
+    incompatible types for comparison: string and bool`, a stack trace where
+    ADR-0794 requires a key name.
+
+    THE SAME `kindIs "bool"` DISCIPLINE PART 3 USES for `clientAuth`/`enabled`
+    fixes it: typing the raw value before comparing turns the malformed shape
+    into `false` rather than a panic, which reaches this parent's own existing
+    `platform.%s.create is a %s rather than a boolean` refusal (the `$creating`
+    range above, which runs over every `platform.<name>` block including
+    `certificates` and already names this shape for `nats`/`operators`).
+    """
+    message = refusal(
+        tmp_path,
+        "certificates-create-is-a-quoted-yes",
+        'platform:\n  enabled: true\n  certificates:\n    create: "yes"\n'
+        "gateway:\n  adminBootstrap:\n    tokenSecret: admin-bootstrap-token\n",
+    )
+    assert "platform.certificates.create is a string rather than a boolean" in message, message
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in message, f"RAISED instead of refusing: {message}"
+
+
 def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Path) -> None:
     """B-U6 PART 1's OTHER SKIP: an empty Secret name means "presents nothing", not "named wrong".
 
@@ -2532,6 +2561,27 @@ def test_an_empty_iam_nats_client_secret_is_not_checked_against_the_leaf_map(tmp
     """
     values = overlay(
         tmp_path / "an-empty-iam-nats-client-secret.yaml", 'iam:\n  nats:\n    tls:\n      clientCertSecret: ""\n'
+    )
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert documents
+
+
+def test_a_bring_your_own_broker_with_a_custom_iam_nats_client_secret_has_no_false_refusal(tmp_path: Path) -> None:
+    """THE SAME FALSE-POSITIVE `$upstreamCaSecrets`' `.runs` ALREADY GUARDS AGAINST,
+    now fixed for `$clientSecrets`' `iam.nats.tls.clientCertSecret` entry too.
+
+    `platform.nats.create: false` is bring-your-own: this chart issues no leaf
+    for a broker it does not run, so an adopter's own `iam.nats.tls.clientCertSecret`
+    naming THEIR broker's client identity is correctly NOT a key of
+    `platform.certificates.leaves` — exactly the shape
+    `test_a_bring_your_own_broker_names_its_own_ca_with_no_false_refusal` already
+    proves for the CA-direction check. Before this entry carried its own `runs`
+    (mirroring PART 1b's `$upstreamCaSecrets`), the SAME values rendered exit 1,
+    refusing a correct bring-your-own configuration.
+    """
+    values = overlay(
+        tmp_path / "bring-your-own-broker-with-a-custom-iam-nats-client-secret.yaml",
+        "platform:\n  nats:\n    create: false\niam:\n  nats:\n    tls:\n      clientCertSecret: my-brokers-client-tls\n",
     )
     documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert documents
