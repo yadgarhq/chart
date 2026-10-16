@@ -120,15 +120,13 @@ jobs:
   # the TARBALL ON DISK, never off `github.repository`, and it probed
   # `ghcr.io/yadgarhq/charts/yadgar`.
   #
-  # THE `image` AND `deployment` JOBS BOTH STAY INERT HERE, because there is no
-  # `Containerfile`. `detect` reports `image=false`, the image job skips, and the
-  # `chart` job's own condition has a third arm for exactly that case. The
-  # `deployment` job — which writes `versions/<module>.yaml` into
-  # `yadgarhq/argocd` — requires `needs.image.result == 'success'`, so nothing
-  # here writes `versions/chart.yaml` and the module ApplicationSet gains no
-  # Application for this repository. That is the same reason `yadgarhq/config`
-  # sits outside it, and it is what keeps this parent from becoming a ninth module
-  # nobody declared by way of CI rather than by way of templates.
+  # THE `image` JOB STAYS INERT HERE, because there is no `Containerfile`.
+  # `detect` reports `image=false`, the image job skips, and the `chart` job's
+  # own condition has a third arm for exactly that case. The `parent` job, which
+  # re-pins a released module chart in this repository, excludes this repository
+  # by name (`github.repository != 'yadgarhq/chart'`), so a release here never
+  # re-pins this parent into itself. `ci-release.yaml` has no `deployment` job
+  # any more (ledger 675 stage 7), so nothing here writes to `yadgarhq/argocd`.
   #
   # ONE THING THIS REPOSITORY DEPENDS ON AND DOES NOT CONTROL: per ADR-0725 the
   # `chart` job resolves this chart's eight dependencies at package time
