@@ -1045,20 +1045,34 @@ yaadgaar_bin() {
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
 }
 
-# AN ENROLLED CLIENT IS NEVER REPLACED (ledger 1566), only named when it is not
-# at the pin. Replacing root's yaadgaar 0.1.3 with 0.1.5 or later would leave it
-# unauthenticated: the new client reads only ~/.config/yaadgaar and not the
-# credential 0.1.3 stored in ~/.config/yadgar; `yaadgaar login` into the empty
-# new directory has no CA for this edge, which only an enrolment token carries;
-# and the bootstrap token cannot enrol an admin who holds a credential
-# (ADR-0655). So the installed client is kept, and still authenticates.
-note_kept_client() {
-  local pin have
+# ROOT'S ENROLLED CLIENT FOLLOWS tools.lock (ledger 1554) — but only where the
+# new client can find its credential. yaadgaar 0.1.5 and later read only
+# ~/.config/yaadgaar, and `yaadgaar serve`, which Claude Code starts with no
+# environment, reads nothing else. So:
+#   credential at ~/.config/yaadgaar   `pipx install --force` at the pin
+#   credential elsewhere (the old      kept, and named: a 0.1.3 credential in
+#   ~/.config/yadgar, or none)         ~/.config/yadgar would strand a new client
+# No config is moved, copied or written either way, and neither `login` nor
+# `enrol` runs: a `login` into an empty new directory has no CA for this edge,
+# which only an enrolment token carries, and the bootstrap token cannot enrol
+# an admin who holds a credential (ADR-0655). Moving an old credential waits
+# for a decision (ledger 1566).
+upgrade_enrolled_client() {
+  local pin have cfg
   [[ -x "$PIPX_BIN_DIR/yaadgaar" ]] || return 0
   pin="$(yaadgaar_version)"
   have="$("$PIPX_BIN_DIR/yaadgaar" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
-  [[ -n "$have" && "$have" != "$pin" ]] || return 0
-  log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because kind-up never replaces an enrolled client"
+  [[ -n "$pin" && -n "$have" && "$have" != "$pin" ]] || return 0
+  cfg="$(root_home)/.config/yaadgaar/config.json"
+  if [[ ! -f "$cfg" || -L "$cfg" ]]; then
+    log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because its credential is not at $cfg, where the pinned client reads it"
+    return 0
+  fi
+  if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
+    log "[10/10] WARNING: upgrading root's client $have→$pin failed; run: pipx install --force yaadgaar==$pin"
+    return 0
+  fi
+  log "[10/10] upgraded root's client $have→$pin; credential stays at $cfg"
 }
 
 # Registers the MCP server and hooks for Claude Code (ledger 1540), ONLY when
@@ -1108,7 +1122,7 @@ ensure_agent_registration() {
 ensure_client() {
   if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
     log "[10/10] client already enrolled as $ADMIN_EXTERNAL_ID"
-    note_kept_client
+    upgrade_enrolled_client
     ensure_agent_registration
     return
   fi

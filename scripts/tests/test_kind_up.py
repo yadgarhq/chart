@@ -1795,28 +1795,50 @@ def test_an_explicit_client_config_never_falls_back(rig: Rig) -> None:
     assert rig.calls("curl") == []
 
 
-def test_an_enrolled_root_client_is_kept_and_the_kept_version_named(rig: Rig) -> None:
-    """kind-up never replaces an enrolled client: 0.1.5 and later read only
-    ~/.config/yaadgaar, and a `login` there cannot trust the kind edge CA, which
-    only an enrolment token carries. The bootstrap token cannot re-enrol an admin
-    who holds a credential (ADR-0655)."""
+def enrolled_with_client(rig: Rig, version: str) -> None:
+    """A host --with-client already enrolled, its root client answering *version*."""
     (rig.state / "client-enrolled").touch()
-    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": "yaadgaar 0.1.3\n"}] + rig.rules
+    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": f"yaadgaar {version}\n"}] + rig.rules
+
+
+def test_an_enrolled_client_with_its_credential_at_the_new_path_is_upgraded(rig: Rig) -> None:
+    """Ledger 1554: root's client follows tools.lock. Safe only where the new
+    client finds its credential: ~/.config/yaadgaar, which 0.1.5 and later read."""
+    enrolled_with_client(rig, "0.1.5")
+    cfg = root_config(rig, "yaadgaar")
+    before = cfg.read_bytes()
     proc = rig.run("pin_root_environment; ensure_client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert rig.calls("pipx") == [], "replaced an enrolled client"
+    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
-    assert f"yaadgaar 0.1.3, not the pinned {client_version()}" in proc.stdout
+    assert f"upgraded root's client 0.1.5\u2192{client_version()}; credential stays at {cfg}" in proc.stdout
+    assert cfg.read_bytes() == before
 
 
-def test_an_enrolled_root_client_at_the_pin_says_nothing_about_versions(rig: Rig) -> None:
-    (rig.state / "client-enrolled").touch()
-    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"],
-                  "stdout": f"yaadgaar {client_version()}\n"}] + rig.rules
+def test_an_enrolled_client_with_its_credential_at_the_old_path_is_kept(rig: Rig) -> None:
+    """0.1.6 does not read ~/.config/yadgar, and `yaadgaar serve`, which Claude Code
+    starts with no environment, would then find no credential. So the client is
+    kept until a migration is decided; nothing is moved, copied or written."""
+    enrolled_with_client(rig, "0.1.3")
+    old = root_config(rig, "yadgar")
+    before = old.read_bytes()
     proc = rig.run("pin_root_environment; ensure_client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "not the pinned" not in proc.stdout
+    assert rig.calls("pipx") == [], "replaced a client whose credential it cannot read"
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
+    assert f"yaadgaar 0.1.3, not the pinned {client_version()}; kept" in proc.stdout
+    assert old.read_bytes() == before
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+
+
+def test_an_enrolled_client_at_the_pin_is_left_alone(rig: Rig) -> None:
+    enrolled_with_client(rig, client_version())
+    root_config(rig, "yaadgaar")
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     assert rig.calls("pipx") == []
+    assert "not the pinned" not in proc.stdout and "upgraded" not in proc.stdout
 
 
 def test_add_user_refuses_a_credential_that_is_not_private(rig: Rig) -> None:
