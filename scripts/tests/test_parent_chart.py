@@ -244,8 +244,16 @@ API_VERSIONS = tuple(
 # absent from the modules-only render. A MODULE release that adds or drops an object
 # moves BOTH, since every module renders in both. Update whichever moved in the
 # same commit as the pin, and say in the pull request which chart moved it.
+#
+# `platform` 0.2.6 MOVED IT, AND THE BOT'S PIN COMMIT DID NOT. 0.2.6 adds the
+# seeder's client leaf `seeder-client-tls` (common name `seeder-caller`, rung
+# `798h`, plans/the-d35-seeder.md stage 4), so `Certificate` went 14 -> 15 and the
+# total 83 -> 84. `parent_bump.py` pinned 0.2.6 with no PR CI, and this
+# suite was red on `main` until the seeder's own
+# parent PR moved these three literals and the ladder. Re-measured 2026-10-18 on
+# helm 4.3.0 against the pins in `chart/Chart.yaml`.
 ADOPTER_EXPECTED = {
-    "Certificate": 14,
+    "Certificate": 15,
     "ConfigMap": 4,
     "Deployment": 8,
     "EnvoyProxy": 1,
@@ -264,7 +272,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 10,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 83
+ADOPTER_OBJECTS = 84
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -323,12 +331,14 @@ OBJECTS_PER_PROBE_JOB = 4
 # DISTINCT and six hours from its neighbour, so at most one service restarts per
 # renewal instant.
 #
-# FOURTEEN OBJECTS AND THIRTEEN VALUES, and the difference is exactly one object
+# FIFTEEN OBJECTS AND FOURTEEN VALUES since `platform` 0.2.6 added
+# `seeder-client-tls` on `798h` (fourteen and thirteen before it), and the
+# difference is exactly one object
 # contributing no rung: the CA root. It carries a `renewBefore` of its own — one
 # year against a ten-year duration — and nothing mounts it as a serving or client
 # credential, so its renewal re-signs with the same key rather than restarting a
 # service. The set is scoped to the Certificates that are not `isCA`.
-CERTIFICATES_AT_R5 = 14
+CERTIFICATES_AT_R5 = 15
 LADDER = {
     "720h",
     "726h",
@@ -343,6 +353,7 @@ LADDER = {
     "780h",
     "786h",
     "792h",
+    "798h",
 }
 
 # THE PROBE/TOGGLE PAIRS, AND WHY THIS RENDER IS WHERE THEY BECOME ASSERTABLE.
@@ -1775,24 +1786,24 @@ def test_the_adopter_values_render_the_whole_platform_layer(adopter: list[dict])
 def test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate(tmp_path: Path) -> None:
     """THE OBJECT-SET GATE'S RED CASE, and a values flip rather than an edited chart.
 
-    A fifteenth entry in `certificates.leaves` is the constructible stand-in for
+    A sixteenth entry in `certificates.leaves` is the constructible stand-in for
     an object entering the platform layer: the chart renders one Certificate per
     entry, so the render grows by exactly one and the equality has to fail.
     """
     values = overlay(
-        tmp_path / "a-fifteenth-leaf.yaml",
+        tmp_path / "a-sixteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      fifteenth-tls:\n"
-        "        commonName: fifteenth\n"
+        "      sixteenth-tls:\n"
+        "        commonName: sixteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 798h\n",
+        "        renewBefore: 804h\n",
     )
     documents = adopter_render("-f", str(values))
     assert len(documents) == ADOPTER_OBJECTS + 1, (
-        "a fifteenth leaf did not add an object, so this red case is testing nothing"
+        "a sixteenth leaf did not add an object, so this red case is testing nothing"
     )
     assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
@@ -3086,7 +3097,7 @@ def rungs(documents: list[dict]) -> dict[str, list[str]]:
     """Ladder value -> every certificate holding it. PURE.
 
     SCOPED TO THE CERTIFICATES THAT ARE NOT `isCA`, which is the difference between
-    fourteen objects and thirteen values rather than an omission.
+    fifteen objects and fourteen values rather than an omission.
     """
     index: dict[str, list[str]] = {}
     for document in certificates(documents):
@@ -3141,31 +3152,31 @@ def test_the_renewal_ladder_holds_across_the_whole_estate(adopter: list[dict]) -
     assert failures == [], "\n".join(failures)
 
 
-def test_a_fifteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
-    """THE LADDER GATE'S RED CASE: a fifteenth leaf, and the equality names both numbers."""
+def test_a_sixteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
+    """THE LADDER GATE'S RED CASE: a sixteenth leaf, and the equality names both numbers."""
     values = overlay(
-        tmp_path / "a-fifteenth-leaf.yaml",
+        tmp_path / "a-sixteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      fifteenth-tls:\n"
-        "        commonName: fifteenth\n"
+        "      sixteenth-tls:\n"
+        "        commonName: sixteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 798h\n",
+        "        renewBefore: 804h\n",
     )
     failures = ladder_failures(
         adopter_render("-f", str(values)), CERTIFICATES_AT_R5, LADDER
     )
-    assert failures, "a fifteenth Certificate did not redden the ladder gate"
-    assert "expected 14 Certificate objects, found 15" in "\n".join(failures), failures
+    assert failures, "a sixteenth Certificate did not redden the ladder gate"
+    assert "expected 15 Certificate objects, found 16" in "\n".join(failures), failures
 
 
 def test_two_leaves_sharing_a_rung_redden_the_ladder_gate(tmp_path: Path) -> None:
     """THE OTHER HALF OF THE INVARIANT, which a count alone cannot see.
 
-    Fourteen objects holding thirteen distinct values is what the gate asserts.
-    Two leaves moved onto one rung keeps the object count at fourteen and
+    Fifteen objects holding fourteen distinct values is what the gate asserts.
+    Two leaves moved onto one rung keeps the object count at fifteen and
     collapses the ladder, and the pairwise clause is the only thing that reports
     it.
     """
@@ -3455,7 +3466,7 @@ def test_an_object_with_no_probe_reddens_the_agreement_gate(tmp_path: Path) -> N
 
     An explicit `false` is always honoured — losing a diagnostic is a choice an
     adopter is entitled to make — so this is the constructible way to have the
-    objects without the probe. The gate must see the fourteen Certificates and the
+    objects without the probe. The gate must see the fifteen Certificates and the
     absent probe and name both.
     """
     documents = adopter_render(
