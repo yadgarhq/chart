@@ -105,7 +105,21 @@ existing regular file. It prints the commands that user runs. It does nothing
 else. Running it again sends no second create-user, and it never re-issues a
 lost token. The whole run uses root's own home from `getent passwd 0`, whatever
 `HOME` or XDG directories `sudo -E` passes on, and only root's own `yaadgaar`.
-It also drops `CURL_HOME`, `KUBECTL_EXTERNAL_DIFF` and every `HELM_*` variable.
+It also drops `CURL_HOME`, `KUBECTL_EXTERNAL_DIFF`, every `HELM_*` variable,
+and `YADGAR_CONFIG_DIR` and `YAADGAAR_CONFIG_DIR`.
+
+`--add-user` reads root's credential from `/root/.config/yaadgaar/config.json`.
+yaadgaar 0.1.5 and later keep their config in that directory. A host enrolled
+by kind-up v0.24.19 or older holds the credential where yaadgaar 0.1.3 put it,
+`/root/.config/yadgar/config.json`. When the new file is absent, `--add-user`
+reads the old one where it is, with the same root-owned 0600 no-follow check,
+and prints one note on stderr. It moves, copies and creates nothing. A rerun
+with `--with-client` does not replace a client root already enrolled with. It
+logs the kept version when that is not the pin. The reason: yaadgaar 0.1.6
+does not read the old directory. A `login` into the empty new directory has no
+CA for the kind edge, because only an enrolment token carries it. And the
+bootstrap token cannot enrol an admin who already holds a credential
+(ADR-0655). The kept client still authenticates.
 
 ## What the defaults install
 
