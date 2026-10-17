@@ -432,11 +432,45 @@ def test_the_tools_go_to_a_private_directory_by_default(rig: Rig) -> None:
 # PATH — every one of these is its fixed default. The rig fakes `id -u` but runs
 # as a real non-root user, which is why the overrides still steer it.
 #
-# THE ROOT RUNS USE `unshare -r`: a user namespace in which this unprivileged
-# process has EUID 0, the one way to exercise the real $EUID branch without
-# privilege. It is resolved from the host PATH before the rig's PATH replaces it.
-# Absent or refused is a failure, never a skip: a skip here would leave the
-# root branch untested and green.
+# THE ROOT RUNS NEED A REAL EUID OF 0, by the first of two routes that works:
+#   `unshare -r`  a user namespace in which this unprivileged process has EUID 0;
+#                 a developer host normally allows it, and it needs no privilege.
+#   `sudo -n`     real root without a password prompt. The GitHub-hosted runner
+#                 allows it, and refuses `unshare -r` (Ubuntu 24.04 restricts
+#                 unprivileged user namespaces). `sudo` resets the environment,
+#                 so the rig's environment is passed through `env -i` instead.
+# Both are resolved from the host PATH before the rig's PATH replaces it. Neither
+# working is a failure, never a skip: a skip would leave the root branch
+# untested and green.
+_ROOT_ROUTE: list[list[str]] = []
+
+
+def root_route() -> list[str]:
+    """The argv prefix that runs a command with EUID 0, probed once per session."""
+    if _ROOT_ROUTE:
+        return _ROOT_ROUTE[0]
+    refusals = []
+    unshare = shutil.which("unshare")
+    if unshare:
+        probe = subprocess.run([unshare, "-r", "true"], capture_output=True, text=True, timeout=30)
+        if probe.returncode == 0:
+            _ROOT_ROUTE.append([unshare, "-r"])
+            return _ROOT_ROUTE[0]
+        refusals.append(f"unshare -r: {probe.stderr.strip()}")
+    else:
+        refusals.append("unshare: not installed")
+    sudo = shutil.which("sudo")
+    if sudo:
+        probe = subprocess.run([sudo, "-n", "true"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, timeout=30)
+        if probe.returncode == 0:
+            _ROOT_ROUTE.append([sudo, "-n", "/usr/bin/env", "-i"])
+            return _ROOT_ROUTE[0]
+        refusals.append(f"sudo -n: {probe.stderr.strip()}")
+    else:
+        refusals.append("sudo: not installed")
+    pytest.fail("no route to EUID 0, so the root branch cannot be tested: " + "; ".join(refusals))
+
 
 ROOT_PINNED_PATHS = (
     # (environment override, script variable, value under root)
@@ -450,18 +484,20 @@ ROOT_PINNED_PATHS = (
 
 
 def as_root(rig: Rig, snippet: str, root: bool, **extra: str) -> subprocess.CompletedProcess:
-    """Source the script and run a snippet, with EUID 0 (`unshare -r`) or as this user."""
+    """Source the script and run a snippet, with EUID 0 (see `root_route`) or as this user."""
     (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
-    argv = ["bash", "-c", f'source "{SCRIPT}"; {snippet}']
+    env = rig.env(**extra)
+    bash = shutil.which("bash")
+    assert bash, "bash is not installed"
+    argv = [bash, "-c", f'source "{SCRIPT}"; {snippet}']
     if root:
-        unshare = shutil.which("unshare")
-        assert unshare, "unshare (util-linux) is not installed; the root branch cannot be tested"
-        argv = [unshare, "-r", *argv]
-    proc = subprocess.run(argv, env=rig.env(**extra), capture_output=True, text=True,
+        route = root_route()
+        if route[-1] == "-i":  # sudo resets the environment; env -i restores the rig's
+            argv = [*route, *(f"{k}={v}" for k, v in env.items()), *argv]
+        else:
+            argv = [*route, *argv]
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
                           stdin=subprocess.DEVNULL, timeout=60)
-    if root:
-        assert "unshare:" not in proc.stderr, f"unshare -r was refused: {proc.stderr}"
-    return proc
 
 
 @pytest.mark.parametrize("override, variable, pinned", ROOT_PINNED_PATHS,
