@@ -26,4 +26,6 @@ helm v4.3.0 arm64 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a
 # rather than driven through a terminal — `kind-up.sh` checks `enrol --help` for
 # the flag, whatever this row says. 0.1.2 is the first stable release, measured
 # 2026-10-17 on a fresh VM: `enrol --password-stdin` and `serve` both worked.
-yaadgaar 0.1.2 pypi
+# 0.1.3 (yadgar#52) lists the real five task tools in its rules file and creates
+# its config directory 0700; measured the same way on the same VM.
+yaadgaar 0.1.3 pypi

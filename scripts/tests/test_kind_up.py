@@ -433,9 +433,9 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
 def test_the_lock_pins_the_client_once() -> None:
     rows = [line.split() for line in LOCK.read_text().splitlines()
             if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
-    # 0.1.2: the first stable release, measured 2026-10-17 on a fresh VM to enrol
-    # with `--password-stdin` and to serve MCP.
-    assert rows == [["yaadgaar", "0.1.2", "pypi"]]
+    # 0.1.3 (yadgar#52), measured 2026-10-17 on the VM to enrol with
+    # `--password-stdin` and to serve MCP; 0.1.2 was the first stable release.
+    assert rows == [["yaadgaar", "0.1.3", "pypi"]]
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
