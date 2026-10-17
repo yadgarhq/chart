@@ -78,7 +78,7 @@ def client_version() -> str:
 HOST_TOOLS = (
     "bash", "python3", "jq", "awk", "sed", "grep", "base64", "sha256sum", "tar", "install",
     "mktemp", "find", "date", "tee", "head", "tail", "cat", "mv", "rm", "mkdir", "chmod",
-    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc",
+    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc", "stat", "getent", "cut",
 )
 
 
@@ -173,6 +173,10 @@ class Rig:
     def enrolment_file(self) -> Path:
         return self.root / "home" / "yadgar-enrolment.token"
 
+    @property
+    def client_config(self) -> Path:
+        return self.root / "admin-client" / "config.json"
+
     def env(self, **extra: str) -> dict[str, str]:
         env = {
             "PATH": f"{self.root / 'fakebin'}:{self.root / 'hostbin'}",
@@ -185,6 +189,8 @@ class Rig:
             "YADGAR_HOSTS_FILE": str(self.root / "etc" / "hosts"),
             "YADGAR_CA_FILE": str(self.root / "etc" / "yadgar" / "edge-ca.crt"),
             "YADGAR_ENROLMENT_FILE": str(self.enrolment_file),
+            # --add-user's explicit credential path; the default is root's own.
+            "YADGAR_CLIENT_CONFIG": str(self.client_config),
             "YADGAR_POLL_SECONDS": "0",
             "YADGAR_PROBE_ATTEMPTS": "1",
         }
@@ -1343,7 +1349,7 @@ def add_user_rig(rig: Rig, create_code: str = "200") -> tuple[str, str]:
     ca = rig.root / "etc" / "yadgar" / "edge-ca.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
     ca.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
-    cfg = rig.root / "home" / ".config" / "yadgar" / "config.json"
+    cfg = rig.client_config
     cfg.parent.mkdir(parents=True)
     cfg.write_text(json.dumps({"gateway": GATEWAY + "/", "token": bearer, "username": "admin"}))
     cfg.chmod(0o600)
@@ -1396,14 +1402,15 @@ def test_add_user_again_never_resends_create_user(rig: Rig) -> None:
     assert rig.calls("curl") == []
     assert "yaadgaar enrol --token-file" in again.stdout
 
-    # Token gone: a new enrolment for the recorded user, never a second create-user.
+    # Token gone: refused. Never a second create-user, and never an enrolment for
+    # a user_id read from the record rather than from this run's create-user.
     out.unlink()
     rig.reset_calls()
     third = rig.main("--add-user", "dave@example.com", "--out", str(out))
-    assert third.returncode == 0, third.stdout + third.stderr
-    urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
-    assert urls == [f"{GATEWAY}/admin/issue-enrolment"]
-    assert out.read_text().strip() == enrolment
+    assert third.returncode != 0
+    assert "already added" in third.stderr and "resets their password" in third.stderr
+    assert rig.calls("curl") == []
+    assert not out.exists()
     assert_absent(rig, third, bearer, enrolment)
 
 
@@ -1428,7 +1435,7 @@ def test_add_user_default_out_is_a_root_only_file_beside_the_admin_token(rig: Ri
 
 def test_add_user_needs_an_enrolled_admin_client(rig: Rig) -> None:
     add_user_rig(rig)
-    (rig.root / "home" / ".config" / "yadgar" / "config.json").unlink()
+    rig.client_config.unlink()
     proc = rig.main("--add-user", "dave@example.com")
     assert proc.returncode != 0
     assert "--with-client" in proc.stderr
@@ -1443,6 +1450,9 @@ def test_add_user_needs_an_enrolled_admin_client(rig: Rig) -> None:
         ("--add-user", "dave", "--with-client"),
         ("--display-name", "Dave"),
         ("--out", "/tmp/x"),
+        ("--force",),
+        ("--add-user", "dave", "--display-name", "Dave\nEvil"),
+        ("--add-user", "dave\tx"),
     ],
 )
 def test_add_user_refuses_bad_arguments(rig: Rig, args: tuple[str, ...]) -> None:
@@ -1450,3 +1460,94 @@ def test_add_user_refuses_bad_arguments(rig: Rig, args: tuple[str, ...]) -> None
     proc = rig.main(*args)
     assert proc.returncode != 0
     assert rig.calls("curl") == []
+
+
+def test_add_user_never_reads_the_bootstrap_token_and_creates_no_admin(rig: Rig) -> None:
+    """Its only authority is root's client credential; the bootstrap token is the
+    first admin's alone (ADR-0655)."""
+    add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [c for c in rig.calls("kubectl") if any(".data.token" in a for a in c["argv"])]
+    for c in rig.calls("curl"):
+        assert "x-yadgar-bootstrap-token" not in (c["stdin"] or "")
+        assert not any("set-user-admin" in a for a in c["argv"])
+        if c["data"] and "external_id" in c["data"]:
+            assert json.loads(c["data"])["is_admin"] is False
+
+
+def test_add_user_ignores_a_home_or_xdg_config_and_reads_only_roots(rig: Rig) -> None:
+    """`sudo -E` keeps the caller's HOME: their credential must never be used."""
+    add_user_rig(rig)
+    for base in (rig.root / "home" / ".config", rig.root / "xdg"):
+        (base / "yadgar").mkdir(parents=True, exist_ok=True)
+        (base / "yadgar" / "config.json").write_text(rig.client_config.read_text())
+        (base / "yadgar" / "config.json").chmod(0o600)
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="",
+                    XDG_CONFIG_HOME=str(rig.root / "xdg"), YADGAR_CONFIG_DIR=str(rig.root / "xdg" / "yadgar"))
+    assert proc.returncode != 0
+    root_cfg = subprocess.run(["getent", "passwd", "0"], capture_output=True, text=True).stdout.split(":")[5]
+    assert f"{root_cfg}/.config/yadgar/config.json" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_credential_that_is_not_private(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.client_config.chmod(0o644)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "600" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_symlinked_credential(rig: Rig) -> None:
+    add_user_rig(rig)
+    real = rig.client_config.with_name("real.json")
+    rig.client_config.rename(real)
+    rig.client_config.symlink_to(real)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_client_enrolled_with_another_gateway(rig: Rig) -> None:
+    add_user_rig(rig)
+    cfg = json.loads(rig.client_config.read_text())
+    cfg["gateway"] = "https://elsewhere.example:443/"
+    rig.client_config.write_text(json.dumps(cfg))
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "elsewhere.example" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_never_overwrites_an_existing_file_without_force(rig: Rig) -> None:
+    _, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "precious"
+    out.write_text("keep me\n")
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert proc.returncode != 0
+    assert "--force" in proc.stderr
+    assert out.read_text() == "keep me\n"
+    assert rig.calls("curl") == [], "a user was created whose token had nowhere to go"
+
+    # Nor through a symlink.
+    target = rig.root / "home" / "target"
+    link = rig.root / "home" / "link"
+    link.symlink_to(target)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(link))
+    assert proc.returncode != 0 and not target.exists()
+
+    forced = rig.main("--add-user", "dave@example.com", "--out", str(out), "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert out.read_text().strip() == enrolment
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_add_user_refuses_a_create_user_answer_without_a_user_id(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.rules = [{"cmd": "curl", "match": ["/admin/create-user"], "stdout": "200", "o_content": "{}"}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "user_id" in proc.stderr
+    assert not [c for c in rig.calls("curl") if any("/admin/issue-enrolment" in a for a in c["argv"])]

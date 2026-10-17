@@ -2,12 +2,13 @@
 # kind-up.sh — the whole of yadgar on one machine, in one command (ADR-0820).
 #
 #   sudo bootstrap/kind-up.sh [--with-client]
-#   sudo bootstrap/kind-up.sh --add-user <username> [--display-name NAME] [--out FILE]
+#   sudo bootstrap/kind-up.sh --add-user <username> [--display-name NAME] [--out FILE] [--force]
 #
 # --with-client enrols this machine's root as the first admin with `yaadgaar`,
 # and registers yadgar with Claude Code (`yaadgaar install`) when `claude` is
-# installed. --add-user, run after that, creates one more user as that admin and
-# writes their enrolment token to a root-only file; it touches nothing else.
+# installed. --add-user, run after that, creates one more ORDINARY user (never
+# an admin) as that admin and writes their enrolment token to a new root-only
+# file; it never overwrites a file without --force and touches nothing else.
 #
 # Run it from this repository at a release tag — a clone, or the release
 # tarball, which needs no git:
@@ -60,8 +61,9 @@
 #   YADGAR_RUNTIME              podman or docker                (podman if present)
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
-#   YADGAR_CONFIG_DIR           the admin client's config, read by --add-user
-#                               (the client's own default: ~/.config/yadgar)
+#   YADGAR_CLIENT_CONFIG        root's own client config, read by --add-user
+#                               (<root's home>/.config/yadgar/config.json);
+#                               refused unless owned by root and mode 0600
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -101,10 +103,18 @@ CLIENT_ENROLLED_MARKER="$STATE_DIR/client-enrolled"
 # `login` both end in `reconcile` and `config.save`), so nothing writes this any
 # more; it is only set aside with the other markers of a replaced installation.
 CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
-# THE CLIENT'S OWN CONFIG LOCATION (yadgar v0.1.2 `config::base_dir`):
-# YADGAR_CONFIG_DIR, else the XDG config directory. --add-user reads the
-# enrolled admin's bearer token from it.
-CLIENT_CONFIG_FILE="${YADGAR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/yadgar}/config.json"
+# ROOT'S OWN CLIENT CONFIG, where --with-client enrolled the admin (the
+# client's default under yadgar v0.1.2 `config::base_dir`). --add-user reads the
+# admin's bearer token from it, so the path comes from the password database for
+# uid 0 — never from $HOME, XDG_CONFIG_HOME or YADGAR_CONFIG_DIR, which `sudo -E`
+# or a caller's environment could point at another user's credential. The
+# override is explicit and passes the same root-owned, 0600 check.
+root_home() {
+  local home
+  home="$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)"
+  printf '%s\n' "${home:-/root}"
+}
+CLIENT_CONFIG_FILE="${YADGAR_CLIENT_CONFIG:-$(root_home)/.config/yadgar/config.json}"
 # One record per user --add-user created, tied to the installation like
 # $ADMIN_RECORD.
 USERS_DIR="$STATE_DIR/users"
@@ -151,6 +161,7 @@ ADD_USER=0
 ADD_USER_ID=""
 ADD_USER_DISPLAY_NAME=""
 ADD_USER_OUT=""
+ADD_USER_FORCE=0
 
 # THE WORKSPACE HEADER ON --add-user's ADMIN CALLS. The gateway's bearer admin
 # path attests the caller through the same code as `tools/call`, which requires
@@ -1031,18 +1042,31 @@ EOF
 # the user id is recorded the moment create-user answers 200, tied to the
 # installation, and create-user is sent at most once per user and installation.
 #   record, token younger than 23h → nothing is sent; the steps are printed
-#   record, no fresh token         → a new enrolment for the recorded user
-#   no record                      → create-user, record, issue-enrolment
+#   record, no fresh token         → refused; nothing is sent
+#   no record                      → create-user, record, issue-enrolment for
+#                                    the user_id that create-user answered
+#
+# ITS ONLY AUTHORITY IS ROOT'S OWN ENROLLED CLIENT CREDENTIAL. The bootstrap
+# token may create and enrol only the first admin (ADR-0655) and is never read
+# here; no admin flag other than `is_admin: false` is ever sent, and
+# set-user-admin is never called. The gateway and CA are the installation's own
+# — the example's enrolment gateway and $CA_FILE — and a client config enrolled
+# with any other gateway is refused.
 add_user() {
   local safe out record uid recorded_uid gateway bearer work code user_id
   [[ -n "$ADD_USER_ID" && "$ADD_USER_ID" != */* && ! "$ADD_USER_ID" =~ [[:space:][:cntrl:]] ]] ||
     die "--add-user takes a username with no '/' and no whitespace"
+  [[ ! "$ADD_USER_DISPLAY_NAME" =~ [[:cntrl:]] ]] || die "--display-name may not hold control characters or newlines"
   safe="${ADD_USER_ID//[^A-Za-z0-9._@-]/_}"
   out="${ADD_USER_OUT:-$(dirname "$ENROLMENT_FILE")/yadgar-enrolment-$safe.token}"
   record="$USERS_DIR/$safe.json"
   [[ -s "$CA_FILE" ]] || die "no edge CA at $CA_FILE; run kind-up.sh without --add-user first"
-  [[ -s "$CLIENT_CONFIG_FILE" ]] ||
-    die "no client credential at $CLIENT_CONFIG_FILE. --add-user acts as the admin this host enrolled: run kind-up.sh --with-client first, or set YADGAR_CONFIG_DIR to an enrolled admin's yaadgaar config directory"
+  [[ -f "$CLIENT_CONFIG_FILE" && ! -L "$CLIENT_CONFIG_FILE" && -r "$CLIENT_CONFIG_FILE" && -s "$CLIENT_CONFIG_FILE" ]] ||
+    die "no readable client credential at $CLIENT_CONFIG_FILE. --add-user acts only as the admin this host's root enrolled: run kind-up.sh --with-client first"
+  local owner_mode
+  owner_mode="$(stat -c '%u %a' "$CLIENT_CONFIG_FILE")"
+  [[ "$owner_mode" == "$EUID 600" ]] ||
+    die "$CLIENT_CONFIG_FILE is owner/mode $owner_mode, not $EUID 600; --add-user uses only root's own private client credential"
   gateway="$(jq -r '.gateway // empty' "$CLIENT_CONFIG_FILE")"
   [[ "${gateway%/}" == "${GATEWAY_URL%/}" ]] ||
     die "$CLIENT_CONFIG_FILE is enrolled with ${gateway:-no gateway}, not $GATEWAY_URL"
@@ -1053,36 +1077,45 @@ add_user() {
     recorded_uid="$(jq -r '.install_uid // empty' "$record")"
     if [[ "$recorded_uid" != "$uid" ]]; then
       log "[add-user] $record belongs to another installation (${recorded_uid:-unrecorded}, this one is $uid)"
-      set_aside "$record" "$out"
+      set_aside "$record"
     fi
   fi
-  if [[ -s "$record" && -s "$out" ]] &&
-    [[ -n "$(find "$out" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
-    log "[add-user] $ADD_USER_ID already added ($(jq -r '.user_id' "$record")); $out holds an enrolment token younger than 23 hours"
-    print_add_user_steps "$out"
-    return
+  # ALREADY ADDED BY THIS INSTALLATION: nothing is sent. The enrolment is only
+  # ever issued to the user_id the same run's create-user answered, so a lost or
+  # expired token is not re-issued from the record here — a re-issue to an
+  # enrolled user resets their password, a step for an admin to take on purpose.
+  if [[ -s "$record" ]]; then
+    if [[ -f "$out" && -n "$(find "$out" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
+      log "[add-user] $ADD_USER_ID already added ($(jq -r '.user_id' "$record")); $out holds an enrolment token younger than 23 hours"
+      print_add_user_steps "$out"
+      return
+    fi
+    die "$ADD_USER_ID was already added by this installation ($(jq -r '.user_id' "$record")), and $out is missing or older than 23 hours. --add-user sends create-user once and issues an enrolment only to the user that call created; a new token for an existing user resets their password, so issue it deliberately as an admin"
+  fi
+  # CHECKED BEFORE ANY REQUEST, so a refused output path never strands a user
+  # whose only token had nowhere to go.
+  if [[ -e "$out" || -L "$out" ]]; then
+    ((ADD_USER_FORCE)) || die "$out already exists; choose another --out, or pass --force to replace it"
   fi
 
   bearer="$(jq -r '.token // empty' "$CLIENT_CONFIG_FILE")"
   [[ "$bearer" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die "no usable credential in $CLIENT_CONFIG_FILE"
   install -d -m 0700 "$USERS_DIR"
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-  if [[ -s "$record" ]]; then
-    user_id="$(jq -r '.user_id' "$record")"
-    log "[add-user] $ADD_USER_ID already created ($user_id), and $out is missing or older than 23 hours: issuing a new enrolment. If $ADD_USER_ID has already enrolled, redeeming it sets a new password"
-  else
-    log "[add-user] creating $ADD_USER_ID"
-    jq -n --arg e "$ADD_USER_ID" --arg d "${ADD_USER_DISPLAY_NAME:-$ADD_USER_ID}" \
-      '{external_id: $e, display_name: $d, is_admin: false}' >"$work/body"
-    code="$(user_admin_post create-user "$work/body" "$work/out" "$bearer")"
-    [[ "$code" == 200 ]] || add_user_refused create-user "$code" "$work/out"
-    user_id="$(jq -r '.user_id // empty' "$work/out")"
-    [[ -n "$user_id" ]] || die "create-user answered 200 with no user_id"
-    jq -n --arg e "$ADD_USER_ID" --arg u "$user_id" --arg i "$uid" \
-      '{external_id: $e, user_id: $u, install_uid: $i}' >"$record.tmp"
-    mv "$record.tmp" "$record"
-    log "[add-user] created $ADD_USER_ID as $user_id"
-  fi
+  log "[add-user] creating $ADD_USER_ID (an ordinary user, never an admin)"
+  # `jq --arg` builds the JSON: no input is ever interpolated into it.
+  # `is_admin: false` is stated rather than left to the gateway's default.
+  jq -n --arg e "$ADD_USER_ID" --arg d "${ADD_USER_DISPLAY_NAME:-$ADD_USER_ID}" \
+    '{external_id: $e, display_name: $d, is_admin: false}' >"$work/body"
+  code="$(user_admin_post create-user "$work/body" "$work/out" "$bearer")"
+  [[ "$code" == 200 ]] || add_user_refused create-user "$code" "$work/out"
+  # THE USER THIS CALL CREATED, and only that one, is enrolled below.
+  user_id="$(jq -r '.user_id // empty' "$work/out")"
+  [[ "$user_id" =~ ^yadgar:user:[0-9a-f-]+$ ]] || die "create-user answered 200 without a usable user_id"
+  jq -n --arg e "$ADD_USER_ID" --arg u "$user_id" --arg i "$uid" \
+    '{external_id: $e, user_id: $u, install_uid: $i}' >"$record.tmp"
+  mv "$record.tmp" "$record"
+  log "[add-user] created $ADD_USER_ID as $user_id"
   jq -n --arg u "$user_id" '{user_id: $u}' >"$work/body"
   code="$(user_admin_post issue-enrolment "$work/body" "$work/out" "$bearer")"
   bearer=""
@@ -1090,7 +1123,16 @@ add_user() {
   jq -r '.token // empty' "$work/out" >"$work/token"
   [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
   mkdir -p "$(dirname "$out")"
-  install -m 0600 "$work/token" "$out"
+  # CREATED 0600 UNDER umask 077, EXCLUSIVELY: `set -C` refuses to write through
+  # an existing file or symlink, so --force removes it first and nothing else
+  # can be clobbered.
+  if ((ADD_USER_FORCE)); then rm -f "$out"; fi
+  (
+    umask 077
+    set -C
+    cat "$work/token" >"$out"
+  ) || die "could not create $out"
+  chmod 0600 "$out"
   rm -rf "$work"
   log "[add-user] enrolment token for $ADD_USER_ID written to $out (0600, valid 24 hours)"
   print_add_user_steps "$out"
@@ -1119,6 +1161,7 @@ main() {
         esac
         shift
         ;;
+      --force) out_set=1 ADD_USER_FORCE=1 ;;
       -h | --help)
         usage
         return 0
@@ -1131,7 +1174,7 @@ main() {
     shift
   done
   if ((!ADD_USER && (display_set || out_set))); then
-    printf -- '--display-name and --out belong to --add-user\n' >&2
+    printf -- '--display-name, --out and --force belong to --add-user\n' >&2
     return 2
   fi
   if ((ADD_USER && WITH_CLIENT)); then
