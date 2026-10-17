@@ -422,6 +422,85 @@ def test_the_tools_go_to_a_private_directory_by_default(rig: Rig) -> None:
     assert "/usr/local/bin" not in SCRIPT.read_text().replace("never /usr/local/bin", "")
 
 
+# ─── root ignores the path overrides (ledger 1556) ──────────────────────────────
+#
+# The script runs as root. Under `sudo -E`, or any root invocation that keeps the
+# caller's environment, a path override would let a non-root caller choose which
+# kind/kubectl/helm root executes, which lock vouches for them, where root keeps
+# the admin's kubeconfig and records, and which files root writes. So when bash's
+# own $EUID is 0 — readonly, set from the kernel, not from the environment or
+# PATH — every one of these is its fixed default. The rig fakes `id -u` but runs
+# as a real non-root user, which is why the overrides still steer it.
+#
+# THE ROOT RUNS USE `unshare -r`: a user namespace in which this unprivileged
+# process has EUID 0, the one way to exercise the real $EUID branch without
+# privilege. It is resolved from the host PATH before the rig's PATH replaces it.
+# Absent or refused is a failure, never a skip: a skip here would leave the
+# root branch untested and green.
+
+ROOT_PINNED_PATHS = (
+    # (environment override, script variable, value under root)
+    ("YADGAR_STATE_DIR", "STATE_DIR", "/var/lib/yadgar-bootstrap"),
+    ("YADGAR_BIN_DIR", "BIN_DIR", "/opt/yadgar-bootstrap/bin"),
+    ("YADGAR_TOOLS_LOCK", "TOOLS_LOCK", str(LOCK)),
+    ("YADGAR_SYSCTL_FILE", "SYSCTL_FILE", "/etc/sysctl.d/90-yadgar-kind.conf"),
+    ("YADGAR_HOSTS_FILE", "HOSTS_FILE", "/etc/hosts"),
+    ("YADGAR_CA_FILE", "CA_FILE", "/etc/yadgar/edge-ca.crt"),
+)
+
+
+def as_root(rig: Rig, snippet: str, root: bool, **extra: str) -> subprocess.CompletedProcess:
+    """Source the script and run a snippet, with EUID 0 (`unshare -r`) or as this user."""
+    (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
+    argv = ["bash", "-c", f'source "{SCRIPT}"; {snippet}']
+    if root:
+        unshare = shutil.which("unshare")
+        assert unshare, "unshare (util-linux) is not installed; the root branch cannot be tested"
+        argv = [unshare, "-r", *argv]
+    proc = subprocess.run(argv, env=rig.env(**extra), capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=60)
+    if root:
+        assert "unshare:" not in proc.stderr, f"unshare -r was refused: {proc.stderr}"
+    return proc
+
+
+@pytest.mark.parametrize("override, variable, pinned", ROOT_PINNED_PATHS,
+                         ids=[row[0] for row in ROOT_PINNED_PATHS])
+def test_root_ignores_each_path_override(rig: Rig, override: str, variable: str, pinned: str) -> None:
+    evil = str(rig.root / "evil" / override.lower())
+    snippet = f'printf "%s|%s" "$EUID" "${variable}"'
+
+    # POSITIVE CONTROL: as this user the override reaches the script, so the
+    # root assertion below cannot pass merely because the variable never arrived.
+    proc = as_root(rig, snippet, root=False, **{override: evil})
+    assert proc.returncode == 0, proc.stderr
+    euid, value = proc.stdout.split("|")
+    assert euid != "0", "the suite itself runs as root; the control proves nothing"
+    assert value == evil
+
+    proc = as_root(rig, snippet, root=True, **{override: evil})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"0|{pinned}", f"root honoured {override}={evil}"
+
+
+def test_root_never_runs_a_tool_from_a_caller_chosen_bin_dir(rig: Rig) -> None:
+    evil = rig.root / "evil-bin"
+    evil.mkdir()
+    marker = rig.root / "evil-ran"
+    (evil / "kind").write_text(f'#!/bin/sh\ntouch "{marker}"\necho "kind v0.32.0"\n')
+    (evil / "kind").chmod(0o755)
+
+    # POSITIVE CONTROL: as this user the planted kind is the one asked its version.
+    proc = as_root(rig, "installed_version kind", root=False, YADGAR_BIN_DIR=str(evil))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists(), "the planted kind never ran even without root; the test proves nothing"
+    marker.unlink()
+
+    proc = as_root(rig, "installed_version kind", root=True, YADGAR_BIN_DIR=str(evil))
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists(), "root executed a kind from the caller's YADGAR_BIN_DIR"
+
+
 def test_a_missing_bin_directory_is_created(rig: Rig) -> None:
     bindir = rig.root / "fresh" / "bin"
     body = "#!/bin/sh\necho 'kind v0.32.0 go1.26.3 linux/amd64'\n"

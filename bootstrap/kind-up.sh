@@ -56,15 +56,21 @@
 #   YADGAR_ADMIN_EXTERNAL_ID    the first admin's username      (admin)
 #   YADGAR_ADMIN_DISPLAY_NAME   the first admin's display name  (Administrator)
 #   YADGAR_ENROLMENT_FILE       where the enrolment token goes  (/root/yadgar-enrolment.token)
-#   YADGAR_STATE_DIR            kubeconfig, log, admin record   (/var/lib/yadgar-bootstrap)
-#   YADGAR_BIN_DIR              kind, kubectl and helm          (/opt/yadgar-bootstrap/bin)
-#   YADGAR_CA_FILE              the edge CA, world-readable     (/etc/yadgar/edge-ca.crt)
 #   YADGAR_RUNTIME              podman or docker                (podman if present)
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
 #   YADGAR_CLIENT_CONFIG        root's own client config, read by --add-user
 #                               (<root's home>/.config/yadgar/config.json);
 #                               refused unless owned by root and mode 0600
+#
+# THE PATHS ROOT EXECUTES, TRUSTS OR WRITES ARE FIXED (ledger 1556): the state
+# directory /var/lib/yadgar-bootstrap (kubeconfig, log, admin record), the tool
+# directory /opt/yadgar-bootstrap/bin (kind, kubectl, helm), the tools.lock
+# beside this script, /etc/sysctl.d/90-yadgar-kind.conf, /etc/hosts and the
+# world-readable edge CA /etc/yadgar/edge-ca.crt. YADGAR_STATE_DIR,
+# YADGAR_BIN_DIR, YADGAR_TOOLS_LOCK, YADGAR_SYSCTL_FILE, YADGAR_HOSTS_FILE and
+# YADGAR_CA_FILE are read only when the script is NOT root, which is only its
+# offline test suite (`scripts/tests/test_kind_up.py`); a real run ignores them.
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -90,7 +96,24 @@ ARGOCD_APP_VERSION="v3.1.8"
 # The namespace `example/kind/application.yaml` installs into.
 ESTATE_NAMESPACE="yadgar"
 
-STATE_DIR="${YADGAR_STATE_DIR:-/var/lib/yadgar-bootstrap}"
+# A PATH ROOT EXECUTES, TRUSTS OR WRITES: its fixed default whenever this runs as
+# root (ledger 1556). Under `sudo -E`, or any root invocation that keeps the
+# caller's environment, an override would let a non-root caller choose which
+# kind, kubectl and helm root runs, which lock vouches for them, where root keeps
+# the cluster's kubeconfig and the admin's records, and which files root
+# overwrites. bash's own $EUID decides — readonly, from the kernel, never from the
+# environment or PATH. The overrides remain for the offline test suite, which runs
+# unprivileged with a fake `id`; a real non-root run stops at `require_root`.
+root_fixed_path() {
+  local name="$1" default="$2"
+  if ((EUID == 0)); then
+    printf '%s\n' "$default"
+  else
+    printf '%s\n' "${!name:-$default}"
+  fi
+}
+
+STATE_DIR="$(root_fixed_path YADGAR_STATE_DIR /var/lib/yadgar-bootstrap)"
 LOG_FILE="$STATE_DIR/kind-up.log"
 KUBECONFIG_FILE="$STATE_DIR/kubeconfig"
 ADMIN_RECORD="$STATE_DIR/admin.json"
@@ -166,11 +189,11 @@ USERS_DIR="$STATE_DIR/users"
 ARGOCD_VALUES_SHA_FILE="$STATE_DIR/argocd-values.sha256"
 # A DIRECTORY OF ITS OWN: a kind, kubectl or helm the host already has in a
 # shared bin directory is never replaced — never /usr/local/bin.
-BIN_DIR="${YADGAR_BIN_DIR:-/opt/yadgar-bootstrap/bin}"
-TOOLS_LOCK="${YADGAR_TOOLS_LOCK:-$SCRIPT_DIR/tools.lock}"
-SYSCTL_FILE="${YADGAR_SYSCTL_FILE:-/etc/sysctl.d/90-yadgar-kind.conf}"
-HOSTS_FILE="${YADGAR_HOSTS_FILE:-/etc/hosts}"
-CA_FILE="${YADGAR_CA_FILE:-/etc/yadgar/edge-ca.crt}"
+BIN_DIR="$(root_fixed_path YADGAR_BIN_DIR /opt/yadgar-bootstrap/bin)"
+TOOLS_LOCK="$(root_fixed_path YADGAR_TOOLS_LOCK "$SCRIPT_DIR/tools.lock")"
+SYSCTL_FILE="$(root_fixed_path YADGAR_SYSCTL_FILE /etc/sysctl.d/90-yadgar-kind.conf)"
+HOSTS_FILE="$(root_fixed_path YADGAR_HOSTS_FILE /etc/hosts)"
+CA_FILE="$(root_fixed_path YADGAR_CA_FILE /etc/yadgar/edge-ca.crt)"
 ENROLMENT_FILE="${YADGAR_ENROLMENT_FILE:-/root/yadgar-enrolment.token}"
 ADMIN_EXTERNAL_ID="${YADGAR_ADMIN_EXTERNAL_ID:-admin}"
 ADMIN_DISPLAY_NAME="${YADGAR_ADMIN_DISPLAY_NAME:-Administrator}"
