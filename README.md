@@ -110,15 +110,20 @@ and `YADGAR_CONFIG_DIR` and `YAADGAAR_CONFIG_DIR`.
 
 `--add-user` reads root's credential from `/root/.config/yaadgaar/config.json`.
 yaadgaar 0.1.5 and later keep their config in that directory. A host enrolled
-by kind-up v0.24.19 or older holds the credential where yaadgaar 0.1.3 put it,
+by kind-up v0.24.20 or older holds the credential where yaadgaar 0.1.3 put it,
 `/root/.config/yadgar/config.json`. When the new file is absent, `--add-user`
 reads the old one where it is, with the same root-owned 0600 no-follow check,
 and prints one note on stderr. It moves, copies and creates nothing.
 
 A rerun with `--with-client` brings root's enrolled client to the version in
 `bootstrap/tools.lock` (ledger 1554), with `pipx install --force`, only when
-root's credential is already at `/root/.config/yaadgaar/config.json`. It logs
-`upgraded root's client X→Y; credential stays at <path>`. When the credential
+the installed client is older than that version and root's credential is
+already at `/root/.config/yaadgaar/config.json`. A newer client is never
+downgraded. It logs `upgraded root's client X→Y; credential stays at <path>`.
+pipx deletes the client's venv when a forced install fails, so the pinned wheel
+is fetched first with `pipx runpip yaadgaar download`. If that fetch fails, the
+old client is kept and the run warns. If the forced install fails after it,
+the run stops and names the command that puts a client back. When the credential
 is at the old path, the client is kept and the kept version is logged. The
 reason: yaadgaar 0.1.6 does not read the old directory, and `yaadgaar serve`,
 which Claude Code starts with no environment, would find no credential. Such a

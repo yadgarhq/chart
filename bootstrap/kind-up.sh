@@ -200,7 +200,7 @@ CLIENT_CONFIG_FILE=""
 # 1566). An explicit YADGAR_CLIENT_CONFIG wins and never falls back. Otherwise
 # ~/.config/yaadgaar/config.json, where yaadgaar 0.1.5 and later keep it.
 #
-# A HOST ENROLLED BY kind-up v0.24.19 OR OLDER holds it where yaadgaar 0.1.3 put
+# A HOST ENROLLED BY kind-up v0.24.20 OR OLDER holds it where yaadgaar 0.1.3 put
 # it, ~/.config/yadgar/config.json. When the new path has no entry at all and
 # the old one has, the old one is read where it is, through the same no-follow,
 # root-only READ_CLIENT_CONFIG_PY, and one note says so on stderr. Nothing is
@@ -1045,32 +1045,88 @@ yaadgaar_bin() {
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
 }
 
-# ROOT'S ENROLLED CLIENT FOLLOWS tools.lock (ledger 1554) — but only where the
-# new client can find its credential. yaadgaar 0.1.5 and later read only
-# ~/.config/yaadgaar, and `yaadgaar serve`, which Claude Code starts with no
+# WHETHER VERSION $1 IS OLDER THAN $2, by release numbers and then a, b, rc
+# pre-releases below the final release (PEP 440's order for the versions this
+# client publishes). A version outside that shape is never "older", so an
+# unreadable answer never triggers a replacement. Exit 0 older, 1 not, 2
+# unparseable.
+# shellcheck disable=SC2016
+VERSION_OLDER_PY='
+import re, sys
+def key(v):
+    m = re.fullmatch(r"(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?", v)
+    if not m:
+        sys.exit(2)
+    rel = tuple(int(x) for x in m.group(1).split("."))
+    rel += (0,) * (8 - len(rel))
+    pre = ({"a": 0, "b": 1, "rc": 2}[m.group(2)], int(m.group(3))) if m.group(2) else (3, 0)
+    return rel, pre
+sys.exit(0 if key(sys.argv[1]) < key(sys.argv[2]) else 1)
+'
+version_older() {
+  local py
+  py="$(kind_up_python)" || return 2
+  "$py" -I -c "$VERSION_OLDER_PY" "$1" "$2"
+}
+
+# ROOT'S ENROLLED CLIENT FOLLOWS tools.lock (ledger 1554), upward only, and only
+# where the new client can find its credential. yaadgaar 0.1.5 and later read
+# only ~/.config/yaadgaar, and `yaadgaar serve`, which Claude Code starts with no
 # environment, reads nothing else. So:
-#   credential at ~/.config/yaadgaar   `pipx install --force` at the pin
-#   credential elsewhere (the old      kept, and named: a 0.1.3 credential in
-#   ~/.config/yadgar, or none)         ~/.config/yadgar would strand a new client
-# No config is moved, copied or written either way, and neither `login` nor
-# `enrol` runs: a `login` into an empty new directory has no CA for this edge,
-# which only an enrolment token carries, and the bootstrap token cannot enrol
-# an admin who holds a credential (ADR-0655). Moving an old credential waits
-# for a decision (ledger 1566).
+#   no version answer, or not older    kept (never a downgrade)
+#   credential not a regular file at   kept, and named: a 0.1.3 credential in
+#   ~/.config/yaadgaar                 ~/.config/yadgar would strand a new client
+#   otherwise                          pre-flight, then `pipx install --force`
+#
+# THE PRE-FLIGHT EXISTS BECAUSE pipx 1.8.0 DELETES THE VENV when a forced install
+# fails (`remove_venv` on any error), which would take root's working client with
+# it. So the pinned wheel is first fetched with the client venv's own pip into a
+# scratch directory: if that fails — no network, no wheel for this platform — the
+# old client is kept and the run warns. If the forced install still fails after
+# that, root has no client, and the run stops with the command that restores one.
+#
+# No config is moved, copied or written, and neither `login` nor `enrol` runs:
+# a `login` into an empty new directory has no CA for this edge, which only an
+# enrolment token carries, and the bootstrap token cannot enrol an admin who
+# holds a credential (ADR-0655). Moving an old credential waits for a decision.
 upgrade_enrolled_client() {
-  local pin have cfg
+  local pin have cfg rc=0 tmp
   [[ -x "$PIPX_BIN_DIR/yaadgaar" ]] || return 0
   pin="$(yaadgaar_version)"
+  [[ -n "$pin" ]] || return 0
   have="$("$PIPX_BIN_DIR/yaadgaar" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
-  [[ -n "$pin" && -n "$have" && "$have" != "$pin" ]] || return 0
+  if [[ -z "$have" ]]; then
+    log "[10/10] root's client did not report its version; kept"
+    return 0
+  fi
+  version_older "$have" "$pin" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      if [[ "$have" != "$pin" ]]; then
+        log "[10/10] root's client is yaadgaar $have, newer than the pinned $pin; kept"
+      fi
+      return 0
+      ;;
+    *)
+      log "[10/10] root's client reported version '$(printf '%s' "$have" | printable)', which cannot be compared with $pin; kept"
+      return 0
+      ;;
+  esac
   cfg="$(root_home)/.config/yaadgaar/config.json"
   if [[ ! -f "$cfg" || -L "$cfg" ]]; then
     log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because its credential is not at $cfg, where the pinned client reads it"
     return 0
   fi
-  if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
-    log "[10/10] WARNING: upgrading root's client $have→$pin failed; run: pipx install --force yaadgaar==$pin"
+  tmp="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
+  if ! pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched"
     return 0
+  fi
+  rm -rf "$tmp"
+  if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
+    die "upgrading root's client $have→$pin failed, and pipx removes the old client when a forced install fails. Put one back: pipx install --force yaadgaar==$pin"
   fi
   log "[10/10] upgraded root's client $have→$pin; credential stays at $cfg"
 }

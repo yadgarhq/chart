@@ -1725,7 +1725,7 @@ def test_add_user_reads_roots_yaadgaar_config_by_default(rig: Rig) -> None:
 
 
 def test_add_user_falls_back_to_the_old_config_read_only_with_one_note(rig: Rig) -> None:
-    """A host enrolled by kind-up v0.24.19 or older holds root's credential where
+    """A host enrolled by kind-up v0.24.20 or older holds root's credential where
     yaadgaar 0.1.3 put it. It is read where it is; nothing is moved or created."""
     add_user_rig(rig)
     old = root_config(rig, "yadgar")
@@ -1809,11 +1809,80 @@ def test_an_enrolled_client_with_its_credential_at_the_new_path_is_upgraded(rig:
     before = cfg.read_bytes()
     proc = rig.run("pin_root_environment; ensure_client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    pipx = [c["argv"] for c in rig.calls("pipx")]
+    # THE PRE-FLIGHT FIRST: pipx 1.8.0 deletes the venv when a forced install
+    # fails, so the wheel is fetched before the working client is touched.
+    assert pipx[0][:4] == ["runpip", "yaadgaar", "download", "--no-deps"], pipx
+    assert f"yaadgaar=={client_version()}" in pipx[0] and "--only-binary=:all:" in pipx[0]
+    installs = [a for a in pipx if "install" in a]
     assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
     assert f"upgraded root's client 0.1.5\u2192{client_version()}; credential stays at {cfg}" in proc.stdout
     assert cfg.read_bytes() == before
+
+
+def test_a_failed_pre_flight_keeps_the_client_and_never_forces(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [c for c in rig.calls("pipx") if "--force" in c["argv"]], "forced an install it could not fetch"
+    assert "WARNING" in proc.stdout and "0.1.5 kept" in proc.stdout
+
+
+def test_a_failed_forced_install_after_a_good_pre_flight_stops_the_run(rig: Rig) -> None:
+    """pipx removes the old venv when a forced install fails: root has no client
+    now, so the run stops and names the command that puts one back."""
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["install", "--force"], "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode != 0, "a failed forced install was reported as success"
+    assert f"pipx install --force yaadgaar=={client_version()}" in proc.stderr
+    assert "upgraded" not in proc.stdout
+
+
+def test_an_enrolled_client_newer_than_the_pin_is_kept(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.2.0")
+    root_config(rig, "yaadgaar")
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == [], "downgraded root's client"
+    assert "yaadgaar 0.2.0, newer than the pinned" in proc.stdout
+
+
+def test_a_pre_release_of_the_pin_is_older_than_the_pin() -> None:
+    proc = subprocess.run(
+        ["bash", "-c", f'source "{SCRIPT}"; '
+         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1"; do '
+         'set -- $p; if version_older "$1" "$2"; then echo "$1<$2"; else echo "$1>=$2"; fi; done'],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == ["0.1.6a1<0.1.6", "0.1.0a8<0.1.2", "0.1.5<0.1.6",
+                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1"]
+
+
+def test_a_symlink_at_the_new_config_keeps_the_client(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.5")
+    real = root_config(rig, "elsewhere")
+    link = rig.root_home / ".config" / "yaadgaar" / "config.json"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == []
+    assert "0.1.5, not the pinned" in proc.stdout and "kept" in proc.stdout
+
+
+def test_a_client_that_reports_no_version_is_kept(rig: Rig) -> None:
+    (rig.state / "client-enrolled").touch()
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": "", "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == []
+    assert "did not report its version; kept" in proc.stdout
 
 
 def test_an_enrolled_client_with_its_credential_at_the_old_path_is_kept(rig: Rig) -> None:
