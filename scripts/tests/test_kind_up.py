@@ -635,9 +635,17 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
 def test_the_lock_pins_the_client_once() -> None:
     rows = [line.split() for line in LOCK.read_text().splitlines()
             if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
-    # 0.1.3 (yadgar#52), measured 2026-10-17 on the VM to enrol with
-    # `--password-stdin` and to serve MCP; 0.1.2 was the first stable release.
-    assert rows == [["yaadgaar", "0.1.3", "pypi"]]
+    # 0.1.6 (yadgar v0.1.6): since 0.1.5 the client keeps its config in
+    # ~/.config/yaadgaar, which is the default --add-user reads (ledger 1566).
+    assert rows == [["yaadgaar", "0.1.6", "pypi"]]
+
+
+def test_the_printed_steps_name_the_pinned_client_literally(rig: Rig) -> None:
+    """Not read back from the lock: the version a person is told to install."""
+    add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "pipx install yaadgaar==0.1.6" in proc.stdout
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
@@ -1686,11 +1694,220 @@ def test_add_user_ignores_a_home_or_xdg_config_and_reads_only_roots(rig: Rig) ->
         (base / "yadgar").mkdir(parents=True, exist_ok=True)
         (base / "yadgar" / "config.json").write_text(rig.client_config.read_text())
         (base / "yadgar" / "config.json").chmod(0o600)
+    (rig.root / "xdg" / "yaadgaar").mkdir()
+    (rig.root / "xdg" / "yaadgaar" / "config.json").write_text(rig.client_config.read_text())
+    (rig.root / "xdg" / "yaadgaar" / "config.json").chmod(0o600)
     proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="",
-                    XDG_CONFIG_HOME=str(rig.root / "xdg"), YADGAR_CONFIG_DIR=str(rig.root / "xdg" / "yadgar"))
+                    XDG_CONFIG_HOME=str(rig.root / "xdg"), YADGAR_CONFIG_DIR=str(rig.root / "xdg" / "yadgar"),
+                    YAADGAAR_CONFIG_DIR=str(rig.root / "xdg" / "yaadgaar"))
     assert proc.returncode != 0
-    assert f"{rig.root_home}/.config/yadgar/config.json" in proc.stderr
+    assert f"{rig.root_home}/.config/yaadgaar/config.json" in proc.stderr
     assert rig.calls("curl") == []
+
+
+def root_config(rig: Rig, leaf: str, gateway: str = GATEWAY + "/") -> Path:
+    """A client config in root's own home, under ~/.config/<leaf>."""
+    cfg = rig.root_home / ".config" / leaf / "config.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"gateway": gateway, "token": secrets.token_urlsafe(48)}))
+    cfg.chmod(0o600)
+    return cfg
+
+
+def test_add_user_reads_roots_yaadgaar_config_by_default(rig: Rig) -> None:
+    """yaadgaar 0.1.5 and later keep their config in ~/.config/yaadgaar."""
+    add_user_rig(rig)
+    root_config(rig, "yaadgaar")
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "older yaadgaar" not in proc.stderr
+    assert len(rig.calls("curl")) == 2
+
+
+def test_add_user_falls_back_to_the_old_config_read_only_with_one_note(rig: Rig) -> None:
+    """A host enrolled by kind-up v0.24.20 or older holds root's credential where
+    yaadgaar 0.1.3 put it. It is read where it is; nothing is moved or created."""
+    add_user_rig(rig)
+    old = root_config(rig, "yadgar")
+    before = old.read_bytes()
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stderr.count("older yaadgaar") == 1, proc.stderr
+    assert str(old) in proc.stderr
+    assert len(rig.calls("curl")) == 2
+    assert old.read_bytes() == before
+    assert stat.S_IMODE(old.stat().st_mode) == 0o600
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+
+
+def test_the_new_config_wins_when_both_exist(rig: Rig) -> None:
+    add_user_rig(rig)
+    root_config(rig, "yaadgaar")
+    root_config(rig, "yadgar", gateway="https://elsewhere.example:443/")
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "older yaadgaar" not in proc.stderr
+
+
+def test_a_symlink_at_the_new_config_is_refused_not_bypassed(rig: Rig) -> None:
+    add_user_rig(rig)
+    root_config(rig, "yadgar")
+    new = rig.root_home / ".config" / "yaadgaar" / "config.json"
+    new.parent.mkdir(parents=True)
+    new.symlink_to(rig.root / "nowhere.json")
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode != 0
+    assert str(new) in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_the_old_config_passes_the_same_owner_and_mode_check(rig: Rig) -> None:
+    add_user_rig(rig)
+    old = root_config(rig, "yadgar")
+    old.chmod(0o644)
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode != 0
+    # The reader's own refusal, naming the old file: not the generic die text.
+    assert f"{old} is owner/mode" in proc.stderr and " 644, not " in proc.stderr, proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_a_symlink_at_the_old_config_is_refused_not_followed(rig: Rig) -> None:
+    add_user_rig(rig)
+    real = root_config(rig, "elsewhere")
+    old = rig.root_home / ".config" / "yadgar" / "config.json"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(real)
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="")
+    assert proc.returncode != 0
+    assert f"no readable client credential at {old}" in proc.stderr, proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_an_explicit_client_config_never_falls_back(rig: Rig) -> None:
+    add_user_rig(rig)
+    root_config(rig, "yadgar")
+    rig.client_config.unlink()
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert str(rig.client_config) in proc.stderr
+    assert "older yaadgaar" not in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def enrolled_with_client(rig: Rig, version: str) -> None:
+    """A host --with-client already enrolled, its root client answering *version*."""
+    (rig.state / "client-enrolled").touch()
+    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": f"yaadgaar {version}\n"}] + rig.rules
+
+
+def test_an_enrolled_client_with_its_credential_at_the_new_path_is_upgraded(rig: Rig) -> None:
+    """Ledger 1554: root's client follows tools.lock. Safe only where the new
+    client finds its credential: ~/.config/yaadgaar, which 0.1.5 and later read."""
+    enrolled_with_client(rig, "0.1.5")
+    cfg = root_config(rig, "yaadgaar")
+    before = cfg.read_bytes()
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pipx = [c["argv"] for c in rig.calls("pipx")]
+    # THE PRE-FLIGHT FIRST: pipx 1.8.0 deletes the venv when a forced install
+    # fails, so the wheel is fetched before the working client is touched.
+    assert pipx[0][:4] == ["runpip", "yaadgaar", "download", "--no-deps"], pipx
+    assert f"yaadgaar=={client_version()}" in pipx[0] and "--only-binary=:all:" in pipx[0]
+    installs = [a for a in pipx if "install" in a]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
+    assert f"upgraded root's client 0.1.5\u2192{client_version()}; credential stays at {cfg}" in proc.stdout
+    assert cfg.read_bytes() == before
+
+
+def test_a_failed_pre_flight_keeps_the_client_and_never_forces(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [c for c in rig.calls("pipx") if "--force" in c["argv"]], "forced an install it could not fetch"
+    assert "WARNING" in proc.stdout and "0.1.5 kept" in proc.stdout
+
+
+def test_a_failed_forced_install_after_a_good_pre_flight_stops_the_run(rig: Rig) -> None:
+    """pipx removes the old venv when a forced install fails: root has no client
+    now, so the run stops and names the command that puts one back."""
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["install", "--force"], "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode != 0, "a failed forced install was reported as success"
+    assert f"pipx install --force yaadgaar=={client_version()}" in proc.stderr
+    assert "upgraded" not in proc.stdout
+
+
+def test_an_enrolled_client_newer_than_the_pin_is_kept(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.2.0")
+    root_config(rig, "yaadgaar")
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == [], "downgraded root's client"
+    assert "yaadgaar 0.2.0, newer than the pinned" in proc.stdout
+
+
+def test_a_pre_release_of_the_pin_is_older_than_the_pin() -> None:
+    proc = subprocess.run(
+        ["bash", "-c", f'source "{SCRIPT}"; '
+         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1"; do '
+         'set -- $p; if version_older "$1" "$2"; then echo "$1<$2"; else echo "$1>=$2"; fi; done'],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == ["0.1.6a1<0.1.6", "0.1.0a8<0.1.2", "0.1.5<0.1.6",
+                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1"]
+
+
+def test_a_symlink_at_the_new_config_keeps_the_client(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.5")
+    real = root_config(rig, "elsewhere")
+    link = rig.root_home / ".config" / "yaadgaar" / "config.json"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == []
+    assert "0.1.5, not the pinned" in proc.stdout and "kept" in proc.stdout
+
+
+def test_a_client_that_reports_no_version_is_kept(rig: Rig) -> None:
+    (rig.state / "client-enrolled").touch()
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": "", "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == []
+    assert "did not report its version; kept" in proc.stdout
+
+
+def test_an_enrolled_client_with_its_credential_at_the_old_path_is_kept(rig: Rig) -> None:
+    """0.1.6 does not read ~/.config/yadgar, and `yaadgaar serve`, which Claude Code
+    starts with no environment, would then find no credential. So the client is
+    kept until a migration is decided; nothing is moved, copied or written."""
+    enrolled_with_client(rig, "0.1.3")
+    old = root_config(rig, "yadgar")
+    before = old.read_bytes()
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == [], "replaced a client whose credential it cannot read"
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
+    assert f"yaadgaar 0.1.3, not the pinned {client_version()}; kept" in proc.stdout
+    assert old.read_bytes() == before
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+
+
+def test_an_enrolled_client_at_the_pin_is_left_alone(rig: Rig) -> None:
+    enrolled_with_client(rig, client_version())
+    root_config(rig, "yaadgaar")
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == []
+    assert "not the pinned" not in proc.stdout and "upgraded" not in proc.stdout
 
 
 def test_add_user_refuses_a_credential_that_is_not_private(rig: Rig) -> None:
@@ -1777,6 +1994,7 @@ def test_the_root_side_client_never_follows_the_callers_environment(rig: Rig) ->
         "HELM_PLUGINS", "HELM_REGISTRY_CONFIG", "HELM_REPOSITORY_CONFIG")}
     proc = rig.main("--with-client", HOME=str(caller), XDG_CONFIG_HOME=str(caller / "xdg"),
                     XDG_DATA_HOME=str(caller / "data"), YADGAR_CONFIG_DIR=str(caller / "cfg"),
+                    YAADGAAR_CONFIG_DIR=str(caller / "ycfg"),
                     PIPX_HOME=str(caller / "pipx"), PIPX_BIN_DIR=str(caller / "bin"),
                     YADGAR_ROOT_HOME=str(caller), **redirects)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -1795,6 +2013,7 @@ def test_the_root_side_client_never_follows_the_callers_environment(rig: Rig) ->
         assert c["env"]["HOME"] == str(rig.root_home), c
         assert c["env"]["XDG_CONFIG_HOME"] is None and c["env"]["XDG_DATA_HOME"] is None, c
         assert c["env"]["YADGAR_CONFIG_DIR"] is None, c
+        assert c["env"]["YAADGAAR_CONFIG_DIR"] is None, c
         assert c["env"]["PIPX_HOME"] == str(rig.root_home / ".local" / "share" / "pipx"), c
         assert c["env"]["PIPX_BIN_DIR"] == str(rig.root_home / ".local" / "bin"), c
 

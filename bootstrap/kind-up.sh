@@ -59,8 +59,10 @@
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
 #   YADGAR_CLIENT_CONFIG        root's own client config, read by --add-user
-#                               (<root's home>/.config/yadgar/config.json);
-#                               refused unless owned by root and mode 0600
+#                               (<root's home>/.config/yaadgaar/config.json,
+#                               or .config/yadgar/config.json where only an
+#                               older client wrote one); refused unless owned
+#                               by root and mode 0600
 #
 # THE PATHS ROOT EXECUTES, TRUSTS OR WRITES ARE FIXED (ledger 1556): the state
 # directory /var/lib/yadgar-bootstrap (kubeconfig, log, admin record), the tool
@@ -135,11 +137,12 @@ CLIENT_ENROLLED_MARKER="$STATE_DIR/client-enrolled"
 # more; it is only set aside with the other markers of a replaced installation.
 CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
 # ROOT'S OWN CLIENT CONFIG, where --with-client enrolled the admin (the
-# client's default under yadgar v0.1.2 `config::base_dir`). --add-user reads the
-# admin's bearer token from it, so the path comes from the password database for
-# uid 0 — never from $HOME, XDG_CONFIG_HOME or YADGAR_CONFIG_DIR, which `sudo -E`
-# or a caller's environment could point at another user's credential. The
-# override is explicit and passes the same root-owned, 0600 check.
+# client's default under yadgar v0.1.6 `config::base_dir`: ~/.config/yaadgaar).
+# --add-user reads the admin's bearer token from it, so the path comes from the
+# password database for uid 0 — never from $HOME, XDG_CONFIG_HOME,
+# YADGAR_CONFIG_DIR or YAADGAAR_CONFIG_DIR, which `sudo -E` or a caller's
+# environment could point at another user's credential. The override is
+# explicit and passes the same root-owned, 0600 check. See client_config_file.
 # ROOT'S HOME, FROM THE PASSWORD DATABASE ONLY — there is deliberately no
 # environment override, which a `sudo -E` caller could point at their own home
 # and so at their own `yaadgaar`. `getent` is found on PATH like every other
@@ -155,7 +158,8 @@ root_home() {
 # `yaadgaar enrol`, `verify`, `install`, and helm's cache — would otherwise read
 # and write under that caller's home, or run a `yaadgaar` they put there. Pinned
 # once in `main`, so no step can be missed: HOME is root's, the XDG and yadgar
-# config overrides are unset, and pipx installs under root's home.
+# config overrides are unset (YADGAR_CONFIG_DIR for clients up to 0.1.4,
+# YAADGAAR_CONFIG_DIR from 0.1.5), and pipx installs under root's home.
 #
 # THE TOOLS' OWN REDIRECTS GO TOO: CURL_HOME (curl reads its .curlrc, which can
 # add `--trace` or a proxy; every call also passes `-q` first, the only flag that
@@ -166,7 +170,7 @@ root_home() {
 pin_root_environment() {
   HOME="$(root_home)"
   export HOME
-  unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME YADGAR_CONFIG_DIR
+  unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME YADGAR_CONFIG_DIR YAADGAAR_CONFIG_DIR
   unset CURL_HOME KUBECTL_EXTERNAL_DIFF
   local var
   for var in "${!HELM_@}"; do unset "$var"; done
@@ -189,7 +193,39 @@ kind_up_python() {
 printable() {
   tr -d '\000-\037\177'
 }
-CLIENT_CONFIG_FILE="${YADGAR_CLIENT_CONFIG:-$(root_home)/.config/yadgar/config.json}"
+# Set by client_config_file, on first use only.
+CLIENT_CONFIG_FILE=""
+
+# WHERE ROOT'S CREDENTIAL IS, decided once, when something reads it (ledger
+# 1566). An explicit YADGAR_CLIENT_CONFIG wins and never falls back. Otherwise
+# ~/.config/yaadgaar/config.json, where yaadgaar 0.1.5 and later keep it.
+#
+# A HOST ENROLLED BY kind-up v0.24.20 OR OLDER holds it where yaadgaar 0.1.3 put
+# it, ~/.config/yadgar/config.json. When the new path has no entry at all and
+# the old one has, the old one is read where it is, through the same no-follow,
+# root-only READ_CLIENT_CONFIG_PY, and one note says so on stderr. Nothing is
+# moved, copied or created: yadgar 0.1.6 `config/legacy.rs` declines to migrate,
+# because that directory also holds the memory engine's secrets. A symlink at
+# the new path counts as an entry, so the reader refuses it rather than this
+# falling back past it.
+client_config_file() {
+  if [[ -n "$CLIENT_CONFIG_FILE" ]]; then
+    return
+  fi
+  if [[ -n "${YADGAR_CLIENT_CONFIG:-}" ]]; then
+    CLIENT_CONFIG_FILE="$YADGAR_CLIENT_CONFIG"
+    return
+  fi
+  local home new old
+  home="$(root_home)"
+  new="$home/.config/yaadgaar/config.json"
+  old="$home/.config/yadgar/config.json"
+  CLIENT_CONFIG_FILE="$new"
+  if [[ ! -e "$new" && ! -L "$new" ]] && [[ -e "$old" || -L "$old" ]]; then
+    CLIENT_CONFIG_FILE="$old"
+    printf 'kind-up.sh: no client config at %s; reading %s, written by an older yaadgaar (0.1.4 or earlier), where it is\n' "$new" "$old" >&2
+  fi
+}
 # One record per user --add-user created, tied to the installation like
 # $ADMIN_RECORD.
 USERS_DIR="$STATE_DIR/users"
@@ -946,6 +982,7 @@ print_next_steps() {
   local version
   version="$(yaadgaar_version)"
   if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
+    client_config_file
     log "[10/10] done. This host's root is enrolled as $ADMIN_EXTERNAL_ID."
     cat <<EOF | tee -a "$LOG_FILE"
 
@@ -1008,6 +1045,92 @@ yaadgaar_bin() {
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
 }
 
+# WHETHER VERSION $1 IS OLDER THAN $2, by release numbers and then a, b, rc
+# pre-releases below the final release (PEP 440's order for the versions this
+# client publishes). A version outside that shape is never "older", so an
+# unreadable answer never triggers a replacement. Exit 0 older, 1 not, 2
+# unparseable.
+# shellcheck disable=SC2016
+VERSION_OLDER_PY='
+import re, sys
+def key(v):
+    m = re.fullmatch(r"(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?", v)
+    if not m:
+        sys.exit(2)
+    rel = tuple(int(x) for x in m.group(1).split("."))
+    rel += (0,) * (8 - len(rel))
+    pre = ({"a": 0, "b": 1, "rc": 2}[m.group(2)], int(m.group(3))) if m.group(2) else (3, 0)
+    return rel, pre
+sys.exit(0 if key(sys.argv[1]) < key(sys.argv[2]) else 1)
+'
+version_older() {
+  local py
+  py="$(kind_up_python)" || return 2
+  "$py" -I -c "$VERSION_OLDER_PY" "$1" "$2"
+}
+
+# ROOT'S ENROLLED CLIENT FOLLOWS tools.lock (ledger 1554), upward only, and only
+# where the new client can find its credential. yaadgaar 0.1.5 and later read
+# only ~/.config/yaadgaar, and `yaadgaar serve`, which Claude Code starts with no
+# environment, reads nothing else. So:
+#   no version answer, or not older    kept (never a downgrade)
+#   credential not a regular file at   kept, and named: a 0.1.3 credential in
+#   ~/.config/yaadgaar                 ~/.config/yadgar would strand a new client
+#   otherwise                          pre-flight, then `pipx install --force`
+#
+# THE PRE-FLIGHT EXISTS BECAUSE pipx 1.8.0 DELETES THE VENV when a forced install
+# fails (`remove_venv` on any error), which would take root's working client with
+# it. So the pinned wheel is first fetched with the client venv's own pip into a
+# scratch directory: if that fails — no network, no wheel for this platform — the
+# old client is kept and the run warns. If the forced install still fails after
+# that, root has no client, and the run stops with the command that restores one.
+#
+# No config is moved, copied or written, and neither `login` nor `enrol` runs:
+# a `login` into an empty new directory has no CA for this edge, which only an
+# enrolment token carries, and the bootstrap token cannot enrol an admin who
+# holds a credential (ADR-0655). Moving an old credential waits for a decision.
+upgrade_enrolled_client() {
+  local pin have cfg rc=0 tmp
+  [[ -x "$PIPX_BIN_DIR/yaadgaar" ]] || return 0
+  pin="$(yaadgaar_version)"
+  [[ -n "$pin" ]] || return 0
+  have="$("$PIPX_BIN_DIR/yaadgaar" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
+  if [[ -z "$have" ]]; then
+    log "[10/10] root's client did not report its version; kept"
+    return 0
+  fi
+  version_older "$have" "$pin" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      if [[ "$have" != "$pin" ]]; then
+        log "[10/10] root's client is yaadgaar $have, newer than the pinned $pin; kept"
+      fi
+      return 0
+      ;;
+    *)
+      log "[10/10] root's client reported version '$(printf '%s' "$have" | printable)', which cannot be compared with $pin; kept"
+      return 0
+      ;;
+  esac
+  cfg="$(root_home)/.config/yaadgaar/config.json"
+  if [[ ! -f "$cfg" || -L "$cfg" ]]; then
+    log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because its credential is not at $cfg, where the pinned client reads it"
+    return 0
+  fi
+  tmp="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
+  if ! pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched"
+    return 0
+  fi
+  rm -rf "$tmp"
+  if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
+    die "upgrading root's client $have→$pin failed, and pipx removes the old client when a forced install fails. Put one back: pipx install --force yaadgaar==$pin"
+  fi
+  log "[10/10] upgraded root's client $have→$pin; credential stays at $cfg"
+}
+
 # Registers the MCP server and hooks for Claude Code (ledger 1540), ONLY when
 # `claude` is installed for this user — on PATH, or at ~/.local/bin, which
 # sudo's secure_path hides. Without it, the command to run later is printed.
@@ -1055,6 +1178,7 @@ ensure_agent_registration() {
 ensure_client() {
   if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
     log "[10/10] client already enrolled as $ADMIN_EXTERNAL_ID"
+    upgrade_enrolled_client
     ensure_agent_registration
     return
   fi
@@ -1086,6 +1210,7 @@ ensure_client() {
     local stored="" py
     # Read through the same no-follow, root-only reader --add-user uses.
     if py="$(kind_up_python)"; then
+      client_config_file
       stored="$("$py" -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>/dev/null | head -n 1 || true)"
     fi
     if [[ -n "$stored" && "${stored%/}" == "${GATEWAY_URL%/}" ]]; then
@@ -1266,6 +1391,7 @@ add_user() {
   record="$USERS_DIR/$ADD_USER_ID.json"
   [[ -s "$CA_FILE" ]] || die "no edge CA at $CA_FILE; run kind-up.sh without --add-user first"
   err="$(mktemp "$STATE_DIR/tmp.XXXXXX")"
+  client_config_file
   cfg="$("$py" -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>"$err")" ||
     die "$(printable <"$err"). --add-user acts only with the credential this host's root enrolled (kind-up.sh --with-client), owned by root and mode 0600"
   gateway="${cfg%%$'\n'*}"
