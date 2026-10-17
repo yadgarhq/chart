@@ -63,7 +63,7 @@ subject is absent reports a pass nobody earned.
 
 THE PACKAGED-CHART RENDERS ARE NOT OFFLINE. Per ADR-0725 nothing under
 `chart/charts/` is committed, so the `packaged` fixture below resolves this
-chart's nine dependencies from `oci://ghcr.io/yadgarhq/charts` with
+chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts` with
 `helm package chart -u` — the same command `ci-release.yaml` runs — and needs
 the registry reachable. The directory-only renders (test 1) need no registry, but
 they DO need `helm dependency update chart` to have run in this working tree,
@@ -894,7 +894,8 @@ def test_the_directory_and_the_package_render_the_same_objects(packaged: Path, m
     )
 
 
-# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Nine first-level members,
+# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Ten first-level members
+# since `seeder` joined (nine when this was measured),
 # one per dependency `chart/Chart.yaml` declares, plus the NINE below that sit
 # BENEATH `platform` — six of them one level down and three of them two.
 #
@@ -2441,6 +2442,15 @@ GRPC_CLIENT_SECRET_TYPO_CASES = [
         "project:\n  projectDb:\n    tls:\n      clientCertSecret: projcet-db-tls\n",
         "projcet-db-tls",
         id="project",
+    ),
+    # THE SEEDER'S CLIENT LEAF (plans/the-d35-seeder.md stage 6): the parent
+    # defaults it to `seeder-client-tls`, which `platform` 0.2.6 issues, and a
+    # typo there is a Secret cert-manager never creates.
+    pytest.param(
+        "seeder.project.tls.clientCertSecret",
+        "seeder:\n  project:\n    tls:\n      clientCertSecret: seedr-client-tls\n",
+        "seedr-client-tls",
+        id="seeder",
     ),
 ]
 
@@ -6718,3 +6728,140 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
     assert any("node port 30443" in failure for failure in failures), failures
     assert any("nodeSelector" in failure for failure in failures), failures
     assert any("`iam.enrolment.gateway`" in failure for failure in failures), failures
+
+
+# ── the D35 seeder (plans/the-d35-seeder.md stage 6, ADR-0857's expand step) ──
+#
+# `seeder` 0.1.0 IS THE EXPAND STEP: with no `seeder.registry` block it renders
+# NOTHING, and a present block is checked whole by the seeder's own render
+# checks. So the parent's default render does not move, and every gate below that
+# needs a seeder object renders it through `SEEDER_DECLARATION`, an overlay. The
+# FIXTURE step (`chart/ci/values.yaml` and `example/values.yaml` declare a root)
+# is the next pull request; the CONTRACT step is a seeder release.
+#
+# THE TWO TLS SECRETS ARE THE PARENT'S OWN DEFAULTS, for the reason
+# `gateway.adminBootstrap.tokenSecret` is one: `platform`, which this parent
+# also ships, mints both names. `project-tls` is `project`'s serving leaf, whose
+# `ca.crt` verifies `project` (the gateway's own `project.tls.caSecret` names the
+# same Secret); `seeder-client-tls` is the seeder's client leaf, common name
+# `seeder-caller`, which `project` alone admits to `SyncProjects` (ADR-0936).
+SEEDER_DECLARATION = (
+    "seeder:\n"
+    "  registry:\n"
+    "    roots:\n"
+    "      - path: acme\n"
+    "        sourceRepo: acme/gitops\n"
+    "    projects:\n"
+    "      - path: acme/web\n"
+    "        displayName: web\n"
+    "        sourceRepo: acme/web\n"
+    "    allowMassArchive: false\n"
+)
+
+# WHAT THE SEEDER RENDERS ONCE DECLARED, and nothing else: one Job, the
+# ConfigMap holding the declaration, and the ServiceAccount the Job runs as. A
+# literal, for the reason `EXPECTED` is one.
+SEEDER_OBJECTS = {
+    ("Job", "seeder"),
+    ("ConfigMap", "seeder-registry"),
+    ("ServiceAccount", "seeder"),
+}
+SEEDER_CA_SECRET = "project-tls"
+SEEDER_CLIENT_SECRET = "seeder-client-tls"
+SEEDER_CALLER = "seeder-caller"
+
+
+def seeder_objects(documents: list[dict]) -> set[tuple[str, str]]:
+    """Every object the render carries with the seeder's pod label `app: seeder`. PURE."""
+    return {
+        (str(document.get("kind")), str((document.get("metadata") or {}).get("name")))
+        for document in documents
+        if ((document.get("metadata") or {}).get("labels") or {}).get("app") == "seeder"
+    }
+
+
+def seeder_job(documents: list[dict]) -> dict:
+    jobs = [d for d in documents if d.get("kind") == "Job" and (d.get("metadata") or {}).get("name") == "seeder"]
+    assert len(jobs) == 1, f"expected one Job `seeder`, found {len(jobs)}"
+    return jobs[0]
+
+
+def test_the_seeder_is_a_dependency_with_no_condition() -> None:
+    """`seeder` IS A MODULE, SO IT CARRIES NO `condition` (only `platform` does).
+
+    ADR-0857's expand step switches it off by the ABSENT `registry` block, not by a
+    toggle: a toggle would be a tenth `enabled` key for D80's all-off pass to flip,
+    turning off a chart that renders only built-in kinds.
+    """
+    document = yaml.safe_load((CHART / "Chart.yaml").read_text())
+    entries = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
+    assert entries == [
+        {"name": "seeder", "version": "0.1.0", "repository": "oci://ghcr.io/yadgarhq/charts"}
+    ], entries
+
+
+def test_the_seeder_renders_nothing_without_a_registry(adopter: list[dict]) -> None:
+    """THE EXPAND STEP AT THE PARENT: the adopter render carries no seeder object."""
+    assert seeder_objects(adopter) == set()
+
+
+def test_a_declared_registry_renders_the_seeders_three_objects(tmp_path: Path) -> None:
+    """THE RED CASE FOR THE GATE ABOVE, and what the fixture step will turn on.
+
+    A declaration adds exactly `SEEDER_OBJECTS` and nothing else, so the gate above
+    is not green merely because the seeder could never render through this parent.
+    """
+    documents = adopter_render("-f", str(overlay(tmp_path / "declared.yaml", SEEDER_DECLARATION)))
+    assert seeder_objects(documents) == SEEDER_OBJECTS
+    assert len(documents) == ADOPTER_OBJECTS + len(SEEDER_OBJECTS)
+
+
+def test_the_seeder_job_verifies_project_and_presents_its_own_leaf(tmp_path: Path) -> None:
+    """THE PARENT'S WIRING REACHES THE JOB, AND BOTH NAMES ARE LEAVES THE SAME RENDER ISSUES.
+
+    The Job mounts `project-tls` as the authority it verifies `project` against and
+    `seeder-client-tls` as the certificate it presents. Both must be Certificates
+    `platform` emits in this render, and the client leaf must carry the common name
+    `project`'s caller check reads, or `project` refuses every sync.
+    """
+    documents = adopter_render("-f", str(overlay(tmp_path / "declared.yaml", SEEDER_DECLARATION)))
+    volumes = {v["name"]: v for v in seeder_job(documents)["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["project-ca"]["secret"]["secretName"] == SEEDER_CA_SECRET, volumes
+    assert volumes["client-cert"]["secret"]["secretName"] == SEEDER_CLIENT_SECRET, volumes
+    issued = {
+        str(document["spec"].get("secretName")): document["spec"]
+        for document in certificates(documents)
+    }
+    assert SEEDER_CA_SECRET in issued, sorted(issued)
+    assert issued[SEEDER_CLIENT_SECRET]["commonName"] == SEEDER_CALLER, issued[SEEDER_CLIENT_SECRET]
+
+
+@pytest.mark.parametrize("key", ["caSecret", "clientCertSecret"])
+def test_without_the_parents_wiring_the_seeder_refuses_naming_the_key(tmp_path: Path, key: str) -> None:
+    """THE WIRING'S RED CASE: empty the parent's default and the seeder's own check refuses.
+
+    The seeder chart has no default for either Secret (ADR-0854), so this is what
+    a declared registry meets if the parent stops stating them.
+    """
+    values = overlay(
+        tmp_path / f"no-{key}.yaml",
+        SEEDER_DECLARATION + f'  project:\n    tls:\n      {key}: ""\n',
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout[:2000]
+    assert f"project.tls.{key} must name" in result.stderr, result.stderr
+
+
+def test_the_parent_schema_declares_the_seeder_section(tmp_path: Path) -> None:
+    """THE SCHEMA'S RED CASE: drop `seeder` from the parent's closed root and the
+    default render is refused, the ADR-0850 failure the `config` entry documents.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    schema = json.loads((copy / "values.schema.json").read_text())
+    assert "seeder" in schema["properties"], sorted(schema["properties"])
+    del schema["properties"]["seeder"]
+    (copy / "values.schema.json").write_text(json.dumps(schema))
+    result = helm("template", "yadgar", str(copy), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "seeder" in result.stderr, result.stderr

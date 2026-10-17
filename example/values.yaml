@@ -25,8 +25,8 @@
 #   gateway:
 #     replicaCount: 3
 #
-# The nine names are `config`, `gateway`, `iam`, `iam-db`, `project`,
-# `project-db`, `task`, `task-db` and `platform`. `helm show values` on the parent
+# The ten names are `config`, `gateway`, `iam`, `iam-db`, `project`,
+# `project-db`, `task`, `task-db`, `seeder` and `platform`. `helm show values` on the parent
 # prints the parent's own file, which is almost empty by design — render the
 # version you pinned instead, and read the children's values from it:
 #
@@ -371,3 +371,15 @@ task-db:
     enabled: true
     # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
     clientAuth: "off"
+
+# THE D35 SEEDER, which writes your organisation's project registry through
+# `project` as one Argo-synced Job (plans/the-d35-seeder.md). These two names are
+# the chart's defaults and the Secrets `platform` mints: `project-tls` verifies
+# `project`, `seeder-client-tls` is the seeder's own client leaf. The seeder
+# renders nothing until you add a `registry:` block here naming your roots and
+# projects; see the seeder chart's `values.yaml` for its shape.
+seeder:
+  project:
+    tls:
+      caSecret: project-tls
+      clientCertSecret: seeder-client-tls

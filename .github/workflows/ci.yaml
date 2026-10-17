@@ -211,7 +211,7 @@ jobs:
   # the event is not `pull_request`, it packages HEAD's `chart/` as that
   # version and renders it. So this job does not deadlock on its own pin —
   # it renders HEAD's OWN version, same as `push_validation`, and never pulls
-  # the parent's own published pin. It still resolves the nine MODULE charts
+  # the parent's own published pin. It still resolves the ten MODULE charts
   # from the registry, same as `push_validation` and `helm package chart -u`.
   #
   # RENDER REFUSALS ONLY, run twice for the fixture (directory and package)

@@ -9,7 +9,7 @@
 # only thing this chart does.
 #
 # NO `appVersion`. There is no application here to version: the content of this
-# chart is the eight pins below, and the version that means anything is the one
+# chart is the pins below, and the version that means anything is the one
 # an adopter wrote in their `Application`. `ci-release.yaml` passes
 # `--app-version` from the tag anyway, so a value written here would be
 # overwritten at package time and would mislead anybody reading the source.
@@ -29,7 +29,7 @@ home: https://github.com/yadgarhq/chart
 sources:
   - https://github.com/yadgarhq/chart
 
-# THE EIGHT MODULES AND THE PLATFORM LAYER, EACH PINNED TO AN EXACT PUBLISHED
+# THE MODULES AND THE PLATFORM LAYER, EACH PINNED TO AN EXACT PUBLISHED
 # VERSION. Measured 2026-09-19 against `ghcr.io/yadgarhq/charts` with no
 # credential: all eight modules resolve, eight `Pulled:` lines, exit 0. `platform`
 # joined them on 2026-09-24 and resolves the same way.
@@ -85,6 +85,14 @@ dependencies:
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
     version: 0.9.4
+    repository: oci://ghcr.io/yadgarhq/charts
+  # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
+  # `condition`. 0.1.0 is ADR-0857's expand step: with no `seeder.registry`
+  # block it renders NOTHING, so adding it moves no object in the default
+  # render. The registry is declared by the adopter (this organisation's in
+  # `yadgarhq/argocd`, stage 7), and a later seeder release makes it required.
+  - name: seeder
+    version: 0.1.0
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.

@@ -114,7 +114,8 @@ gateway:
 # file asks for; the key stays stated so the `portability` job can flip it.
 #
 # TO RUN YOUR OWN PLATFORM LAYER, set `platform.enabled` false AND clear
-# `gateway.adminBootstrap.tokenSecret` (ADR-0807). `platform.enabled` false turns
+# `gateway.adminBootstrap.tokenSecret` (ADR-0807), and name your own Secrets
+# under `seeder.project.tls` before you declare a seeder registry. `platform.enabled` false turns
 # the whole layer off whatever the `create` toggles below say, except
 # `platform.operators.create`, which is refused on every path (ADR-0787). The token key is
 # the one the parent cannot clear for you: with the layer off nothing mints that
@@ -189,3 +190,27 @@ task-db:
     enabled: true
   database:
     create: true
+
+# ─── the D35 seeder's transport (plans/the-d35-seeder.md stage 6) ────────────
+#
+# TWO SECRET NAMES THE SEEDER CHART REQUIRES AND DOES NOT DEFAULT (ADR-0854),
+# stated here for the reason `gateway.adminBootstrap.tokenSecret` is: `platform`,
+# which this parent also ships, mints both. `project-tls` is `project`'s serving
+# leaf, and its `ca.crt` is the authority the seeder verifies `project` against —
+# the gateway's own `project.tls.caSecret` names the same Secret.
+# `seeder-client-tls` is the seeder's client leaf, common name `seeder-caller`,
+# the one leaf `project` admits to `SyncProjects` (ADR-0936).
+#
+# NOTHING RENDERS FROM THIS ALONE. `seeder` 0.1.0 renders no object until
+# `seeder.registry` declares the organisation's projects (ADR-0857's expand step),
+# and that declaration is the adopter's. The parent refuses a
+# `seeder.project.tls.clientCertSecret` that names no key of
+# `platform.certificates.leaves`, as it does every other client leaf.
+#
+# WITH `platform.enabled` FALSE, name your own two Secrets here before you
+# declare a registry: nothing then mints these.
+seeder:
+  project:
+    tls:
+      caSecret: project-tls
+      clientCertSecret: seeder-client-tls
