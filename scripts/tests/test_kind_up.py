@@ -422,6 +422,192 @@ def test_the_tools_go_to_a_private_directory_by_default(rig: Rig) -> None:
     assert "/usr/local/bin" not in SCRIPT.read_text().replace("never /usr/local/bin", "")
 
 
+# ─── root ignores the path overrides (ledger 1556) ──────────────────────────────
+#
+# The script runs as root. Under `sudo -E`, or any root invocation that keeps the
+# caller's environment, a path override would let a non-root caller choose which
+# kind/kubectl/helm root executes, which lock vouches for them, where root keeps
+# the admin's kubeconfig and records, and which files root writes. So when bash's
+# own $EUID is 0 — readonly, set from the kernel, not from the environment or
+# PATH — every one of these is its fixed default. The rig fakes `id -u` but runs
+# as a real non-root user, which is why the overrides still steer it.
+#
+# THE ROOT RUNS NEED A REAL EUID OF 0, by the first of two routes that works:
+#   `unshare -r`  a user namespace in which this unprivileged process has EUID 0;
+#                 a developer host normally allows it, and it needs no privilege.
+#   `sudo -n`     real root without a password prompt. The GitHub-hosted runner
+#                 allows it, and refuses `unshare -r` (Ubuntu 24.04 restricts
+#                 unprivileged user namespaces). `sudo` resets the environment,
+#                 so the rig's environment is passed through `env -i` instead.
+# Both are resolved from the host PATH before the rig's PATH replaces it. Neither
+# working is a failure, never a skip: a skip would leave the root branch
+# untested and green.
+_ROOT_ROUTE: list[list[str]] = []
+
+
+def root_route() -> list[str]:
+    """The argv prefix that runs a command with EUID 0, probed once per session."""
+    if _ROOT_ROUTE:
+        return _ROOT_ROUTE[0]
+    refusals = []
+    unshare = shutil.which("unshare")
+    if unshare:
+        probe = subprocess.run([unshare, "-r", "true"], capture_output=True, text=True, timeout=30)
+        if probe.returncode == 0:
+            _ROOT_ROUTE.append([unshare, "-r"])
+            return _ROOT_ROUTE[0]
+        refusals.append(f"unshare -r: {probe.stderr.strip()}")
+    else:
+        refusals.append("unshare: not installed")
+    sudo = shutil.which("sudo")
+    if sudo:
+        probe = subprocess.run([sudo, "-n", "true"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, timeout=30)
+        if probe.returncode == 0:
+            _ROOT_ROUTE.append([sudo, "-n", "/usr/bin/env", "-i"])
+            return _ROOT_ROUTE[0]
+        refusals.append(f"sudo -n: {probe.stderr.strip()}")
+    else:
+        refusals.append("sudo: not installed")
+    pytest.fail("no route to EUID 0, so the root branch cannot be tested: " + "; ".join(refusals))
+
+
+ROOT_PINNED_PATHS = (
+    # (environment override, script variable, value under root)
+    ("YADGAR_STATE_DIR", "STATE_DIR", "/var/lib/yadgar-bootstrap"),
+    ("YADGAR_BIN_DIR", "BIN_DIR", "/opt/yadgar-bootstrap/bin"),
+    ("YADGAR_TOOLS_LOCK", "TOOLS_LOCK", str(LOCK)),
+    ("YADGAR_SYSCTL_FILE", "SYSCTL_FILE", "/etc/sysctl.d/90-yadgar-kind.conf"),
+    ("YADGAR_HOSTS_FILE", "HOSTS_FILE", "/etc/hosts"),
+    ("YADGAR_CA_FILE", "CA_FILE", "/etc/yadgar/edge-ca.crt"),
+    ("YADGAR_ENROLMENT_FILE", "ENROLMENT_FILE", "/root/yadgar-enrolment.token"),
+)
+
+
+def as_root(rig: Rig, snippet: str, root: bool, **extra: str) -> subprocess.CompletedProcess:
+    """Source the script and run a snippet, with EUID 0 (see `root_route`) or as this user."""
+    (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
+    env = rig.env(**extra)
+    bash = shutil.which("bash")
+    assert bash, "bash is not installed"
+    argv = [bash, "-c", f'source "{SCRIPT}"; {snippet}']
+    if root:
+        route = root_route()
+        if route[-1] == "-i":  # sudo resets the environment; env -i restores the rig's
+            argv = [*route, *(f"{k}={v}" for k, v in env.items()), *argv]
+        else:
+            argv = [*route, *argv]
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=60)
+
+
+@pytest.mark.parametrize("override, variable, pinned", ROOT_PINNED_PATHS,
+                         ids=[row[0] for row in ROOT_PINNED_PATHS])
+def test_root_ignores_each_path_override(rig: Rig, override: str, variable: str, pinned: str) -> None:
+    evil = str(rig.root / "evil" / override.lower())
+    snippet = f'printf "%s|%s" "$EUID" "${variable}"'
+
+    # POSITIVE CONTROL: as this user the override reaches the script, so the
+    # root assertion below cannot pass merely because the variable never arrived.
+    proc = as_root(rig, snippet, root=False, **{override: evil})
+    assert proc.returncode == 0, proc.stderr
+    euid, value = proc.stdout.split("|")
+    assert euid != "0", "the suite itself runs as root; the control proves nothing"
+    assert value == evil
+
+    proc = as_root(rig, snippet, root=True, **{override: evil})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"0|{pinned}", f"root honoured {override}={evil}"
+
+
+def test_root_never_runs_a_tool_from_a_caller_chosen_bin_dir(rig: Rig) -> None:
+    evil = rig.root / "evil-bin"
+    evil.mkdir()
+    marker = rig.root / "evil-ran"
+    (evil / "kind").write_text(f'#!/bin/sh\ntouch "{marker}"\necho "kind v0.32.0"\n')
+    (evil / "kind").chmod(0o755)
+
+    # POSITIVE CONTROL: as this user the planted kind is the one asked its version.
+    proc = as_root(rig, "installed_version kind", root=False, YADGAR_BIN_DIR=str(evil))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists(), "the planted kind never ran even without root; the test proves nothing"
+    marker.unlink()
+
+    proc = as_root(rig, "installed_version kind", root=True, YADGAR_BIN_DIR=str(evil))
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists(), "root executed a kind from the caller's YADGAR_BIN_DIR"
+
+
+def test_root_never_moves_a_caller_chosen_enrolment_file(rig: Rig) -> None:
+    planted = rig.root / "evil-enrolment" / "token"
+    planted.parent.mkdir()
+
+    # POSITIVE CONTROL: as this user the override names the file that is moved.
+    planted.write_text("x")
+    proc = as_root(rig, "retire_spent_token 9", root=False, YADGAR_ENROLMENT_FILE=str(planted))
+    assert proc.returncode == 0, proc.stderr
+    assert not planted.exists(), "the override never reached retire_spent_token; the test proves nothing"
+    for moved in planted.parent.iterdir():
+        moved.unlink()
+
+    planted.write_text("x")
+    proc = as_root(rig, "retire_spent_token 9", root=True, YADGAR_ENROLMENT_FILE=str(planted))
+    assert proc.returncode == 0, proc.stderr
+    assert planted.exists(), "root moved a file the caller named in YADGAR_ENROLMENT_FILE"
+    assert list(planted.parent.iterdir()) == [planted]
+
+
+def test_root_says_which_override_it_ignores_and_the_path_it_uses(rig: Rig) -> None:
+    evil = str(rig.root / "evil-bin")
+    proc = as_root(rig, "true", root=True, YADGAR_BIN_DIR=evil)
+    assert proc.returncode == 0, proc.stderr
+    assert ("kind-up.sh: YADGAR_BIN_DIR is ignored when run as root; "
+            "using /opt/yadgar-bootstrap/bin") in proc.stderr.splitlines()
+
+
+def test_root_is_quiet_about_an_override_that_names_the_default(rig: Rig) -> None:
+    proc = as_root(rig, "true", root=True, YADGAR_BIN_DIR="/opt/yadgar-bootstrap/bin")
+    assert proc.returncode == 0, proc.stderr
+    assert "YADGAR_BIN_DIR" not in proc.stderr
+
+
+def test_a_non_root_run_never_warns_about_its_overrides(rig: Rig) -> None:
+    proc = as_root(rig, "true", root=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "is ignored when run as root" not in proc.stderr
+
+
+# ─── the numeric settings are digits only (review of #48) ───────────────────────
+#
+# bash evaluates a variable named inside arithmetic as an expression of its own,
+# so a value such as `BASH_VERSINFO[$(cmd)]` runs cmd — as root — when `wait_app` computes its
+# deadline or `probe_edge` counts its attempts. Each numeric setting is refused
+# unless it is all digits, where it is read, before any step runs. Each case
+# drives the real code path that would evaluate it.
+
+NUMERIC_SETTINGS = (
+    # (environment override, snippet that evaluates it)
+    ("YADGAR_OPERATORS_TIMEOUT", 'wait_app operators "$OPERATORS_TIMEOUT"'),
+    ("YADGAR_ESTATE_TIMEOUT", 'wait_app yadgar "$ESTATE_TIMEOUT"'),
+    ("YADGAR_PROBE_ATTEMPTS", "probe_edge"),
+    ("YADGAR_POLL_SECONDS", "probe_edge"),
+)
+
+
+@pytest.mark.parametrize("root", [False, True], ids=["as-user", "as-root"])
+@pytest.mark.parametrize("override, snippet", NUMERIC_SETTINGS,
+                         ids=[row[0] for row in NUMERIC_SETTINGS])
+def test_a_numeric_setting_that_is_not_digits_is_refused_before_it_runs(
+        rig: Rig, override: str, snippet: str, root: bool) -> None:
+    marker = rig.root / "injected-ran"
+    # An array that is always set: under `set -u` an unset name such as `a[...]`
+    # stops before its subscript is expanded, which would hide the injection.
+    proc = as_root(rig, snippet, root=root, **{override: f"BASH_VERSINFO[$(touch {marker})]"})
+    assert not marker.exists(), f"{override} ran a command substitution in arithmetic"
+    assert proc.returncode != 0
+    assert f"{override} must be a whole number of" in proc.stderr
+
+
 def test_a_missing_bin_directory_is_created(rig: Rig) -> None:
     bindir = rig.root / "fresh" / "bin"
     body = "#!/bin/sh\necho 'kind v0.32.0 go1.26.3 linux/amd64'\n"
