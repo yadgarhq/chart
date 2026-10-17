@@ -55,7 +55,6 @@
 #
 #   YADGAR_ADMIN_EXTERNAL_ID    the first admin's username      (admin)
 #   YADGAR_ADMIN_DISPLAY_NAME   the first admin's display name  (Administrator)
-#   YADGAR_ENROLMENT_FILE       where the enrolment token goes  (/root/yadgar-enrolment.token)
 #   YADGAR_RUNTIME              podman or docker                (podman if present)
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
@@ -67,10 +66,13 @@
 # directory /var/lib/yadgar-bootstrap (kubeconfig, log, admin record), the tool
 # directory /opt/yadgar-bootstrap/bin (kind, kubectl, helm), the tools.lock
 # beside this script, /etc/sysctl.d/90-yadgar-kind.conf, /etc/hosts and the
-# world-readable edge CA /etc/yadgar/edge-ca.crt. YADGAR_STATE_DIR,
-# YADGAR_BIN_DIR, YADGAR_TOOLS_LOCK, YADGAR_SYSCTL_FILE, YADGAR_HOSTS_FILE and
-# YADGAR_CA_FILE are read only when the script is NOT root, which is only its
-# offline test suite (`scripts/tests/test_kind_up.py`); a real run ignores them.
+# world-readable edge CA /etc/yadgar/edge-ca.crt, and the enrolment token file
+# /root/yadgar-enrolment.token. YADGAR_STATE_DIR, YADGAR_BIN_DIR,
+# YADGAR_TOOLS_LOCK, YADGAR_SYSCTL_FILE, YADGAR_HOSTS_FILE, YADGAR_CA_FILE and
+# YADGAR_ENROLMENT_FILE are read only when the script is NOT root, which is only
+# its offline test suite (`scripts/tests/test_kind_up.py`). A real run ignores
+# them and names each one it ignores on stderr. The numeric settings are refused
+# unless they are digits only.
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -104,9 +106,14 @@ ESTATE_NAMESPACE="yadgar"
 # overwrites. bash's own $EUID decides — readonly, from the kernel, never from the
 # environment or PATH. The overrides remain for the offline test suite, which runs
 # unprivileged with a fake `id`; a real non-root run stops at `require_root`.
+# An override that is set and differs is named on stderr with the path used
+# instead, so it is never ignored silently.
 root_fixed_path() {
   local name="$1" default="$2"
   if ((EUID == 0)); then
+    if [[ -n "${!name:-}" && "${!name}" != "$default" ]]; then
+      printf 'kind-up.sh: %s is ignored when run as root; using %s\n' "$name" "$default" >&2
+    fi
     printf '%s\n' "$default"
   else
     printf '%s\n' "${!name:-$default}"
@@ -194,7 +201,7 @@ TOOLS_LOCK="$(root_fixed_path YADGAR_TOOLS_LOCK "$SCRIPT_DIR/tools.lock")"
 SYSCTL_FILE="$(root_fixed_path YADGAR_SYSCTL_FILE /etc/sysctl.d/90-yadgar-kind.conf)"
 HOSTS_FILE="$(root_fixed_path YADGAR_HOSTS_FILE /etc/hosts)"
 CA_FILE="$(root_fixed_path YADGAR_CA_FILE /etc/yadgar/edge-ca.crt)"
-ENROLMENT_FILE="${YADGAR_ENROLMENT_FILE:-/root/yadgar-enrolment.token}"
+ENROLMENT_FILE="$(root_fixed_path YADGAR_ENROLMENT_FILE /root/yadgar-enrolment.token)"
 ADMIN_EXTERNAL_ID="${YADGAR_ADMIN_EXTERNAL_ID:-admin}"
 ADMIN_DISPLAY_NAME="${YADGAR_ADMIN_DISPLAY_NAME:-Administrator}"
 RUNTIME="${YADGAR_RUNTIME:-}"
@@ -220,10 +227,25 @@ RUNTIME="${YADGAR_RUNTIME:-}"
 # "timed out" that names the operation's state. Per-hook deadlines (ledger
 # 1224) change Argo's number as they land — this round raised it, not shrank
 # it — and leave these alone either way.
-OPERATORS_TIMEOUT="${YADGAR_OPERATORS_TIMEOUT:-1500}"
-ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
-POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"
-PROBE_ATTEMPTS="${YADGAR_PROBE_ATTEMPTS:-12}"
+#
+# DIGITS ONLY, REFUSED HERE BEFORE ANY STEP RUNS (review of #48). bash evaluates
+# a variable named inside arithmetic as an expression of its own, so a value such
+# as `BASH_VERSINFO[$(cmd)]` would run cmd — as root — when `wait_app` computes
+# its deadline or `probe_edge` counts its attempts. The value is not echoed back,
+# so it cannot drive the terminal; `10#` reads a leading zero as decimal.
+numeric_setting() {
+  local name="$1" default="$2" unit="$3" value
+  value="${!name:-$default}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    printf 'kind-up.sh: %s must be a whole number of %s (digits only)\n' "$name" "$unit" >&2
+    return 1
+  fi
+  printf '%s\n' "$((10#$value))"
+}
+OPERATORS_TIMEOUT="$(numeric_setting YADGAR_OPERATORS_TIMEOUT 1500 seconds)" || exit 1
+ESTATE_TIMEOUT="$(numeric_setting YADGAR_ESTATE_TIMEOUT 3900 seconds)" || exit 1
+POLL_SECONDS="$(numeric_setting YADGAR_POLL_SECONDS 10 seconds)" || exit 1
+PROBE_ATTEMPTS="$(numeric_setting YADGAR_PROBE_ATTEMPTS 12 attempts)" || exit 1
 WITH_CLIENT=0
 ADD_USER=0
 ADD_USER_ID=""

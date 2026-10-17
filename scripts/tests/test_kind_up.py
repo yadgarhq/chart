@@ -480,6 +480,7 @@ ROOT_PINNED_PATHS = (
     ("YADGAR_SYSCTL_FILE", "SYSCTL_FILE", "/etc/sysctl.d/90-yadgar-kind.conf"),
     ("YADGAR_HOSTS_FILE", "HOSTS_FILE", "/etc/hosts"),
     ("YADGAR_CA_FILE", "CA_FILE", "/etc/yadgar/edge-ca.crt"),
+    ("YADGAR_ENROLMENT_FILE", "ENROLMENT_FILE", "/root/yadgar-enrolment.token"),
 )
 
 
@@ -535,6 +536,76 @@ def test_root_never_runs_a_tool_from_a_caller_chosen_bin_dir(rig: Rig) -> None:
     proc = as_root(rig, "installed_version kind", root=True, YADGAR_BIN_DIR=str(evil))
     assert proc.returncode == 0, proc.stderr
     assert not marker.exists(), "root executed a kind from the caller's YADGAR_BIN_DIR"
+
+
+def test_root_never_moves_a_caller_chosen_enrolment_file(rig: Rig) -> None:
+    planted = rig.root / "evil-enrolment" / "token"
+    planted.parent.mkdir()
+
+    # POSITIVE CONTROL: as this user the override names the file that is moved.
+    planted.write_text("x")
+    proc = as_root(rig, "retire_spent_token 9", root=False, YADGAR_ENROLMENT_FILE=str(planted))
+    assert proc.returncode == 0, proc.stderr
+    assert not planted.exists(), "the override never reached retire_spent_token; the test proves nothing"
+    for moved in planted.parent.iterdir():
+        moved.unlink()
+
+    planted.write_text("x")
+    proc = as_root(rig, "retire_spent_token 9", root=True, YADGAR_ENROLMENT_FILE=str(planted))
+    assert proc.returncode == 0, proc.stderr
+    assert planted.exists(), "root moved a file the caller named in YADGAR_ENROLMENT_FILE"
+    assert list(planted.parent.iterdir()) == [planted]
+
+
+def test_root_says_which_override_it_ignores_and_the_path_it_uses(rig: Rig) -> None:
+    evil = str(rig.root / "evil-bin")
+    proc = as_root(rig, "true", root=True, YADGAR_BIN_DIR=evil)
+    assert proc.returncode == 0, proc.stderr
+    assert ("kind-up.sh: YADGAR_BIN_DIR is ignored when run as root; "
+            "using /opt/yadgar-bootstrap/bin") in proc.stderr.splitlines()
+
+
+def test_root_is_quiet_about_an_override_that_names_the_default(rig: Rig) -> None:
+    proc = as_root(rig, "true", root=True, YADGAR_BIN_DIR="/opt/yadgar-bootstrap/bin")
+    assert proc.returncode == 0, proc.stderr
+    assert "YADGAR_BIN_DIR" not in proc.stderr
+
+
+def test_a_non_root_run_never_warns_about_its_overrides(rig: Rig) -> None:
+    proc = as_root(rig, "true", root=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "is ignored when run as root" not in proc.stderr
+
+
+# ─── the numeric settings are digits only (review of #48) ───────────────────────
+#
+# bash evaluates a variable named inside arithmetic as an expression of its own,
+# so a value such as `BASH_VERSINFO[$(cmd)]` runs cmd — as root — when `wait_app` computes its
+# deadline or `probe_edge` counts its attempts. Each numeric setting is refused
+# unless it is all digits, where it is read, before any step runs. Each case
+# drives the real code path that would evaluate it.
+
+NUMERIC_SETTINGS = (
+    # (environment override, snippet that evaluates it)
+    ("YADGAR_OPERATORS_TIMEOUT", 'wait_app operators "$OPERATORS_TIMEOUT"'),
+    ("YADGAR_ESTATE_TIMEOUT", 'wait_app yadgar "$ESTATE_TIMEOUT"'),
+    ("YADGAR_PROBE_ATTEMPTS", "probe_edge"),
+    ("YADGAR_POLL_SECONDS", "probe_edge"),
+)
+
+
+@pytest.mark.parametrize("root", [False, True], ids=["as-user", "as-root"])
+@pytest.mark.parametrize("override, snippet", NUMERIC_SETTINGS,
+                         ids=[row[0] for row in NUMERIC_SETTINGS])
+def test_a_numeric_setting_that_is_not_digits_is_refused_before_it_runs(
+        rig: Rig, override: str, snippet: str, root: bool) -> None:
+    marker = rig.root / "injected-ran"
+    # An array that is always set: under `set -u` an unset name such as `a[...]`
+    # stops before its subscript is expanded, which would hide the injection.
+    proc = as_root(rig, snippet, root=root, **{override: f"BASH_VERSINFO[$(touch {marker})]"})
+    assert not marker.exists(), f"{override} ran a command substitution in arithmetic"
+    assert proc.returncode != 0
+    assert f"{override} must be a whole number of" in proc.stderr
 
 
 def test_a_missing_bin_directory_is_created(rig: Rig) -> None:
