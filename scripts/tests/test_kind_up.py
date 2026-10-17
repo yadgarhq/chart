@@ -150,8 +150,12 @@ class Rig:
     rules: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        for d in ("fake", "fakebin", "bin", "state", "home", "etc"):
+        for d in ("fake", "fakebin", "bin", "state", "home", "etc", "roothome"):
             (self.root / d).mkdir()
+        # ROOT'S OWN yaadgaar, where root's pipx puts it. The one in fakebin, on
+        # PATH, is a decoy the root-side client must never run.
+        (self.root / "roothome" / ".local" / "bin").mkdir(parents=True)
+        (self.root / "roothome" / ".local" / "bin" / "yaadgaar").symlink_to(FAKE)
         for name in FAKED:
             (self.root / "fakebin" / name).symlink_to(FAKE)
         link_host_tools(self.root / "hostbin")
@@ -174,6 +178,10 @@ class Rig:
         return self.root / "home" / "yadgar-enrolment.token"
 
     @property
+    def root_home(self) -> Path:
+        return self.root / "roothome"
+
+    @property
     def client_config(self) -> Path:
         return self.root / "admin-client" / "config.json"
 
@@ -191,6 +199,8 @@ class Rig:
             "YADGAR_ENROLMENT_FILE": str(self.enrolment_file),
             # --add-user's explicit credential path; the default is root's own.
             "YADGAR_CLIENT_CONFIG": str(self.client_config),
+            # Stands in for uid 0's home from the password database.
+            "YADGAR_ROOT_HOME": str(self.root_home),
             "YADGAR_POLL_SECONDS": "0",
             "YADGAR_PROBE_ATTEMPTS": "1",
         }
@@ -1197,6 +1207,7 @@ def test_it_runs_from_a_release_tarball_with_no_git(rig: Rig, tmp_path: Path) ->
 def test_with_client_pins_the_client_version(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     (rig.root / "fakebin" / "yaadgaar").unlink()
+    (rig.root_home / ".local" / "bin" / "yaadgaar").unlink()
     pipx_bin = rig.root / "pipx-bin"
     pipx_bin.mkdir()
     (pipx_bin / "yaadgaar").symlink_to(FAKE)
@@ -1486,8 +1497,7 @@ def test_add_user_ignores_a_home_or_xdg_config_and_reads_only_roots(rig: Rig) ->
     proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="",
                     XDG_CONFIG_HOME=str(rig.root / "xdg"), YADGAR_CONFIG_DIR=str(rig.root / "xdg" / "yadgar"))
     assert proc.returncode != 0
-    root_cfg = subprocess.run(["getent", "passwd", "0"], capture_output=True, text=True).stdout.split(":")[5]
-    assert f"{root_cfg}/.config/yadgar/config.json" in proc.stderr
+    assert f"{rig.root_home}/.config/yadgar/config.json" in proc.stderr
     assert rig.calls("curl") == []
 
 
@@ -1551,3 +1561,132 @@ def test_add_user_refuses_a_create_user_answer_without_a_user_id(rig: Rig) -> No
     assert proc.returncode != 0
     assert "user_id" in proc.stderr
     assert not [c for c in rig.calls("curl") if any("/admin/issue-enrolment" in a for a in c["argv"])]
+
+
+
+# ─── review of #47 @c54f46d ─────────────────────────────────────────────────────
+
+
+def test_the_root_side_client_never_follows_the_callers_environment(rig: Rig) -> None:
+    """`sudo -E` keeps the caller's HOME and XDG dirs: enrol, verify, install and
+    pipx must still run root's own client, writing under root's home only."""
+    bootstrap, enrolment = new_secrets()
+    (rig.root / "fakebin" / "claude").symlink_to(FAKE)
+    rig.rules = [password_stdin_rule(), {"cmd": "yaadgaar", "match": ["verify"], "exit": 1}] + \
+        full_rules(bootstrap, enrolment) + rig.rules
+    caller = rig.root / "caller"
+    proc = rig.main("--with-client", HOME=str(caller), XDG_CONFIG_HOME=str(caller / "xdg"),
+                    XDG_DATA_HOME=str(caller / "data"), YADGAR_CONFIG_DIR=str(caller / "cfg"),
+                    PIPX_HOME=str(caller / "pipx"), PIPX_BIN_DIR=str(caller / "bin"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    runs = rig.calls("yaadgaar")
+    assert {tuple(c["argv"][:1]) for c in runs} >= {("enrol",), ("verify",), ("install",)}
+    root_bin = str(rig.root_home / ".local" / "bin" / "yaadgaar")
+    for c in runs + rig.calls("pipx"):
+        if c["cmd"] == "yaadgaar":
+            assert c["path"] == root_bin, f"ran {c['path']}, not root's own yaadgaar"
+        assert c["env"]["HOME"] == str(rig.root_home), c
+        assert c["env"]["XDG_CONFIG_HOME"] is None and c["env"]["XDG_DATA_HOME"] is None, c
+        assert c["env"]["YADGAR_CONFIG_DIR"] is None, c
+        assert c["env"]["PIPX_HOME"] == str(rig.root_home / ".local" / "share" / "pipx"), c
+        assert c["env"]["PIPX_BIN_DIR"] == str(rig.root_home / ".local" / "bin"), c
+
+
+def test_a_failed_enrol_with_a_credential_already_stored_names_the_recovery(rig: Rig) -> None:
+    """The crash window between a successful enrol and the marker: the next run's
+    enrol is refused (the token is spent), and the message says how to record it."""
+    bootstrap, enrolment = new_secrets()
+    cfg = rig.root_home / ".config" / "yadgar" / "config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"gateway": GATEWAY + "/", "token": "x"}))
+    rig.rules = [
+        password_stdin_rule(),
+        {"cmd": "yaadgaar", "match": ["enrol", "--token-file"], "exit": 1,
+         "stderr": "Error: that enrolment secret was refused; it may already have been used\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode != 0
+    assert f"touch {rig.state / 'client-enrolled'}" in proc.stderr
+    assert not (rig.state / "client-enrolled").exists()
+
+
+def make_fifo_link(rig: Rig) -> tuple[Path, Path]:
+    fifo = rig.root / "home" / "fifo"
+    os.mkfifo(fifo)
+    link = rig.root / "home" / "out.token"
+    link.symlink_to(fifo)
+    return fifo, link
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_add_user_never_writes_through_a_symlink_to_a_fifo(rig: Rig, force: bool) -> None:
+    """bash 5.3's `set -C` writes through a symlink to a FIFO or device."""
+    bearer, enrolment = add_user_rig(rig)
+    fifo, link = make_fifo_link(rig)
+    args = ["--add-user", "dave@example.com", "--out", str(link)] + (["--force"] if force else [])
+    proc = rig.main(*args)
+    assert proc.returncode != 0
+    assert link.is_symlink() and os.readlink(link) == str(fifo)
+    assert rig.calls("curl") == [], "a user was created whose token had nowhere safe to go"
+    assert_absent(rig, proc, bearer, enrolment)
+
+
+def test_add_user_refuses_a_parent_others_can_write(rig: Rig) -> None:
+    add_user_rig(rig)
+    shared = rig.root / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(shared / "dave.token"))
+    assert proc.returncode != 0
+    assert "777" in proc.stderr
+    assert not (shared / "dave.token").exists()
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_parent_owned_by_another_uid(rig: Rig) -> None:
+    add_user_rig(rig)
+    other = Path("/")
+    assert other.stat().st_uid != os.geteuid(), "run as a uid that does not own /"
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(other / "yadgar-dave.token"))
+    assert proc.returncode != 0
+    assert f"uid {other.stat().st_uid}" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_missing_parent(rig: Rig) -> None:
+    add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(rig.root / "nope" / "dave.token"))
+    assert proc.returncode != 0
+    assert not (rig.root / "nope").exists()
+    assert rig.calls("curl") == []
+
+
+@pytest.mark.parametrize("name", ["a+b", "a b", "dave/x", "da%ve", "é"])
+def test_add_user_refuses_a_username_its_record_key_would_change(rig: Rig, name: str) -> None:
+    """`a+b` and `a_b` once shared one record and one token file."""
+    add_user_rig(rig)
+    proc = rig.main("--add-user", name)
+    assert proc.returncode != 0
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_record_for_another_username(rig: Rig) -> None:
+    add_user_rig(rig)
+    users = rig.state / "users"
+    users.mkdir(parents=True)
+    (users / "dave@example.com.json").write_text(json.dumps(
+        {"external_id": "someone-else", "user_id": DAVE_ID, "install_uid": "uid-1"}))
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "someone-else" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_strips_control_characters_from_the_gateways_answer(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.rules = [{"cmd": "curl", "match": ["/admin/create-user"], "stdout": "500",
+                  "o_content": json.dumps({"error": "bad\u001b[31m red\nforged line"})}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "\x1b" not in proc.stderr and "bad" in proc.stderr
+    assert "\nforged line" not in proc.stderr

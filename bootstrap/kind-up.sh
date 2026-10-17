@@ -8,7 +8,8 @@
 # and registers yadgar with Claude Code (`yaadgaar install`) when `claude` is
 # installed. --add-user, run after that, creates one more ORDINARY user (never
 # an admin) as that admin and writes their enrolment token to a new root-only
-# file; it never overwrites a file without --force and touches nothing else.
+# file in a root-only directory; --force replaces only a regular file, links are
+# never followed, and it touches nothing else.
 #
 # Run it from this repository at a release tag — a clone, or the release
 # tarball, which needs no git:
@@ -64,6 +65,8 @@
 #   YADGAR_CLIENT_CONFIG        root's own client config, read by --add-user
 #                               (<root's home>/.config/yadgar/config.json);
 #                               refused unless owned by root and mode 0600
+#   YADGAR_ROOT_HOME            root's home, for every client step
+#                               (uid 0's home in the password database)
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -110,9 +113,28 @@ CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
 # or a caller's environment could point at another user's credential. The
 # override is explicit and passes the same root-owned, 0600 check.
 root_home() {
-  local home
-  home="$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)"
+  local home="${YADGAR_ROOT_HOME:-}"
+  [[ -n "$home" ]] || home="$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)"
   printf '%s\n' "${home:-/root}"
+}
+
+# THE WHOLE RUN USES ROOT'S OWN HOME (review of #47). `sudo -E` keeps the
+# caller's HOME and XDG directories, and every root-side client step — pipx,
+# `yaadgaar enrol`, `verify`, `install`, and helm's cache — would otherwise read
+# and write under that caller's home, or run a `yaadgaar` they put there. Pinned
+# once in `main`, so no step can be missed: HOME is root's, the XDG and yadgar
+# config overrides are unset, and pipx installs under root's home.
+pin_root_environment() {
+  HOME="$(root_home)"
+  export HOME
+  unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME YADGAR_CONFIG_DIR
+  export PIPX_HOME="$HOME/.local/share/pipx" PIPX_BIN_DIR="$HOME/.local/bin"
+}
+
+# Gateway text is printed only after control characters are removed, so an
+# answer cannot forge log lines or drive the terminal.
+printable() {
+  tr -d '\000-\037\177'
 }
 CLIENT_CONFIG_FILE="${YADGAR_CLIENT_CONFIG:-$(root_home)/.config/yadgar/config.json}"
 # One record per user --add-user created, tied to the installation like
@@ -757,7 +779,7 @@ issue_enrolment() {
       ;;
   esac
   local answer
-  answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null || true)"
+  answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null | printable || true)"
   rm -rf "$work"
   die "issue-enrolment answered ${code:-nothing}: ${answer:-no body}"
 }
@@ -826,7 +848,7 @@ ensure_admin() {
     code="$(admin_post create-user "$work/body" "$work/out" "$token")"
     if [[ "$code" != 200 ]]; then
       local answer
-      answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null || true)"
+      answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null | printable || true)"
       rm -rf "$work"
       die "create-user answered ${code:-nothing}: ${answer:-no body}. The gateway answers a duplicate username the same way as an outage. If $ADMIN_EXTERNAL_ID was created by an earlier run whose $ADMIN_RECORD is gone, it cannot be recovered with the bootstrap token: have an enrolled admin issue its enrolment, or set YADGAR_ADMIN_EXTERNAL_ID to a new username"
     fi
@@ -898,9 +920,11 @@ yaadgaar_version() {
   awk '$1 == "yaadgaar" && $3 == "pypi" { print $2; exit }' "$TOOLS_LOCK"
 }
 
+# ROOT'S OWN yaadgaar ONLY, where root's pipx puts it — never the first one on
+# PATH, which a caller's environment could name.
 yaadgaar_bin() {
-  if command -v yaadgaar >/dev/null 2>&1; then
-    command -v yaadgaar
+  if [[ -x "$PIPX_BIN_DIR/yaadgaar" ]]; then
+    printf '%s\n' "$PIPX_BIN_DIR/yaadgaar"
     return
   fi
   if ! command -v pipx >/dev/null 2>&1; then
@@ -912,7 +936,7 @@ yaadgaar_bin() {
   [[ -n "$version" ]] || return 1
   run pipx install "yaadgaar==$version" >/dev/null
   local dir
-  dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$HOME/.local/bin")"
+  dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || echo "$PIPX_BIN_DIR")"
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
 }
 
@@ -986,7 +1010,18 @@ ensure_client() {
     )
   fi
   log "[10/10] enrolling $ADMIN_EXTERNAL_ID with yaadgaar; password in $CLIENT_PASSWORD_FILE (0600)"
-  "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
+  if ! "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"; then
+    # THE CRASH WINDOW: a run that stopped after a successful enrol and before
+    # the marker re-sends the spent token here, and the gateway refuses it. A
+    # credential for this gateway already in root's client config is the sign;
+    # recording the marker by hand ends the loop.
+    local stored
+    stored="$(jq -r '.gateway // empty' "$HOME/.config/yadgar/config.json" 2>/dev/null || true)"
+    if [[ -n "$stored" && "${stored%/}" == "${GATEWAY_URL%/}" ]]; then
+      die "yaadgaar enrol failed, and root's client already holds a credential for $GATEWAY_URL. If an earlier run enrolled and stopped before recording it, the token is spent: record that with: touch $CLIENT_ENROLLED_MARKER — then run this again"
+    fi
+    die "yaadgaar enrol failed; $ENROLMENT_FILE is kept and was not marked redeemed"
+  fi
   # The marker before the rename: a run that stops between them must not send
   # the spent token again.
   touch "$CLIENT_ENROLLED_MARKER"
@@ -1005,7 +1040,7 @@ user_admin_post() {
 # Dies with the gateway's answer to one --add-user request.
 add_user_refused() {
   local verb="$1" code="$2" out="$3" answer hint=""
-  answer="$(jq -r '.error // empty' "$out" 2>/dev/null || true)"
+  answer="$(jq -r '.error // empty' "$out" 2>/dev/null | printable || true)"
   rm -f "$out"
   case "$code" in
     401) hint=" The admin credential in $CLIENT_CONFIG_FILE was refused; renew it: yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < $CLIENT_PASSWORD_FILE" ;;
@@ -1034,6 +1069,75 @@ print_add_user_steps() {
 EOF
 }
 
+# THE ADMIN'S CREDENTIAL, READ ONCE THROUGH ONE DESCRIPTOR: opened without
+# following a symlink, checked with fstat on that same descriptor (a regular
+# file, owned by this uid, mode 0600), then read from it. Prints the gateway and
+# the bearer on two lines, to a pipe and never to argv. No path is checked and
+# then reopened, so nothing can be swapped in between.
+# shellcheck disable=SC2016
+READ_CLIENT_CONFIG_PY='
+import json, os, stat, sys
+path, euid = sys.argv[1], int(sys.argv[2])
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+except OSError as e:
+    sys.exit(f"no readable client credential at {path} ({e.strerror})")
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode):
+    sys.exit(f"{path} is not a regular file")
+if (st.st_uid, stat.S_IMODE(st.st_mode)) != (euid, 0o600):
+    sys.exit(f"{path} is owner/mode {st.st_uid} {stat.S_IMODE(st.st_mode):o}, not {euid} 600")
+with os.fdopen(fd, "rb") as fh:
+    cfg = json.loads(fh.read(1 << 20) or b"{}")
+print(cfg.get("gateway") or "")
+print(cfg.get("token") or "")
+'
+
+# THE TOKEN FILE, CREATED WITHOUT EVER FOLLOWING A LINK (review of #47). The
+# parent is resolved, opened O_DIRECTORY|O_NOFOLLOW, and checked with fstat on
+# that descriptor: owned by this uid and writable by no group or other user, so
+# nobody else can plant or swap an entry in it. Everything after is relative to
+# that descriptor. An existing entry is refused, and with --force only a
+# regular file is unlinked; the file is then created O_CREAT|O_EXCL|O_NOFOLLOW,
+# 0600. A symlink, FIFO or device is never written through. `check` runs every
+# test and writes nothing; `write` reads the token from stdin.
+# shellcheck disable=SC2016
+CREATE_TOKEN_FILE_PY='
+import os, stat, sys
+action, out, force, euid = sys.argv[1], sys.argv[2], sys.argv[3] == "1", int(sys.argv[4])
+parent, name = os.path.split(out)
+parent = os.path.realpath(parent or ".")
+if not name or name in (".", ".."):
+    sys.exit(f"--out {out} names no file")
+try:
+    dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+except OSError as e:
+    sys.exit(f"--out directory {parent}: {e.strerror}; create it first, owned by uid {euid}, mode 0700 or 0755")
+st = os.fstat(dfd)
+mode = stat.S_IMODE(st.st_mode)
+if st.st_uid != euid or mode & 0o022:
+    sys.exit(f"--out directory {parent} is owned by uid {st.st_uid} with mode {mode:o}; the token goes only into a directory owned by uid {euid} that no group or other user can write")
+try:
+    lst = os.lstat(name, dir_fd=dfd)
+except FileNotFoundError:
+    lst = None
+if lst is not None:
+    if not force:
+        sys.exit(f"{parent}/{name} already exists; choose another --out, or pass --force to replace it")
+    if not stat.S_ISREG(lst.st_mode):
+        sys.exit(f"{parent}/{name} is not a regular file (a symlink, FIFO, device or directory); --force replaces only a regular file")
+if action == "check":
+    sys.exit(0)
+data = sys.stdin.buffer.read()
+if lst is not None:
+    os.unlink(name, dir_fd=dfd)
+fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+os.fchmod(fd, 0o600)
+os.write(fd, data)
+os.fsync(fd)
+os.close(fd)
+'
+
 # Creates one more user as the admin enrolled on this host, and writes their
 # enrolment token to a 0600 file (ledger 1540).
 #
@@ -1053,27 +1157,32 @@ EOF
 # — the example's enrolment gateway and $CA_FILE — and a client config enrolled
 # with any other gateway is refused.
 add_user() {
-  local safe out record uid recorded_uid gateway bearer work code user_id
-  [[ -n "$ADD_USER_ID" && "$ADD_USER_ID" != */* && ! "$ADD_USER_ID" =~ [[:space:][:cntrl:]] ]] ||
-    die "--add-user takes a username with no '/' and no whitespace"
+  local out record uid recorded_uid recorded_id cfg gateway bearer work code user_id err
+  # THE USERNAME IS ITS OWN RECORD KEY AND FILE NAME, so it is refused rather
+  # than rewritten: a lossy mapping once gave `a+b` and `a_b` one record and one
+  # token file.
+  [[ "$ADD_USER_ID" =~ ^[A-Za-z0-9@][A-Za-z0-9._@-]*$ ]] ||
+    die "--add-user takes a username of letters, digits and . _ @ - only, starting with a letter, a number or @"
   [[ ! "$ADD_USER_DISPLAY_NAME" =~ [[:cntrl:]] ]] || die "--display-name may not hold control characters or newlines"
-  safe="${ADD_USER_ID//[^A-Za-z0-9._@-]/_}"
-  out="${ADD_USER_OUT:-$(dirname "$ENROLMENT_FILE")/yadgar-enrolment-$safe.token}"
-  record="$USERS_DIR/$safe.json"
+  command -v python3 >/dev/null 2>&1 || die "--add-user needs python3 to create the token file safely"
+  out="${ADD_USER_OUT:-$(dirname "$ENROLMENT_FILE")/yadgar-enrolment-$ADD_USER_ID.token}"
+  record="$USERS_DIR/$ADD_USER_ID.json"
   [[ -s "$CA_FILE" ]] || die "no edge CA at $CA_FILE; run kind-up.sh without --add-user first"
-  [[ -f "$CLIENT_CONFIG_FILE" && ! -L "$CLIENT_CONFIG_FILE" && -r "$CLIENT_CONFIG_FILE" && -s "$CLIENT_CONFIG_FILE" ]] ||
-    die "no readable client credential at $CLIENT_CONFIG_FILE. --add-user acts only as the admin this host's root enrolled: run kind-up.sh --with-client first"
-  local owner_mode
-  owner_mode="$(stat -c '%u %a' "$CLIENT_CONFIG_FILE")"
-  [[ "$owner_mode" == "$EUID 600" ]] ||
-    die "$CLIENT_CONFIG_FILE is owner/mode $owner_mode, not $EUID 600; --add-user uses only root's own private client credential"
-  gateway="$(jq -r '.gateway // empty' "$CLIENT_CONFIG_FILE")"
+  err="$(mktemp "$STATE_DIR/tmp.XXXXXX")"
+  cfg="$(python3 -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>"$err")" ||
+    die "$(printable <"$err"). --add-user acts only with the credential this host's root enrolled (kind-up.sh --with-client), owned by root and mode 0600"
+  gateway="${cfg%%$'\n'*}"
+  bearer="${cfg#*$'\n'}"
+  cfg=""
   [[ "${gateway%/}" == "${GATEWAY_URL%/}" ]] ||
     die "$CLIENT_CONFIG_FILE is enrolled with ${gateway:-no gateway}, not $GATEWAY_URL"
   uid="$(install_uid)"
   [[ -n "$uid" ]] || die "Secret $ESTATE_NAMESPACE/admin-bootstrap-token has no uid; the estate has not minted it"
 
   if [[ -s "$record" ]]; then
+    recorded_id="$(jq -r '.external_id // empty' "$record")"
+    [[ "$recorded_id" == "$ADD_USER_ID" ]] ||
+      die "$record records ${recorded_id:-no username}, not $ADD_USER_ID; refusing to act on another user's record"
     recorded_uid="$(jq -r '.install_uid // empty' "$record")"
     if [[ "$recorded_uid" != "$uid" ]]; then
       log "[add-user] $record belongs to another installation (${recorded_uid:-unrecorded}, this one is $uid)"
@@ -1093,12 +1202,11 @@ add_user() {
     die "$ADD_USER_ID was already added by this installation ($(jq -r '.user_id' "$record")), and $out is missing or older than 23 hours. --add-user sends create-user once and issues an enrolment only to the user that call created; a new token for an existing user resets their password, so issue it deliberately as an admin"
   fi
   # CHECKED BEFORE ANY REQUEST, so a refused output path never strands a user
-  # whose only token had nowhere to go.
-  if [[ -e "$out" || -L "$out" ]]; then
-    ((ADD_USER_FORCE)) || die "$out already exists; choose another --out, or pass --force to replace it"
-  fi
+  # whose only token had nowhere to go. The write repeats every check on its own
+  # descriptor, so this is a courtesy, not the guard.
+  python3 -I -c "$CREATE_TOKEN_FILE_PY" check "$out" "$ADD_USER_FORCE" "$EUID" </dev/null 2>"$err" ||
+    die "$(printable <"$err")"
 
-  bearer="$(jq -r '.token // empty' "$CLIENT_CONFIG_FILE")"
   [[ "$bearer" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die "no usable credential in $CLIENT_CONFIG_FILE"
   install -d -m 0700 "$USERS_DIR"
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
@@ -1122,17 +1230,13 @@ add_user() {
   [[ "$code" == 200 ]] || add_user_refused issue-enrolment "$code" "$work/out"
   jq -r '.token // empty' "$work/out" >"$work/token"
   [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
-  mkdir -p "$(dirname "$out")"
-  # CREATED 0600 UNDER umask 077, EXCLUSIVELY: `set -C` refuses to write through
-  # an existing file or symlink, so --force removes it first and nothing else
-  # can be clobbered.
-  if ((ADD_USER_FORCE)); then rm -f "$out"; fi
-  (
-    umask 077
-    set -C
-    cat "$work/token" >"$out"
-  ) || die "could not create $out"
-  chmod 0600 "$out"
+  # CREATE_TOKEN_FILE_PY: exclusive, no-follow, 0600, in a parent only this uid
+  # can write. If that fails now, the user exists and this is their only token,
+  # so it is kept in the root-only state directory rather than lost.
+  if ! python3 -I -c "$CREATE_TOKEN_FILE_PY" write "$out" "$ADD_USER_FORCE" "$EUID" <"$work/token" 2>"$err"; then
+    mv "$work/token" "$USERS_DIR/$ADD_USER_ID.token.pending"
+    die "$(printable <"$err"). $ADD_USER_ID was created ($user_id); their enrolment token is kept in $USERS_DIR/$ADD_USER_ID.token.pending (0600)"
+  fi
   rm -rf "$work"
   log "[add-user] enrolment token for $ADD_USER_ID written to $out (0600, valid 24 hours)"
   print_add_user_steps "$out"
@@ -1182,6 +1286,7 @@ main() {
     return 2
   fi
   require_root "${args[@]}"
+  pin_root_environment
   ensure_state_dir
   trap 'rm -rf "$STATE_DIR"/tmp.*' EXIT
   load_examples

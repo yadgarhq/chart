@@ -33,6 +33,9 @@ import sys
 from pathlib import Path
 
 
+ENV_RECORDED = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "YADGAR_CONFIG_DIR", "PIPX_HOME", "PIPX_BIN_DIR")
+
+
 def main() -> int:
     name = Path(sys.argv[0]).name
     argv = sys.argv[1:]
@@ -54,7 +57,11 @@ def main() -> int:
         data = Path(ref[1:]).read_text(encoding="utf-8") if ref.startswith("@") else ref
 
     with (fake_dir / "calls.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"cmd": name, "argv": argv, "stdin": stdin, "data": data}) + "\n")
+        # `path` and `env` let a test prove WHICH binary ran and under which
+        # home: the root-side client must never follow a caller's environment.
+        env = {k: os.environ.get(k) for k in ENV_RECORDED}
+        fh.write(json.dumps({"cmd": name, "path": sys.argv[0], "argv": argv, "stdin": stdin,
+                             "data": data, "env": env}) + "\n")
 
     rules = json.loads((fake_dir / "rules.json").read_text(encoding="utf-8"))
     for index, rule in enumerate(rules):

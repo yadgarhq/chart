@@ -99,9 +99,12 @@ run later. After that, `kind-up.sh --add-user <username> [--display-name NAME]
 [--out FILE] [--force]` creates one more ordinary user (never an admin). It acts
 only with root's own client credential, which must be owned by root and mode
 0600, and never with the bootstrap token. It writes the enrolment token to a new
-0600 file and never overwrites a file without `--force`. It prints the commands
-that user runs. It does nothing else. Running it again sends no second
-create-user, and it never re-issues a lost token.
+0600 file, created exclusively without following links, in a directory that
+root owns and no group or other user can write. `--force` replaces only an
+existing regular file. It prints the commands that user runs. It does nothing
+else. Running it again sends no second create-user, and it never re-issues a
+lost token. The whole run uses root's own home, whatever `HOME` or XDG
+directories `sudo -E` passes on, and only root's own `yaadgaar`.
 
 ## What the defaults install
 
