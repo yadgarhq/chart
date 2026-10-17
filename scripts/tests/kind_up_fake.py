@@ -33,7 +33,11 @@ import sys
 from pathlib import Path
 
 
-ENV_RECORDED = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "YADGAR_CONFIG_DIR", "PIPX_HOME", "PIPX_BIN_DIR")
+ENV_RECORDED = (
+    "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "YADGAR_CONFIG_DIR", "PIPX_HOME", "PIPX_BIN_DIR",
+    "CURL_HOME", "KUBECTL_EXTERNAL_DIFF", "HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
+    "HELM_PLUGINS", "HELM_REGISTRY_CONFIG", "HELM_REPOSITORY_CONFIG",
+)
 
 
 def main() -> int:
@@ -83,6 +87,9 @@ def main() -> int:
         # `kind export kubeconfig --kubeconfig <path>` writes its file.
         if "write_arg" in rule and rule["write_arg"] in argv:
             Path(argv[argv.index(rule["write_arg"]) + 1]).write_text(rule["write_content"], encoding="utf-8")
+        # `touch`: create a file as a side effect, the way a racing process would.
+        if "touch" in rule:
+            Path(rule["touch"]).write_text("", encoding="utf-8")
         sys.stdout.write(out)
         sys.stderr.write(rule.get("stderr", ""))
         return int(nth(rule.get("exit", 0)))

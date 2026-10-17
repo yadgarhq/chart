@@ -65,8 +65,6 @@
 #   YADGAR_CLIENT_CONFIG        root's own client config, read by --add-user
 #                               (<root's home>/.config/yadgar/config.json);
 #                               refused unless owned by root and mode 0600
-#   YADGAR_ROOT_HOME            root's home, for every client step
-#                               (uid 0's home in the password database)
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -112,9 +110,13 @@ CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
 # uid 0 — never from $HOME, XDG_CONFIG_HOME or YADGAR_CONFIG_DIR, which `sudo -E`
 # or a caller's environment could point at another user's credential. The
 # override is explicit and passes the same root-owned, 0600 check.
+# ROOT'S HOME, FROM THE PASSWORD DATABASE ONLY — there is deliberately no
+# environment override, which a `sudo -E` caller could point at their own home
+# and so at their own `yaadgaar`. `getent` is found on PATH like every other
+# tool here: real `sudo` applies `secure_path`, so a caller cannot steer PATH.
 root_home() {
-  local home="${YADGAR_ROOT_HOME:-}"
-  [[ -n "$home" ]] || home="$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)"
+  local home
+  home="$(getent passwd 0 2>/dev/null | cut -d: -f6 || true)"
   printf '%s\n' "${home:-/root}"
 }
 
@@ -124,11 +126,32 @@ root_home() {
 # and write under that caller's home, or run a `yaadgaar` they put there. Pinned
 # once in `main`, so no step can be missed: HOME is root's, the XDG and yadgar
 # config overrides are unset, and pipx installs under root's home.
+#
+# THE TOOLS' OWN REDIRECTS GO TOO: CURL_HOME (curl reads its .curlrc, which can
+# add `--trace` or a proxy; every call also passes `-q` first, the only flag that
+# stops that), KUBECTL_EXTERNAL_DIFF (a program `kubectl diff` would run), and
+# every HELM_* variable (HELM_CACHE_HOME, HELM_CONFIG_HOME, HELM_DATA_HOME,
+# HELM_PLUGINS, HELM_REGISTRY_CONFIG, HELM_REPOSITORY_CONFIG and the rest), so
+# helm falls back to root's home.
 pin_root_environment() {
   HOME="$(root_home)"
   export HOME
   unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME YADGAR_CONFIG_DIR
+  unset CURL_HOME KUBECTL_EXTERNAL_DIFF
+  local var
+  for var in "${!HELM_@}"; do unset "$var"; done
   export PIPX_HOME="$HOME/.local/share/pipx" PIPX_BIN_DIR="$HOME/.local/bin"
+}
+
+# THE PYTHON THAT CREATES AND READS SECRET FILES: /usr/bin/python3 where the
+# distribution puts it (Debian, Ubuntu, Fedora), else python3 on PATH — which,
+# like every tool here, is root's `secure_path` under sudo.
+kind_up_python() {
+  if [[ -x /usr/bin/python3 ]]; then
+    printf '%s\n' /usr/bin/python3
+  else
+    command -v python3 2>/dev/null
+  fi
 }
 
 # Gateway text is printed only after control characters are removed, so an
@@ -336,7 +359,7 @@ check_clock() {
   # `-k`: the skew this looks for puts the clock before the certificate's
   # notBefore, and a verifying request would then fail silently. Only the Date
   # header is read, and nothing is sent.
-  header="$(curl -k -fsS -I --max-time 10 https://dl.k8s.io/ 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "date:" { $1 = ""; print; exit }' || true)"
+  header="$(curl -q -k -fsS -I --max-time 10 https://dl.k8s.io/ 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "date:" { $1 = ""; print; exit }' || true)"
   [[ -n "$header" ]] || return 0
   remote="$(date -u -d "$header" +%s 2>/dev/null || true)"
   [[ -n "$remote" ]] || return 0
@@ -418,7 +441,7 @@ ensure_tool() {
   log "[3/10] installing $tool $version into $BIN_DIR (found: ${have:-none})"
   install -d -m 0755 "$BIN_DIR"
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-  curl -fsSL --retry 3 -o "$work/download" "$url" || {
+  curl -q -fsSL --retry 3 -o "$work/download" "$url" || {
     rm -rf "$work"
     die "download of $tool failed: $url"
   }
@@ -679,7 +702,7 @@ ensure_edge_ca() {
 probe_edge() {
   local attempt code=""
   for ((attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++)); do
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$CA_FILE" "$GATEWAY_URL/" 2>/dev/null || true)"
+    code="$(curl -q -sS -o /dev/null -w '%{http_code}' --cacert "$CA_FILE" "$GATEWAY_URL/" 2>/dev/null || true)"
     if [[ "$code" == 405 ]]; then
       log "[8/10] $GATEWAY_URL/ answered 405 over the edge CA"
       return
@@ -699,7 +722,7 @@ gateway_post() {
   local path="$1" body_file="$2" out_file="$3" secret_header="$4"
   shift 4
   printf 'header = "%s"\n' "$secret_header" |
-    curl --config - -sS -o "$out_file" -w '%{http_code}' --cacert "$CA_FILE" \
+    curl -q --config - -sS -o "$out_file" -w '%{http_code}' --cacert "$CA_FILE" \
       -H 'content-type: application/json' "$@" --data-binary "@$body_file" \
       "$GATEWAY_URL/admin/$path" || true
 }
@@ -1015,8 +1038,11 @@ ensure_client() {
     # the marker re-sends the spent token here, and the gateway refuses it. A
     # credential for this gateway already in root's client config is the sign;
     # recording the marker by hand ends the loop.
-    local stored
-    stored="$(jq -r '.gateway // empty' "$HOME/.config/yadgar/config.json" 2>/dev/null || true)"
+    local stored="" py
+    # Read through the same no-follow, root-only reader --add-user uses.
+    if py="$(kind_up_python)"; then
+      stored="$("$py" -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>/dev/null | head -n 1 || true)"
+    fi
     if [[ -n "$stored" && "${stored%/}" == "${GATEWAY_URL%/}" ]]; then
       die "yaadgaar enrol failed, and root's client already holds a credential for $GATEWAY_URL. If an earlier run enrolled and stopped before recording it, the token is spent: record that with: touch $CLIENT_ENROLLED_MARKER — then run this again"
     fi
@@ -1093,26 +1119,38 @@ print(cfg.get("gateway") or "")
 print(cfg.get("token") or "")
 '
 
-# THE TOKEN FILE, CREATED WITHOUT EVER FOLLOWING A LINK (review of #47). The
-# parent is resolved, opened O_DIRECTORY|O_NOFOLLOW, and checked with fstat on
-# that descriptor: owned by this uid and writable by no group or other user, so
-# nobody else can plant or swap an entry in it. Everything after is relative to
-# that descriptor. An existing entry is refused, and with --force only a
+# THE TOKEN FILE, CREATED WITHOUT EVER FOLLOWING A LINK (reviews of #47). The
+# path is walked from `/` one component at a time, each opened
+# O_DIRECTORY|O_NOFOLLOW relative to the last, so a symlink anywhere in it is
+# refused rather than followed. The final directory is checked with fstat on
+# its own descriptor: owned by this uid and writable by no group or other user,
+# so nobody else can plant or swap an entry in it. Everything after is relative
+# to that descriptor. An existing entry is refused, and with --force only a
 # regular file is unlinked; the file is then created O_CREAT|O_EXCL|O_NOFOLLOW,
-# 0600. A symlink, FIFO or device is never written through. `check` runs every
-# test and writes nothing; `write` reads the token from stdin.
+# 0600. A write that fails after the create unlinks the file, so a rerun never
+# finds an empty file and calls it a fresh token. `check` runs every test and
+# writes nothing; `write` reads the token from stdin.
 # shellcheck disable=SC2016
 CREATE_TOKEN_FILE_PY='
 import os, stat, sys
 action, out, force, euid = sys.argv[1], sys.argv[2], sys.argv[3] == "1", int(sys.argv[4])
-parent, name = os.path.split(out)
-parent = os.path.realpath(parent or ".")
+parent, name = os.path.split(os.path.abspath(out))
+parent = parent or "/"
 if not name or name in (".", ".."):
     sys.exit(f"--out {out} names no file")
-try:
-    dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-except OSError as e:
-    sys.exit(f"--out directory {parent}: {e.strerror}; create it first, owned by uid {euid}, mode 0700 or 0755")
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+dfd = os.open("/", flags)
+walked = ""
+for part in [c for c in parent.split("/") if c]:
+    walked += "/" + part
+    try:
+        nfd = os.open(part, flags, dir_fd=dfd)
+    except OSError as e:
+        if os.path.islink(walked):
+            sys.exit(f"--out path component {walked} is a symlink; give the real path")
+        sys.exit(f"--out directory {walked}: {e.strerror}; create it first, owned by uid {euid}, mode 0700 or 0755")
+    os.close(dfd)
+    dfd = nfd
 st = os.fstat(dfd)
 mode = stat.S_IMODE(st.st_mode)
 if st.st_uid != euid or mode & 0o022:
@@ -1129,13 +1167,25 @@ if lst is not None:
 if action == "check":
     sys.exit(0)
 data = sys.stdin.buffer.read()
+if not data:
+    sys.exit("no token to write")
 if lst is not None:
     os.unlink(name, dir_fd=dfd)
-fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
-os.fchmod(fd, 0o600)
-os.write(fd, data)
-os.fsync(fd)
-os.close(fd)
+try:
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+except OSError as e:
+    sys.exit(f"could not create {parent}/{name}: {e.strerror}")
+try:
+    os.fchmod(fd, 0o600)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+    os.fsync(fd)
+    os.close(fd)
+except OSError as e:
+    os.close(fd)
+    os.unlink(name, dir_fd=dfd)
+    sys.exit(f"could not write {parent}/{name}: {e.strerror}; nothing was left behind")
 '
 
 # Creates one more user as the admin enrolled on this host, and writes their
@@ -1164,12 +1214,14 @@ add_user() {
   [[ "$ADD_USER_ID" =~ ^[A-Za-z0-9@][A-Za-z0-9._@-]*$ ]] ||
     die "--add-user takes a username of letters, digits and . _ @ - only, starting with a letter, a number or @"
   [[ ! "$ADD_USER_DISPLAY_NAME" =~ [[:cntrl:]] ]] || die "--display-name may not hold control characters or newlines"
-  command -v python3 >/dev/null 2>&1 || die "--add-user needs python3 to create the token file safely"
+  local py pending
+  py="$(kind_up_python)" || die "--add-user needs /usr/bin/python3 (or python3 on root's PATH) to create the token file safely"
+  pending="$USERS_DIR/$ADD_USER_ID.token.pending"
   out="${ADD_USER_OUT:-$(dirname "$ENROLMENT_FILE")/yadgar-enrolment-$ADD_USER_ID.token}"
   record="$USERS_DIR/$ADD_USER_ID.json"
   [[ -s "$CA_FILE" ]] || die "no edge CA at $CA_FILE; run kind-up.sh without --add-user first"
   err="$(mktemp "$STATE_DIR/tmp.XXXXXX")"
-  cfg="$(python3 -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>"$err")" ||
+  cfg="$("$py" -I -c "$READ_CLIENT_CONFIG_PY" "$CLIENT_CONFIG_FILE" "$EUID" 2>"$err")" ||
     die "$(printable <"$err"). --add-user acts only with the credential this host's root enrolled (kind-up.sh --with-client), owned by root and mode 0600"
   gateway="${cfg%%$'\n'*}"
   bearer="${cfg#*$'\n'}"
@@ -1194,17 +1246,23 @@ add_user() {
   # expired token is not re-issued from the record here — a re-issue to an
   # enrolled user resets their password, a step for an admin to take on purpose.
   if [[ -s "$record" ]]; then
-    if [[ -f "$out" && -n "$(find "$out" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
+    # A TOKEN AN EARLIER RUN COULD NOT WRITE comes first: whatever sits at $out
+    # then is not it. Otherwise only a non-empty regular file is a fresh token.
+    if [[ ! -s "$pending" && -f "$out" && ! -L "$out" && -s "$out" ]] &&
+      [[ -n "$(find "$out" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
       log "[add-user] $ADD_USER_ID already added ($(jq -r '.user_id' "$record")); $out holds an enrolment token younger than 23 hours"
       print_add_user_steps "$out"
       return
+    fi
+    if [[ -s "$pending" ]]; then
+      die "$ADD_USER_ID was already added by this installation ($(jq -r '.user_id' "$record")), and an earlier run could not write $out: their enrolment token is in $pending (0600). Hand that file over (install -o <user> -m 0600 $pending ~<user>/yadgar-enrolment.token) and delete it once redeemed. Do not issue a new one: a new token for an existing user resets their password"
     fi
     die "$ADD_USER_ID was already added by this installation ($(jq -r '.user_id' "$record")), and $out is missing or older than 23 hours. --add-user sends create-user once and issues an enrolment only to the user that call created; a new token for an existing user resets their password, so issue it deliberately as an admin"
   fi
   # CHECKED BEFORE ANY REQUEST, so a refused output path never strands a user
   # whose only token had nowhere to go. The write repeats every check on its own
   # descriptor, so this is a courtesy, not the guard.
-  python3 -I -c "$CREATE_TOKEN_FILE_PY" check "$out" "$ADD_USER_FORCE" "$EUID" </dev/null 2>"$err" ||
+  "$py" -I -c "$CREATE_TOKEN_FILE_PY" check "$out" "$ADD_USER_FORCE" "$EUID" </dev/null 2>"$err" ||
     die "$(printable <"$err")"
 
   [[ "$bearer" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die "no usable credential in $CLIENT_CONFIG_FILE"
@@ -1233,9 +1291,18 @@ add_user() {
   # CREATE_TOKEN_FILE_PY: exclusive, no-follow, 0600, in a parent only this uid
   # can write. If that fails now, the user exists and this is their only token,
   # so it is kept in the root-only state directory rather than lost.
-  if ! python3 -I -c "$CREATE_TOKEN_FILE_PY" write "$out" "$ADD_USER_FORCE" "$EUID" <"$work/token" 2>"$err"; then
-    mv "$work/token" "$USERS_DIR/$ADD_USER_ID.token.pending"
-    die "$(printable <"$err"). $ADD_USER_ID was created ($user_id); their enrolment token is kept in $USERS_DIR/$ADD_USER_ID.token.pending (0600)"
+  if ! "$py" -I -c "$CREATE_TOKEN_FILE_PY" write "$out" "$ADD_USER_FORCE" "$EUID" <"$work/token" 2>"$err"; then
+    # COPIED, VERIFIED, THEN RENAMED into the root-only users directory, and
+    # only then may the EXIT trap delete the work directory. If even that
+    # fails, the work directory is renamed out of the trap's tmp.* glob.
+    if cp "$work/token" "$pending.tmp" && chmod 0600 "$pending.tmp" &&
+      cmp -s "$work/token" "$pending.tmp" && mv -f "$pending.tmp" "$pending"; then
+      die "$(printable <"$err"). $ADD_USER_ID was created ($user_id); their enrolment token is kept in $pending (0600) — hand that file over"
+    fi
+    local rescue
+    rescue="$STATE_DIR/add-user-rescue-$ADD_USER_ID-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$work" "$rescue"
+    die "$(printable <"$err"). $ADD_USER_ID was created ($user_id), and $pending could not be written either; their enrolment token is in $rescue/token (0600)"
   fi
   rm -rf "$work"
   log "[add-user] enrolment token for $ADD_USER_ID written to $out (0600, valid 24 hours)"

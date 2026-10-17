@@ -61,6 +61,11 @@ FAKED = (
     "apt-get",
     "pipx",
     "yaadgaar",
+    # ROOT'S HOME COMES FROM `getent passwd 0`, found on PATH — the one place the
+    # script learns it, with no environment override. Real `sudo` applies
+    # `secure_path`, so a `sudo -E` caller cannot steer PATH to a getent of their
+    # own; here the fake prints a passwd line naming the rig's root home.
+    "getent",
 )
 PINNED = {"kind": "v0.32.0", "kubectl": "v1.36.1", "helm": "v4.3.0"}
 
@@ -78,7 +83,7 @@ def client_version() -> str:
 HOST_TOOLS = (
     "bash", "python3", "jq", "awk", "sed", "grep", "base64", "sha256sum", "tar", "install",
     "mktemp", "find", "date", "tee", "head", "tail", "cat", "mv", "rm", "mkdir", "chmod",
-    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc", "stat", "getent", "cut",
+    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc", "stat", "cut", "cmp",
 )
 
 
@@ -163,7 +168,10 @@ class Rig:
         for name in PINNED:
             (self.root / "bin" / name).symlink_to(FAKE)
         (self.root / "etc" / "hosts").write_text("127.0.0.1 localhost\n")
-        self.rules = version_rules() + sysctl_rules() + [{"cmd": "id", "match": ["-u"], "stdout": "0\n"}]
+        self.rules = version_rules() + sysctl_rules() + [
+            {"cmd": "id", "match": ["-u"], "stdout": "0\n"},
+            {"cmd": "getent", "match": ["passwd", "0"], "stdout": f"root:x:0:0:root:{self.root / 'roothome'}:/bin/bash\n"},
+        ]
 
     @property
     def state(self) -> Path:
@@ -199,8 +207,6 @@ class Rig:
             "YADGAR_ENROLMENT_FILE": str(self.enrolment_file),
             # --add-user's explicit credential path; the default is root's own.
             "YADGAR_CLIENT_CONFIG": str(self.client_config),
-            # Stands in for uid 0's home from the password database.
-            "YADGAR_ROOT_HOME": str(self.root_home),
             "YADGAR_POLL_SECONDS": "0",
             "YADGAR_PROBE_ATTEMPTS": "1",
         }
@@ -1575,10 +1581,25 @@ def test_the_root_side_client_never_follows_the_callers_environment(rig: Rig) ->
     rig.rules = [password_stdin_rule(), {"cmd": "yaadgaar", "match": ["verify"], "exit": 1}] + \
         full_rules(bootstrap, enrolment) + rig.rules
     caller = rig.root / "caller"
+    # A decoy yaadgaar where a caller-chosen home would put it.
+    (caller / "bin").mkdir(parents=True)
+    (caller / "bin" / "yaadgaar").symlink_to(FAKE)
+    (caller / ".local" / "bin").mkdir(parents=True)
+    (caller / ".local" / "bin" / "yaadgaar").symlink_to(FAKE)
+    redirects = {k: str(caller / k.lower()) for k in (
+        "CURL_HOME", "KUBECTL_EXTERNAL_DIFF", "HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
+        "HELM_PLUGINS", "HELM_REGISTRY_CONFIG", "HELM_REPOSITORY_CONFIG")}
     proc = rig.main("--with-client", HOME=str(caller), XDG_CONFIG_HOME=str(caller / "xdg"),
                     XDG_DATA_HOME=str(caller / "data"), YADGAR_CONFIG_DIR=str(caller / "cfg"),
-                    PIPX_HOME=str(caller / "pipx"), PIPX_BIN_DIR=str(caller / "bin"))
+                    PIPX_HOME=str(caller / "pipx"), PIPX_BIN_DIR=str(caller / "bin"),
+                    YADGAR_ROOT_HOME=str(caller), **redirects)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+    # curl, kubectl and helm see none of the caller's redirects, and every curl
+    # starts with `-q`, the only way to stop it reading a .curlrc.
+    for c in rig.calls("curl") + rig.calls("kubectl") + rig.calls("helm"):
+        for k in redirects:
+            assert c["env"][k] is None, (k, c)
+    assert rig.calls("curl") and all(c["argv"][0] == "-q" for c in rig.calls("curl"))
     runs = rig.calls("yaadgaar")
     assert {tuple(c["argv"][:1]) for c in runs} >= {("enrol",), ("verify",), ("install",)}
     root_bin = str(rig.root_home / ".local" / "bin" / "yaadgaar")
@@ -1596,9 +1617,10 @@ def test_a_failed_enrol_with_a_credential_already_stored_names_the_recovery(rig:
     """The crash window between a successful enrol and the marker: the next run's
     enrol is refused (the token is spent), and the message says how to record it."""
     bootstrap, enrolment = new_secrets()
-    cfg = rig.root_home / ".config" / "yadgar" / "config.json"
+    cfg = rig.client_config
     cfg.parent.mkdir(parents=True)
     cfg.write_text(json.dumps({"gateway": GATEWAY + "/", "token": "x"}))
+    cfg.chmod(0o600)
     rig.rules = [
         password_stdin_rule(),
         {"cmd": "yaadgaar", "match": ["enrol", "--token-file"], "exit": 1,
@@ -1690,3 +1712,70 @@ def test_add_user_strips_control_characters_from_the_gateways_answer(rig: Rig) -
     assert proc.returncode != 0
     assert "\x1b" not in proc.stderr and "bad" in proc.stderr
     assert "\nforged line" not in proc.stderr
+
+
+
+# ─── re-review of #47 @f46d5aa ──────────────────────────────────────────────────
+
+
+def test_a_callers_curlrc_is_never_read(rig: Rig) -> None:
+    """curl reads $CURL_HOME/.curlrc unless `-q` is its FIRST argument. Run with the
+    real curl: the .curlrc asks for a trace, and no trace may appear."""
+    real = shutil.which("curl")
+    assert real, "curl is not installed"
+    (rig.root / "fakebin" / "curl").unlink()
+    (rig.root / "fakebin" / "curl").symlink_to(real)
+    caller = rig.root / "caller"
+    caller.mkdir()
+    trace = rig.root / "trace.txt"
+    (caller / ".curlrc").write_text(f'trace = "{trace}"\n')
+    (rig.root / "body").write_text("{}")
+    snippet = (f'pin_root_environment; CA_FILE=/dev/null; GATEWAY_URL=https://127.0.0.1:9; '
+               f'gateway_post x "{rig.root / "body"}" "{rig.root / "out"}" "h: v" >/dev/null')
+    proc = rig.run(snippet, CURL_HOME=str(caller))
+    assert proc.returncode == 0, proc.stderr
+    assert not trace.exists(), "curl read the caller's .curlrc"
+    # POSITIVE CONTROL: the same curl, without -q and with CURL_HOME kept, does write it.
+    subprocess.run([real, "-sS", "-o", "/dev/null", "--max-time", "2", "https://127.0.0.1:9/"],
+                   env={"CURL_HOME": str(caller), "PATH": os.environ["PATH"]}, capture_output=True)
+    assert trace.exists(), "the control did not produce a trace, so the test proves nothing"
+
+
+def test_add_user_never_follows_a_symlink_in_the_parent_path(rig: Rig) -> None:
+    """realpath + O_NOFOLLOW guarded only the last component: `<dir>/lnk/new`
+    wrote through `lnk`."""
+    add_user_rig(rig)
+    real = rig.root / "realdir"
+    real.mkdir()
+    (rig.root / "lnk").symlink_to(real)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(rig.root / "lnk" / "dave.token"))
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+    assert list(real.iterdir()) == []
+    assert rig.calls("curl") == []
+
+
+def test_a_late_write_failure_keeps_the_token_and_the_rerun_names_it(rig: Rig) -> None:
+    """The user exists once create-user answers; their only token must survive a
+    failed write, and a rerun must point at it rather than re-issue."""
+    bearer, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "dave.token"
+    # Something creates the out file while the requests are in flight.
+    rig.rules = [{"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": "200",
+                  "o_content": json.dumps({"token": enrolment, "enrolment_id": "e9"}),
+                  "touch": str(out)}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert proc.returncode != 0
+    pending = rig.state / "users" / "dave@example.com.token.pending"
+    assert pending.read_text().strip() == enrolment
+    assert stat.S_IMODE(pending.stat().st_mode) == 0o600
+    assert str(pending) in proc.stderr
+    assert out.read_text() == "", "the racing file was overwritten"
+    assert not list(rig.state.glob("tmp.*")), "temporary state left behind"
+    assert_absent(rig, proc, bearer, enrolment)
+
+    rig.reset_calls()
+    again = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert again.returncode != 0
+    assert str(pending) in again.stderr and "resets their password" in again.stderr
+    assert rig.calls("curl") == []
