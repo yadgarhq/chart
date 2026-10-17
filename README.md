@@ -90,6 +90,23 @@ secret, and it only addresses the kind cluster, through a kubeconfig of its own 
 `/var/lib/yadgar-bootstrap`. The header of the script lists the environment
 variables that change its defaults.
 
+With `--with-client` it also installs `yaadgaar` at the version in
+`bootstrap/tools.lock` and enrols root as that admin. `enrol` stores the
+credential, so no `login` follows. The redeemed token is renamed to
+`.redeemed-<time>` and is never offered again. When Claude Code (`claude`) is
+installed, it then runs `yaadgaar install`; otherwise it prints that command to
+run later. After that, `kind-up.sh --add-user <username> [--display-name NAME]
+[--out FILE] [--force]` creates one more ordinary user (never an admin). It acts
+only with root's own client credential, which must be owned by root and mode
+0600, and never with the bootstrap token. It writes the enrolment token to a new
+0600 file, created exclusively without following a link anywhere in its path,
+in a directory that root owns and no group or other user can write. `--force` replaces only an
+existing regular file. It prints the commands that user runs. It does nothing
+else. Running it again sends no second create-user, and it never re-issues a
+lost token. The whole run uses root's own home from `getent passwd 0`, whatever
+`HOME` or XDG directories `sudo -E` passes on, and only root's own `yaadgaar`.
+It also drops `CURL_HOME`, `KUBECTL_EXTERNAL_DIFF` and every `HELM_*` variable.
+
 ## What the defaults install
 
 **The whole estate** (ADR-0803 step B6): every module, the platform layer

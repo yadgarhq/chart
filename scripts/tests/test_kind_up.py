@@ -61,8 +61,20 @@ FAKED = (
     "apt-get",
     "pipx",
     "yaadgaar",
+    # ROOT'S HOME COMES FROM `getent passwd 0`, found on PATH — the one place the
+    # script learns it, with no environment override. Real `sudo` applies
+    # `secure_path`, so a `sudo -E` caller cannot steer PATH to a getent of their
+    # own; here the fake prints a passwd line naming the rig's root home.
+    "getent",
 )
 PINNED = {"kind": "v0.32.0", "kubectl": "v1.36.1", "helm": "v4.3.0"}
+
+
+def client_version() -> str:
+    """The one `yaadgaar` row of tools.lock: every printed and installed version reads it."""
+    rows = [line.split() for line in LOCK.read_text().splitlines()
+            if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
+    return rows[0][1]
 
 # THE REAL PROGRAMS THE SCRIPT MAY USE, each linked into a directory of its own
 # that is the whole of PATH after the fakes. The host's PATH is never inherited:
@@ -71,7 +83,7 @@ PINNED = {"kind": "v0.32.0", "kubectl": "v1.36.1", "helm": "v4.3.0"}
 HOST_TOOLS = (
     "bash", "python3", "jq", "awk", "sed", "grep", "base64", "sha256sum", "tar", "install",
     "mktemp", "find", "date", "tee", "head", "tail", "cat", "mv", "rm", "mkdir", "chmod",
-    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc",
+    "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc", "stat", "cut", "cmp",
 )
 
 
@@ -143,8 +155,12 @@ class Rig:
     rules: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        for d in ("fake", "fakebin", "bin", "state", "home", "etc"):
+        for d in ("fake", "fakebin", "bin", "state", "home", "etc", "roothome"):
             (self.root / d).mkdir()
+        # ROOT'S OWN yaadgaar, where root's pipx puts it. The one in fakebin, on
+        # PATH, is a decoy the root-side client must never run.
+        (self.root / "roothome" / ".local" / "bin").mkdir(parents=True)
+        (self.root / "roothome" / ".local" / "bin" / "yaadgaar").symlink_to(FAKE)
         for name in FAKED:
             (self.root / "fakebin" / name).symlink_to(FAKE)
         link_host_tools(self.root / "hostbin")
@@ -152,7 +168,10 @@ class Rig:
         for name in PINNED:
             (self.root / "bin" / name).symlink_to(FAKE)
         (self.root / "etc" / "hosts").write_text("127.0.0.1 localhost\n")
-        self.rules = version_rules() + sysctl_rules() + [{"cmd": "id", "match": ["-u"], "stdout": "0\n"}]
+        self.rules = version_rules() + sysctl_rules() + [
+            {"cmd": "id", "match": ["-u"], "stdout": "0\n"},
+            {"cmd": "getent", "match": ["passwd", "0"], "stdout": f"root:x:0:0:root:{self.root / 'roothome'}:/bin/bash\n"},
+        ]
 
     @property
     def state(self) -> Path:
@@ -166,6 +185,14 @@ class Rig:
     def enrolment_file(self) -> Path:
         return self.root / "home" / "yadgar-enrolment.token"
 
+    @property
+    def root_home(self) -> Path:
+        return self.root / "roothome"
+
+    @property
+    def client_config(self) -> Path:
+        return self.root / "admin-client" / "config.json"
+
     def env(self, **extra: str) -> dict[str, str]:
         env = {
             "PATH": f"{self.root / 'fakebin'}:{self.root / 'hostbin'}",
@@ -178,6 +205,8 @@ class Rig:
             "YADGAR_HOSTS_FILE": str(self.root / "etc" / "hosts"),
             "YADGAR_CA_FILE": str(self.root / "etc" / "yadgar" / "edge-ca.crt"),
             "YADGAR_ENROLMENT_FILE": str(self.enrolment_file),
+            # --add-user's explicit credential path; the default is root's own.
+            "YADGAR_CLIENT_CONFIG": str(self.client_config),
             "YADGAR_POLL_SECONDS": "0",
             "YADGAR_PROBE_ATTEMPTS": "1",
         }
@@ -420,7 +449,9 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
 def test_the_lock_pins_the_client_once() -> None:
     rows = [line.split() for line in LOCK.read_text().splitlines()
             if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
-    assert rows == [["yaadgaar", "0.1.0a8", "pypi"]]
+    # 0.1.3 (yadgar#52), measured 2026-10-17 on the VM to enrol with
+    # `--password-stdin` and to serve MCP; 0.1.2 was the first stable release.
+    assert rows == [["yaadgaar", "0.1.3", "pypi"]]
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
@@ -1000,12 +1031,16 @@ def test_with_client_skips_when_the_client_has_no_password_stdin(rig: Rig) -> No
     assert not [c for c in rig.calls("yaadgaar") if "--password-stdin" in c["argv"]]
 
 
-def test_with_client_enrols_and_logs_in_without_printing_the_password(rig: Rig) -> None:
+def password_stdin_rule() -> dict:
+    return {"cmd": "yaadgaar", "match": ["enrol", "--help"],
+            "stdout": "Usage: yaadgaar enrol [OPTIONS]\n  --token-file <PATH>\n  --password-stdin\n"}
+
+
+def test_with_client_enrols_without_login_and_without_printing_the_password(rig: Rig) -> None:
+    """`enrol` stores the same credential `login` would (yadgar v0.1.2 `login.rs`:
+    both end in `reconcile` + `config.save`), so no login follows it."""
     bootstrap, enrolment = new_secrets()
-    rig.rules = [
-        {"cmd": "yaadgaar", "match": ["enrol", "--help"],
-         "stdout": "Usage: yaadgaar enrol [OPTIONS]\n  --token-file <PATH>\n  --password-stdin\n"},
-    ] + full_rules(bootstrap, enrolment) + rig.rules
+    rig.rules = [password_stdin_rule()] + full_rules(bootstrap, enrolment) + rig.rules
     proc = rig.main("--with-client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -1013,19 +1048,116 @@ def test_with_client_enrols_and_logs_in_without_printing_the_password(rig: Rig) 
     password = pw_file.read_text().strip()
     assert stat.S_IMODE(pw_file.stat().st_mode) == 0o600
     enrol = [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
-    login = [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["login"]]
-    assert len(enrol) == 1 and len(login) == 1
+    assert len(enrol) == 1
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["login"]], "logged in after enrol"
     assert enrol[0]["argv"][enrol[0]["argv"].index("--token-file") + 1] == str(rig.enrolment_file)
-    assert login[0]["argv"][login[0]["argv"].index("--gateway") + 1] == GATEWAY
-    # POSITIVE CONTROL: the password went to both, on stdin.
+    # POSITIVE CONTROL: the password went to enrol, on stdin.
     assert enrol[0]["stdin"].strip() == password
-    assert login[0]["stdin"].strip() == password
     assert_absent(rig, proc, password, bootstrap, enrolment)
+    assert (rig.state / "client-enrolled").exists()
 
     rig.reset_calls()
     again = rig.main("--with-client")
     assert again.returncode == 0, again.stdout + again.stderr
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
+    assert not [c for c in rig.calls("curl") if "/admin/" in " ".join(c["argv"])], "ran the ceremony again"
+
+
+def test_a_redeemed_token_is_retired_and_never_offered_again(rig: Rig) -> None:
+    """Ledger 1544: the spent token used to be logged as "current" by its mtime and
+    handed back in the next steps."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [password_stdin_rule()] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not rig.enrolment_file.exists(), "the redeemed token was left where the next steps point"
+    spent = list(rig.enrolment_file.parent.glob(rig.enrolment_file.name + ".redeemed-*"))
+    assert len(spent) == 1 and spent[0].read_text().strip() == enrolment
+    assert stat.S_IMODE(spent[0].stat().st_mode) == 0o600
+    assert "--token-file" not in proc.stdout.split("done.")[-1], "offered the redeemed token"
+    assert "--add-user" in proc.stdout
+
+    # A rerun WITHOUT --with-client offers nothing either.
+    rig.reset_calls()
+    plain = rig.main()
+    assert plain.returncode == 0, plain.stdout + plain.stderr
+    assert "current enrolment token" not in plain.stdout
+    assert "--token-file" not in plain.stdout
+    assert not [c for c in rig.calls("curl") if "/admin/" in " ".join(c["argv"])]
+    assert_absent(rig, plain, bootstrap, enrolment)
+
+
+def test_a_host_enrolled_by_an_earlier_version_has_its_spent_token_retired(rig: Rig) -> None:
+    """The state a v0.24.17 --with-client run left: both markers and the spent token."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = full_rules(bootstrap, enrolment) + rig.rules
+    assert rig.main().returncode == 0
+    (rig.state / "client-enrolled").touch()
+    (rig.state / "client-logged-in").touch()
+    rig.reset_calls()
+    proc = rig.main()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not rig.enrolment_file.exists()
+    assert list(rig.enrolment_file.parent.glob(rig.enrolment_file.name + ".redeemed-*"))
+    assert "--token-file" not in proc.stdout
+    reads = [c for c in rig.calls("kubectl") if any(".data.token" in a for a in c["argv"])]
+    assert reads == [], "read the bootstrap token although the admin is enrolled here"
+
+
+def test_a_failed_enrol_keeps_the_token_and_writes_no_marker(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        password_stdin_rule(),
+        {"cmd": "yaadgaar", "match": ["enrol", "--token-file"], "stdout": "", "exit": 1},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode != 0, "a failed enrol was reported as success"
+    assert not (rig.state / "client-enrolled").exists()
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    assert stat.S_IMODE(rig.enrolment_file.stat().st_mode) == 0o600
+
+
+def test_claude_absent_skips_install_and_names_the_command(rig: Rig) -> None:
+    """Ledger 1540: never fail because Claude Code is not there."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [password_stdin_rule()] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["install"], ["verify"])]
+    assert "yaadgaar install" in proc.stdout
+
+
+def test_claude_present_runs_install_once_and_a_rerun_writes_nothing(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    (rig.root / "fakebin" / "claude").symlink_to(FAKE)
+    rig.rules = [
+        password_stdin_rule(),
+        # Unregistered on the first check, registered from then on.
+        {"cmd": "yaadgaar", "match": ["verify"], "exit": [1, 0]},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [c["argv"] for c in rig.calls("yaadgaar") if c["argv"][:1] == ["install"]] == [["install"]]
+
+    rig.reset_calls()
+    again = rig.main("--with-client")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["install"]], "installed again"
+
+
+def test_a_failed_agent_install_warns_rather_than_fails(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    (rig.root / "fakebin" / "claude").symlink_to(FAKE)
+    rig.rules = [
+        password_stdin_rule(),
+        # Before the `install` rule: the rig's own path holds the word "install".
+        {"cmd": "yaadgaar", "match": ["enrol", "--token-file"], "exit": 0},
+        {"cmd": "yaadgaar", "match": ["verify"], "exit": 1},
+        {"cmd": "yaadgaar", "match": ["install"], "exit": 1},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "WARNING" in proc.stdout
 
 
 def test_a_stopped_cluster_is_started_not_deleted(rig: Rig) -> None:
@@ -1081,6 +1213,7 @@ def test_it_runs_from_a_release_tarball_with_no_git(rig: Rig, tmp_path: Path) ->
 def test_with_client_pins_the_client_version(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     (rig.root / "fakebin" / "yaadgaar").unlink()
+    (rig.root_home / ".local" / "bin" / "yaadgaar").unlink()
     pipx_bin = rig.root / "pipx-bin"
     pipx_bin.mkdir()
     (pipx_bin / "yaadgaar").symlink_to(FAKE)
@@ -1091,26 +1224,8 @@ def test_with_client_pins_the_client_version(rig: Rig) -> None:
     proc = rig.main("--with-client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
-    assert installs == [["install", "yaadgaar==0.1.0a8"]]
-    assert "pipx install yaadgaar==0.1.0a8" in proc.stdout
-
-
-def test_login_is_retried_but_the_single_use_token_is_never_resent(rig: Rig) -> None:
-    bootstrap, enrolment = new_secrets()
-    rig.rules = [
-        {"cmd": "yaadgaar", "match": ["enrol", "--help"], "stdout": "  --password-stdin\n"},
-        {"cmd": "yaadgaar", "match": ["login", "--username"], "stdout": "", "exit": 1},
-    ] + full_rules(bootstrap, enrolment) + rig.rules
-    first = rig.main("--with-client")
-    assert first.returncode != 0, "a failed login was reported as success"
-    assert len([c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]) == 1
-
-    rig.rules = [r for r in rig.rules if not (r["cmd"] == "yaadgaar" and r.get("match") == ["login", "--username"])]
-    rig.reset_calls()
-    second = rig.main("--with-client")
-    assert second.returncode == 0, second.stdout + second.stderr
-    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
-    assert len([c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["login"]]) == 1
+    assert installs == [["install", f"yaadgaar=={client_version()}"]]
+    assert f"pipx install yaadgaar=={client_version()}" in proc.stdout
 
 
 def test_a_changed_application_is_applied_and_the_difference_logged(rig: Rig) -> None:
@@ -1236,3 +1351,431 @@ def test_a_failed_replace_stops_the_run(rig: Rig) -> None:
     assert proc.returncode != 0, proc.stdout
     assert "REACHED" not in proc.stdout
     assert "written" not in proc.stdout
+
+
+# ─── --add-user ─────────────────────────────────────────────────────────────────
+
+ADMIN_PROJECT = "yadgar/admin"
+DAVE_ID = "yadgar:user:01a14a00-0000-7000-8000-00000000da7e"
+
+
+def add_user_rig(rig: Rig, create_code: str = "200") -> tuple[str, str]:
+    """An install host: the edge CA, and root's enrolled client config holding a bearer."""
+    bearer = secrets.token_urlsafe(48)
+    _, enrolment = new_secrets()
+    ca = rig.root / "etc" / "yadgar" / "edge-ca.crt"
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    cfg = rig.client_config
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"gateway": GATEWAY + "/", "token": bearer, "username": "admin"}))
+    cfg.chmod(0o600)
+    create_body = json.dumps({"user_id": DAVE_ID}) if create_code == "200" else '{"error":"the administrative service is unavailable"}'
+    rig.rules = [
+        {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token", "metadata.uid"], "stdout": "uid-1"},
+        {"cmd": "curl", "match": ["/admin/create-user"], "stdout": create_code, "o_content": create_body},
+        {"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": "200",
+         "o_content": json.dumps({"token": enrolment, "enrolment_id": "e9"})},
+    ] + rig.rules
+    return bearer, enrolment
+
+
+def test_add_user_creates_and_enrols_a_second_user_without_printing_a_secret(rig: Rig) -> None:
+    bearer, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "dave.token"
+    proc = rig.main("--add-user", "dave@example.com", "--display-name", "Dave", "--out", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert out.read_text().strip() == enrolment
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
+    assert urls == [f"{GATEWAY}/admin/create-user", f"{GATEWAY}/admin/issue-enrolment"]
+    curls = rig.calls("curl")
+    assert json.loads(curls[0]["data"]) == {"external_id": "dave@example.com", "display_name": "Dave", "is_admin": False}
+    assert json.loads(curls[1]["data"]) == {"user_id": DAVE_ID}
+    for c in curls:
+        # POSITIVE CONTROL: the admin's bearer reached the gateway, on curl's stdin.
+        assert f"authorization: Bearer {bearer}" in (c["stdin"] or "")
+        assert f"x-yadgar-project: {ADMIN_PROJECT}" in c["argv"]
+        assert "--cacert" in c["argv"]
+    assert_absent(rig, proc, bearer, enrolment)
+    # The user-side commands, at the locked client version.
+    assert f"pipx install yaadgaar=={client_version()}" in proc.stdout
+    assert "yaadgaar enrol --token-file" in proc.stdout
+    assert ".yadgar/project-id" in proc.stdout
+    # It is a helper, not an install: no cluster, Argo or host step ran.
+    assert not rig.calls("helm") and not rig.calls("kind") and not rig.calls("sysctl")
+
+
+def test_add_user_again_never_resends_create_user(rig: Rig) -> None:
+    bearer, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "dave.token"
+    assert rig.main("--add-user", "dave@example.com", "--out", str(out)).returncode == 0
+
+    # A fresh token: nothing is sent at all.
+    rig.reset_calls()
+    again = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert rig.calls("curl") == []
+    assert "yaadgaar enrol --token-file" in again.stdout
+
+    # Token gone: refused. Never a second create-user, and never an enrolment for
+    # a user_id read from the record rather than from this run's create-user.
+    out.unlink()
+    rig.reset_calls()
+    third = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert third.returncode != 0
+    assert "already added" in third.stderr and "resets their password" in third.stderr
+    assert rig.calls("curl") == []
+    assert not out.exists()
+    assert_absent(rig, third, bearer, enrolment)
+
+
+def test_add_user_names_the_opaque_503_of_a_duplicate(rig: Rig) -> None:
+    bearer, _ = add_user_rig(rig, create_code="503")
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "ADR-0927" in proc.stderr and "already exists" in proc.stderr
+    assert not [c for c in rig.calls("curl") if any("/admin/issue-enrolment" in a for a in c["argv"])]
+    assert not (rig.state / "users").exists() or not list((rig.state / "users").iterdir())
+    assert_absent(rig, proc, bearer)
+
+
+def test_add_user_default_out_is_a_root_only_file_beside_the_admin_token(rig: Rig) -> None:
+    _, enrolment = add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = rig.enrolment_file.parent / "yadgar-enrolment-dave@example.com.token"
+    assert out.read_text().strip() == enrolment
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_add_user_needs_an_enrolled_admin_client(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.client_config.unlink()
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "--with-client" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--add-user", "a/b"),
+        ("--add-user",),
+        ("--add-user", "dave", "--with-client"),
+        ("--display-name", "Dave"),
+        ("--out", "/tmp/x"),
+        ("--force",),
+        ("--add-user", "dave", "--display-name", "Dave\nEvil"),
+        ("--add-user", "dave\tx"),
+    ],
+)
+def test_add_user_refuses_bad_arguments(rig: Rig, args: tuple[str, ...]) -> None:
+    add_user_rig(rig)
+    proc = rig.main(*args)
+    assert proc.returncode != 0
+    assert rig.calls("curl") == []
+
+
+def test_add_user_never_reads_the_bootstrap_token_and_creates_no_admin(rig: Rig) -> None:
+    """Its only authority is root's client credential; the bootstrap token is the
+    first admin's alone (ADR-0655)."""
+    add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not [c for c in rig.calls("kubectl") if any(".data.token" in a for a in c["argv"])]
+    for c in rig.calls("curl"):
+        assert "x-yadgar-bootstrap-token" not in (c["stdin"] or "")
+        assert not any("set-user-admin" in a for a in c["argv"])
+        if c["data"] and "external_id" in c["data"]:
+            assert json.loads(c["data"])["is_admin"] is False
+
+
+def test_add_user_ignores_a_home_or_xdg_config_and_reads_only_roots(rig: Rig) -> None:
+    """`sudo -E` keeps the caller's HOME: their credential must never be used."""
+    add_user_rig(rig)
+    for base in (rig.root / "home" / ".config", rig.root / "xdg"):
+        (base / "yadgar").mkdir(parents=True, exist_ok=True)
+        (base / "yadgar" / "config.json").write_text(rig.client_config.read_text())
+        (base / "yadgar" / "config.json").chmod(0o600)
+    proc = rig.main("--add-user", "dave@example.com", YADGAR_CLIENT_CONFIG="",
+                    XDG_CONFIG_HOME=str(rig.root / "xdg"), YADGAR_CONFIG_DIR=str(rig.root / "xdg" / "yadgar"))
+    assert proc.returncode != 0
+    assert f"{rig.root_home}/.config/yadgar/config.json" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_credential_that_is_not_private(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.client_config.chmod(0o644)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "600" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_symlinked_credential(rig: Rig) -> None:
+    add_user_rig(rig)
+    real = rig.client_config.with_name("real.json")
+    rig.client_config.rename(real)
+    rig.client_config.symlink_to(real)
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_client_enrolled_with_another_gateway(rig: Rig) -> None:
+    add_user_rig(rig)
+    cfg = json.loads(rig.client_config.read_text())
+    cfg["gateway"] = "https://elsewhere.example:443/"
+    rig.client_config.write_text(json.dumps(cfg))
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "elsewhere.example" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_never_overwrites_an_existing_file_without_force(rig: Rig) -> None:
+    _, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "precious"
+    out.write_text("keep me\n")
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert proc.returncode != 0
+    assert "--force" in proc.stderr
+    assert out.read_text() == "keep me\n"
+    assert rig.calls("curl") == [], "a user was created whose token had nowhere to go"
+
+    # Nor through a symlink.
+    target = rig.root / "home" / "target"
+    link = rig.root / "home" / "link"
+    link.symlink_to(target)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(link))
+    assert proc.returncode != 0 and not target.exists()
+
+    forced = rig.main("--add-user", "dave@example.com", "--out", str(out), "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert out.read_text().strip() == enrolment
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_add_user_refuses_a_create_user_answer_without_a_user_id(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.rules = [{"cmd": "curl", "match": ["/admin/create-user"], "stdout": "200", "o_content": "{}"}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "user_id" in proc.stderr
+    assert not [c for c in rig.calls("curl") if any("/admin/issue-enrolment" in a for a in c["argv"])]
+
+
+
+# ─── review of #47 @c54f46d ─────────────────────────────────────────────────────
+
+
+def test_the_root_side_client_never_follows_the_callers_environment(rig: Rig) -> None:
+    """`sudo -E` keeps the caller's HOME and XDG dirs: enrol, verify, install and
+    pipx must still run root's own client, writing under root's home only."""
+    bootstrap, enrolment = new_secrets()
+    (rig.root / "fakebin" / "claude").symlink_to(FAKE)
+    rig.rules = [password_stdin_rule(), {"cmd": "yaadgaar", "match": ["verify"], "exit": 1}] + \
+        full_rules(bootstrap, enrolment) + rig.rules
+    caller = rig.root / "caller"
+    # A decoy yaadgaar where a caller-chosen home would put it.
+    (caller / "bin").mkdir(parents=True)
+    (caller / "bin" / "yaadgaar").symlink_to(FAKE)
+    (caller / ".local" / "bin").mkdir(parents=True)
+    (caller / ".local" / "bin" / "yaadgaar").symlink_to(FAKE)
+    redirects = {k: str(caller / k.lower()) for k in (
+        "CURL_HOME", "KUBECTL_EXTERNAL_DIFF", "HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
+        "HELM_PLUGINS", "HELM_REGISTRY_CONFIG", "HELM_REPOSITORY_CONFIG")}
+    proc = rig.main("--with-client", HOME=str(caller), XDG_CONFIG_HOME=str(caller / "xdg"),
+                    XDG_DATA_HOME=str(caller / "data"), YADGAR_CONFIG_DIR=str(caller / "cfg"),
+                    PIPX_HOME=str(caller / "pipx"), PIPX_BIN_DIR=str(caller / "bin"),
+                    YADGAR_ROOT_HOME=str(caller), **redirects)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # curl, kubectl and helm see none of the caller's redirects, and every curl
+    # starts with `-q`, the only way to stop it reading a .curlrc.
+    for c in rig.calls("curl") + rig.calls("kubectl") + rig.calls("helm"):
+        for k in redirects:
+            assert c["env"][k] is None, (k, c)
+    assert rig.calls("curl") and all(c["argv"][0] == "-q" for c in rig.calls("curl"))
+    runs = rig.calls("yaadgaar")
+    assert {tuple(c["argv"][:1]) for c in runs} >= {("enrol",), ("verify",), ("install",)}
+    root_bin = str(rig.root_home / ".local" / "bin" / "yaadgaar")
+    for c in runs + rig.calls("pipx"):
+        if c["cmd"] == "yaadgaar":
+            assert c["path"] == root_bin, f"ran {c['path']}, not root's own yaadgaar"
+        assert c["env"]["HOME"] == str(rig.root_home), c
+        assert c["env"]["XDG_CONFIG_HOME"] is None and c["env"]["XDG_DATA_HOME"] is None, c
+        assert c["env"]["YADGAR_CONFIG_DIR"] is None, c
+        assert c["env"]["PIPX_HOME"] == str(rig.root_home / ".local" / "share" / "pipx"), c
+        assert c["env"]["PIPX_BIN_DIR"] == str(rig.root_home / ".local" / "bin"), c
+
+
+def test_a_failed_enrol_with_a_credential_already_stored_names_the_recovery(rig: Rig) -> None:
+    """The crash window between a successful enrol and the marker: the next run's
+    enrol is refused (the token is spent), and the message says how to record it."""
+    bootstrap, enrolment = new_secrets()
+    cfg = rig.client_config
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"gateway": GATEWAY + "/", "token": "x"}))
+    cfg.chmod(0o600)
+    rig.rules = [
+        password_stdin_rule(),
+        {"cmd": "yaadgaar", "match": ["enrol", "--token-file"], "exit": 1,
+         "stderr": "Error: that enrolment secret was refused; it may already have been used\n"},
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode != 0
+    assert f"touch {rig.state / 'client-enrolled'}" in proc.stderr
+    assert not (rig.state / "client-enrolled").exists()
+
+
+def make_fifo_link(rig: Rig) -> tuple[Path, Path]:
+    fifo = rig.root / "home" / "fifo"
+    os.mkfifo(fifo)
+    link = rig.root / "home" / "out.token"
+    link.symlink_to(fifo)
+    return fifo, link
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_add_user_never_writes_through_a_symlink_to_a_fifo(rig: Rig, force: bool) -> None:
+    """bash 5.3's `set -C` writes through a symlink to a FIFO or device."""
+    bearer, enrolment = add_user_rig(rig)
+    fifo, link = make_fifo_link(rig)
+    args = ["--add-user", "dave@example.com", "--out", str(link)] + (["--force"] if force else [])
+    proc = rig.main(*args)
+    assert proc.returncode != 0
+    assert link.is_symlink() and os.readlink(link) == str(fifo)
+    assert rig.calls("curl") == [], "a user was created whose token had nowhere safe to go"
+    assert_absent(rig, proc, bearer, enrolment)
+
+
+def test_add_user_refuses_a_parent_others_can_write(rig: Rig) -> None:
+    add_user_rig(rig)
+    shared = rig.root / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(shared / "dave.token"))
+    assert proc.returncode != 0
+    assert "777" in proc.stderr
+    assert not (shared / "dave.token").exists()
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_parent_owned_by_another_uid(rig: Rig) -> None:
+    add_user_rig(rig)
+    other = Path("/")
+    assert other.stat().st_uid != os.geteuid(), "run as a uid that does not own /"
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(other / "yadgar-dave.token"))
+    assert proc.returncode != 0
+    assert f"uid {other.stat().st_uid}" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_missing_parent(rig: Rig) -> None:
+    add_user_rig(rig)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(rig.root / "nope" / "dave.token"))
+    assert proc.returncode != 0
+    assert not (rig.root / "nope").exists()
+    assert rig.calls("curl") == []
+
+
+@pytest.mark.parametrize("name", ["a+b", "a b", "dave/x", "da%ve", "é"])
+def test_add_user_refuses_a_username_its_record_key_would_change(rig: Rig, name: str) -> None:
+    """`a+b` and `a_b` once shared one record and one token file."""
+    add_user_rig(rig)
+    proc = rig.main("--add-user", name)
+    assert proc.returncode != 0
+    assert rig.calls("curl") == []
+
+
+def test_add_user_refuses_a_record_for_another_username(rig: Rig) -> None:
+    add_user_rig(rig)
+    users = rig.state / "users"
+    users.mkdir(parents=True)
+    (users / "dave@example.com.json").write_text(json.dumps(
+        {"external_id": "someone-else", "user_id": DAVE_ID, "install_uid": "uid-1"}))
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "someone-else" in proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_add_user_strips_control_characters_from_the_gateways_answer(rig: Rig) -> None:
+    add_user_rig(rig)
+    rig.rules = [{"cmd": "curl", "match": ["/admin/create-user"], "stdout": "500",
+                  "o_content": json.dumps({"error": "bad\u001b[31m red\nforged line"})}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com")
+    assert proc.returncode != 0
+    assert "\x1b" not in proc.stderr and "bad" in proc.stderr
+    assert "\nforged line" not in proc.stderr
+
+
+
+# ─── re-review of #47 @f46d5aa ──────────────────────────────────────────────────
+
+
+def test_a_callers_curlrc_is_never_read(rig: Rig) -> None:
+    """curl reads $CURL_HOME/.curlrc unless `-q` is its FIRST argument. Run with the
+    real curl: the .curlrc asks for a trace, and no trace may appear."""
+    real = shutil.which("curl")
+    assert real, "curl is not installed"
+    (rig.root / "fakebin" / "curl").unlink()
+    (rig.root / "fakebin" / "curl").symlink_to(real)
+    caller = rig.root / "caller"
+    caller.mkdir()
+    trace = rig.root / "trace.txt"
+    (caller / ".curlrc").write_text(f'trace = "{trace}"\n')
+    (rig.root / "body").write_text("{}")
+    snippet = (f'pin_root_environment; CA_FILE=/dev/null; GATEWAY_URL=https://127.0.0.1:9; '
+               f'gateway_post x "{rig.root / "body"}" "{rig.root / "out"}" "h: v" >/dev/null')
+    proc = rig.run(snippet, CURL_HOME=str(caller))
+    assert proc.returncode == 0, proc.stderr
+    assert not trace.exists(), "curl read the caller's .curlrc"
+    # POSITIVE CONTROL: the same curl, without -q and with CURL_HOME kept, does write it.
+    subprocess.run([real, "-sS", "-o", "/dev/null", "--max-time", "2", "https://127.0.0.1:9/"],
+                   env={"CURL_HOME": str(caller), "PATH": os.environ["PATH"]}, capture_output=True)
+    assert trace.exists(), "the control did not produce a trace, so the test proves nothing"
+
+
+def test_add_user_never_follows_a_symlink_in_the_parent_path(rig: Rig) -> None:
+    """realpath + O_NOFOLLOW guarded only the last component: `<dir>/lnk/new`
+    wrote through `lnk`."""
+    add_user_rig(rig)
+    real = rig.root / "realdir"
+    real.mkdir()
+    (rig.root / "lnk").symlink_to(real)
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(rig.root / "lnk" / "dave.token"))
+    assert proc.returncode != 0
+    assert "symlink" in proc.stderr
+    assert list(real.iterdir()) == []
+    assert rig.calls("curl") == []
+
+
+def test_a_late_write_failure_keeps_the_token_and_the_rerun_names_it(rig: Rig) -> None:
+    """The user exists once create-user answers; their only token must survive a
+    failed write, and a rerun must point at it rather than re-issue."""
+    bearer, enrolment = add_user_rig(rig)
+    out = rig.root / "home" / "dave.token"
+    # Something creates the out file while the requests are in flight.
+    rig.rules = [{"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": "200",
+                  "o_content": json.dumps({"token": enrolment, "enrolment_id": "e9"}),
+                  "touch": str(out)}] + rig.rules
+    proc = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert proc.returncode != 0
+    pending = rig.state / "users" / "dave@example.com.token.pending"
+    assert pending.read_text().strip() == enrolment
+    assert stat.S_IMODE(pending.stat().st_mode) == 0o600
+    assert str(pending) in proc.stderr
+    assert out.read_text() == "", "the racing file was overwritten"
+    assert not list(rig.state.glob("tmp.*")), "temporary state left behind"
+    assert_absent(rig, proc, bearer, enrolment)
+
+    rig.reset_calls()
+    again = rig.main("--add-user", "dave@example.com", "--out", str(out))
+    assert again.returncode != 0
+    assert str(pending) in again.stderr and "resets their password" in again.stderr
+    assert rig.calls("curl") == []

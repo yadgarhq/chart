@@ -33,6 +33,13 @@ import sys
 from pathlib import Path
 
 
+ENV_RECORDED = (
+    "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "YADGAR_CONFIG_DIR", "PIPX_HOME", "PIPX_BIN_DIR",
+    "CURL_HOME", "KUBECTL_EXTERNAL_DIFF", "HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
+    "HELM_PLUGINS", "HELM_REGISTRY_CONFIG", "HELM_REPOSITORY_CONFIG",
+)
+
+
 def main() -> int:
     name = Path(sys.argv[0]).name
     argv = sys.argv[1:]
@@ -54,7 +61,11 @@ def main() -> int:
         data = Path(ref[1:]).read_text(encoding="utf-8") if ref.startswith("@") else ref
 
     with (fake_dir / "calls.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"cmd": name, "argv": argv, "stdin": stdin, "data": data}) + "\n")
+        # `path` and `env` let a test prove WHICH binary ran and under which
+        # home: the root-side client must never follow a caller's environment.
+        env = {k: os.environ.get(k) for k in ENV_RECORDED}
+        fh.write(json.dumps({"cmd": name, "path": sys.argv[0], "argv": argv, "stdin": stdin,
+                             "data": data, "env": env}) + "\n")
 
     rules = json.loads((fake_dir / "rules.json").read_text(encoding="utf-8"))
     for index, rule in enumerate(rules):
@@ -76,6 +87,9 @@ def main() -> int:
         # `kind export kubeconfig --kubeconfig <path>` writes its file.
         if "write_arg" in rule and rule["write_arg"] in argv:
             Path(argv[argv.index(rule["write_arg"]) + 1]).write_text(rule["write_content"], encoding="utf-8")
+        # `touch`: create a file as a side effect, the way a racing process would.
+        if "touch" in rule:
+            Path(rule["touch"]).write_text("", encoding="utf-8")
         sys.stdout.write(out)
         sys.stderr.write(rule.get("stderr", ""))
         return int(nth(rule.get("exit", 0)))
