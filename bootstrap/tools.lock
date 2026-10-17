@@ -21,6 +21,9 @@ kubectl v1.36.1 arm64 59f7ee8e477fae658447607dc3c8790ac17a1b016c01c622c12070e969
 helm v4.3.0 amd64 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz linux-amd64/helm
 helm v4.3.0 arm64 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08 https://get.helm.sh/helm-v4.3.0-linux-arm64.tar.gz linux-arm64/helm
 # THE CLIENT, installed as `pipx install yaadgaar==<version>` by --with-client
-# only. 0.1.0a8 is the first release with `--password-stdin` (yadgar#42); an
-# older client is skipped rather than driven through a terminal.
-yaadgaar 0.1.0a8 pypi
+# only, and the version every printed `pipx install` line names. 0.1.0a8 is the
+# first release with `--password-stdin` (yadgar#42); an older client is skipped
+# rather than driven through a terminal — `kind-up.sh` checks `enrol --help` for
+# the flag, whatever this row says. 0.1.2 is the first stable release, measured
+# 2026-10-17 on a fresh VM: `enrol --password-stdin` and `serve` both worked.
+yaadgaar 0.1.2 pypi

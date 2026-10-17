@@ -90,6 +90,16 @@ secret, and it only addresses the kind cluster, through a kubeconfig of its own 
 `/var/lib/yadgar-bootstrap`. The header of the script lists the environment
 variables that change its defaults.
 
+With `--with-client` it also installs `yaadgaar` at the version in
+`bootstrap/tools.lock` and enrols root as that admin. `enrol` stores the
+credential, so no `login` follows. The redeemed token is renamed to
+`.redeemed-<time>` and is never offered again. When Claude Code (`claude`) is
+installed, it then runs `yaadgaar install`; otherwise it prints that command to
+run later. After that, `kind-up.sh --add-user <username> [--display-name NAME]
+[--out FILE]` creates one more user as the enrolled admin and writes their
+enrolment token to a 0600 file. It prints the commands that user runs. It does
+nothing else, and running it again sends no second create-user.
+
 ## What the defaults install
 
 **The whole estate** (ADR-0803 step B6): every module, the platform layer

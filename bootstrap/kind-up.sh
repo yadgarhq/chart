@@ -2,6 +2,12 @@
 # kind-up.sh — the whole of yadgar on one machine, in one command (ADR-0820).
 #
 #   sudo bootstrap/kind-up.sh [--with-client]
+#   sudo bootstrap/kind-up.sh --add-user <username> [--display-name NAME] [--out FILE]
+#
+# --with-client enrols this machine's root as the first admin with `yaadgaar`,
+# and registers yadgar with Claude Code (`yaadgaar install`) when `claude` is
+# installed. --add-user, run after that, creates one more user as that admin and
+# writes their enrolment token to a root-only file; it touches nothing else.
 #
 # Run it from this repository at a release tag — a clone, or the release
 # tarball, which needs no git:
@@ -54,6 +60,8 @@
 #   YADGAR_RUNTIME              podman or docker                (podman if present)
 #   YADGAR_OPERATORS_TIMEOUT    seconds to wait for `operators` (1500)
 #   YADGAR_ESTATE_TIMEOUT       seconds to wait for `yadgar`    (3900)
+#   YADGAR_CONFIG_DIR           the admin client's config, read by --add-user
+#                               (the client's own default: ~/.config/yadgar)
 
 set -euo pipefail
 # NO TRACE, WHATEVER THE CALLER EXPORTED. `SHELLOPTS=xtrace` in the environment
@@ -84,10 +92,22 @@ LOG_FILE="$STATE_DIR/kind-up.log"
 KUBECONFIG_FILE="$STATE_DIR/kubeconfig"
 ADMIN_RECORD="$STATE_DIR/admin.json"
 CLIENT_PASSWORD_FILE="$STATE_DIR/client-password"
-# TWO MARKERS, because the enrolment token is single-use: a login that failed is
-# retried on the next run, and the token is never sent a second time.
+# WRITTEN THE MOMENT `enrol` SUCCEEDS, because the enrolment token is single-use:
+# with the marker present the token is never sent again, never offered again,
+# and the bootstrap token is not read.
 CLIENT_ENROLLED_MARKER="$STATE_DIR/client-enrolled"
+# LEGACY: releases up to v0.24.17 ran `login` after `enrol` and marked it here.
+# `enrol` alone stores the credential (yadgar v0.1.2 `src/login.rs`: `enrol` and
+# `login` both end in `reconcile` and `config.save`), so nothing writes this any
+# more; it is only set aside with the other markers of a replaced installation.
 CLIENT_LOGGED_IN_MARKER="$STATE_DIR/client-logged-in"
+# THE CLIENT'S OWN CONFIG LOCATION (yadgar v0.1.2 `config::base_dir`):
+# YADGAR_CONFIG_DIR, else the XDG config directory. --add-user reads the
+# enrolled admin's bearer token from it.
+CLIENT_CONFIG_FILE="${YADGAR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/yadgar}/config.json"
+# One record per user --add-user created, tied to the installation like
+# $ADMIN_RECORD.
+USERS_DIR="$STATE_DIR/users"
 ARGOCD_VALUES_SHA_FILE="$STATE_DIR/argocd-values.sha256"
 # A DIRECTORY OF ITS OWN: a kind, kubectl or helm the host already has in a
 # shared bin directory is never replaced — never /usr/local/bin.
@@ -127,6 +147,18 @@ ESTATE_TIMEOUT="${YADGAR_ESTATE_TIMEOUT:-3900}"
 POLL_SECONDS="${YADGAR_POLL_SECONDS:-10}"
 PROBE_ATTEMPTS="${YADGAR_PROBE_ATTEMPTS:-12}"
 WITH_CLIENT=0
+ADD_USER=0
+ADD_USER_ID=""
+ADD_USER_DISPLAY_NAME=""
+ADD_USER_OUT=""
+
+# THE WORKSPACE HEADER ON --add-user's ADMIN CALLS. The gateway's bearer admin
+# path attests the caller through the same code as `tools/call`, which requires
+# `x-yadgar-project` and answers 400 without it; the admin verbs then ignore its
+# value (measured 2026-10-17: two different values both created a user). A
+# fixed, recognisable value rather than a real workspace, until the gateway stops
+# asking for one on admin routes (ledger 1545).
+ADMIN_PROJECT_HEADER="yadgar/admin"
 
 # THE ONE 403 THAT MEANS "THIS ADMIN ALREADY HOLDS A CREDENTIAL", verbatim from
 # gateway v0.9.54 `src/http/authority.rs` (`admin_failure`). The gateway sends
@@ -626,15 +658,22 @@ probe_edge() {
 
 # ─── 9. the first administrator ──────────────────────────────────────────────
 
-# POSTs one admin request. The bootstrap token travels in a curl config read
-# from stdin, so it is in no argv and no file. Prints the HTTP status; the body
-# lands in $3, which the caller deletes.
-admin_post() {
-  local path="$1" body_file="$2" out_file="$3" token="$4"
-  printf 'header = "x-yadgar-bootstrap-token: %s"\n' "$token" |
+# POSTs one admin request. The secret header — `name: value` in $4 — travels in
+# a curl config read from stdin, so it is in no argv and no file; any further
+# arguments go to curl as they are. Prints the HTTP status; the body lands in
+# $3, which the caller deletes.
+gateway_post() {
+  local path="$1" body_file="$2" out_file="$3" secret_header="$4"
+  shift 4
+  printf 'header = "%s"\n' "$secret_header" |
     curl --config - -sS -o "$out_file" -w '%{http_code}' --cacert "$CA_FILE" \
-      -H 'content-type: application/json' --data-binary "@$body_file" \
+      -H 'content-type: application/json' "$@" --data-binary "@$body_file" \
       "$GATEWAY_URL/admin/$path" || true
+}
+
+# The bootstrap token's admin request.
+admin_post() {
+  gateway_post "$1" "$2" "$3" "x-yadgar-bootstrap-token: $4"
 }
 
 read_bootstrap_token() {
@@ -663,6 +702,17 @@ set_aside() {
       log "[9/10] set aside $f as $f.stale-$stamp"
     fi
   done
+}
+
+# Moves a redeemed enrolment token out of the path the next steps would name.
+# Renamed, not deleted, so the file keeps its 0600 mode and nothing is lost; it
+# can never be redeemed again. $1 is the step number to log under.
+retire_spent_token() {
+  [[ -e "$ENROLMENT_FILE" ]] || return 0
+  local spent
+  spent="$ENROLMENT_FILE.redeemed-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$ENROLMENT_FILE" "$spent"
+  log "[$1/10] the enrolment token was redeemed by this host's client; moved $ENROLMENT_FILE to $spent"
 }
 
 # Issues an enrolment for the recorded admin and writes the token to a 0600
@@ -736,6 +786,14 @@ ensure_admin() {
     log "[9/10] no admin record ties the enrolment token or client markers to this installation"
     set_aside "$ENROLMENT_FILE" "$CLIENT_ENROLLED_MARKER" "$CLIENT_LOGGED_IN_MARKER"
   fi
+  # ENROLLED HERE BY --with-client: the token was redeemed, so it is neither
+  # "current" — its mtime says nothing about whether it was spent (ledger 1544) —
+  # nor worth a new one, and the bootstrap token is not read.
+  if [[ -s "$ADMIN_RECORD" && -f "$CLIENT_ENROLLED_MARKER" ]]; then
+    log "[9/10] admin $ADMIN_EXTERNAL_ID is enrolled on this host's client; no enrolment token is needed"
+    retire_spent_token 9
+    return
+  fi
   if [[ -s "$ADMIN_RECORD" && -s "$ENROLMENT_FILE" ]] &&
     [[ -n "$(find "$ENROLMENT_FILE" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
     log "[9/10] $ENROLMENT_FILE already holds a current enrolment token for this installation"
@@ -778,17 +836,46 @@ ensure_admin() {
 
 # ─── 10. the client ──────────────────────────────────────────────────────────
 
+# THREE STATES, read from the files rather than from this run's flags, so a plain
+# rerun after --with-client never offers the token --with-client redeemed:
+#   enrolled here   the marker: the credential is in root's client config
+#   token waiting   a token this installation issued, not yet redeemed
+#   neither         the admin enrolled elsewhere and holds a credential
 print_next_steps() {
-  log "[10/10] done. Next, on the machine you work from:"
+  local version
+  version="$(yaadgaar_version)"
+  if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
+    log "[10/10] done. This host's root is enrolled as $ADMIN_EXTERNAL_ID."
+    cat <<EOF | tee -a "$LOG_FILE"
+
+  The credential is in $(dirname "$CLIENT_CONFIG_FILE"), the password in $CLIENT_PASSWORD_FILE (0600).
+  Another person:  sudo $SCRIPT_DIR/kind-up.sh --add-user <username>
+  $ADMIN_EXTERNAL_ID on another machine:
+    pipx install yaadgaar==$version
+    yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <password-file>
+EOF
+  elif [[ -s "$ENROLMENT_FILE" ]]; then
+    log "[10/10] done. Next, on the machine you work from:"
+    cat <<EOF | tee -a "$LOG_FILE"
+
+  pipx install yaadgaar==$version
+  yaadgaar enrol --token-file $ENROLMENT_FILE --password-stdin < <your-password-file>
+
+  enrol sets the password and stores the credential; no login is needed after it.
+  The enrolment token carries the edge CA.
+EOF
+  else
+    log "[10/10] done. $ADMIN_EXTERNAL_ID already holds a credential; on a machine without one:"
+    cat <<EOF | tee -a "$LOG_FILE"
+
+  pipx install yaadgaar==$version
+  yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <your-password-file>
+EOF
+  fi
   cat <<EOF | tee -a "$LOG_FILE"
 
-  pipx install yaadgaar==$(yaadgaar_version)
-  yaadgaar enrol --token-file $ENROLMENT_FILE --password-stdin < <your-password-file>
-  yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <your-password-file>
-
-  The enrolment token carries the edge CA. A machine other than this one also
-  needs $GATEWAY_HOST to resolve to this host, and port $GATEWAY_PORT, which
-  kind publishes on 127.0.0.1 only.
+  A machine other than this one also needs $GATEWAY_HOST to resolve to this
+  host, and port $GATEWAY_PORT, which kind publishes on 127.0.0.1 only.
   The cluster:  KUBECONFIG=$KUBECONFIG_FILE $BIN_DIR/kubectl get applications -n argocd
   kind, kubectl and helm are in $BIN_DIR; nothing was put on PATH.
   After a reboot:  $RUNTIME start $CLUSTER_NAME-control-plane
@@ -818,20 +905,57 @@ yaadgaar_bin() {
   [[ -x "$dir/yaadgaar" ]] && printf '%s\n' "$dir/yaadgaar"
 }
 
+# Registers the MCP server and hooks for Claude Code (ledger 1540), ONLY when
+# `claude` is installed for this user — on PATH, or at ~/.local/bin, which
+# sudo's secure_path hides. Without it, the command to run later is printed.
+#
+# WRITE-FREE ON A RERUN: `yaadgaar verify` first, and `install` only when it
+# reports drift; `install` also mints the install id into the client config.
+# A FAILED `install` IS A WARNING, NOT A FAILURE: the estate and the credential
+# are already in place, and it can be run again by hand.
+ensure_agent_registration() {
+  local bin="${1:-}" claude=""
+  claude="$(command -v claude 2>/dev/null || true)"
+  if [[ -z "$claude" && -x "$HOME/.local/bin/claude" ]]; then claude="$HOME/.local/bin/claude"; fi
+  if [[ -z "$claude" ]]; then
+    log "[10/10] Claude Code (claude) is not installed for the user of $HOME; once it is, register yadgar with it: yaadgaar install"
+    return
+  fi
+  if [[ -z "$bin" ]]; then
+    bin="$(yaadgaar_bin)" || {
+      log "[10/10] WARNING: yaadgaar could not be found or installed; register yadgar with Claude Code yourself: yaadgaar install"
+      return
+    }
+  fi
+  if "$bin" verify >/dev/null 2>&1; then
+    log "[10/10] yadgar is already registered with Claude Code ($claude)"
+    return
+  fi
+  log "[10/10] registering yadgar with Claude Code ($claude): yaadgaar install"
+  if ! "$bin" install 2>&1 | tee -a "$LOG_FILE"; then
+    log "[10/10] WARNING: yaadgaar install failed; everything else is in place. Run yaadgaar install again once the cause is fixed"
+  fi
+}
+
 # Opt-in: enrol this machine's root as the first admin with a generated
 # password kept 0600 beside the kubeconfig. Only with a client that reads the
 # password from stdin; an older one is skipped, never driven through a terminal.
 #
+# NO `login` FOLLOWS: `enrol` stores the same credential `login` would — both end
+# in `reconcile` and `config.save` in yadgar v0.1.2 `src/login.rs` — and an
+# enrol-only user made MCP calls on the 2026-10-17 VM run.
+#
 # THE CLIENT'S OUTPUT IS LOGGED, and that was checked rather than assumed: at
 # yadgarhq/yadgar 6076f33 `enrol` prints the gateway, the username and the
-# config directory, and `login` the gateway and directory. Neither prints the
-# token, the password or the credential.
+# config directory. It prints neither the token, the password nor the
+# credential.
 ensure_client() {
-  if [[ -f "$CLIENT_ENROLLED_MARKER" && -f "$CLIENT_LOGGED_IN_MARKER" ]]; then
-    log "[10/10] client already enrolled and logged in as $ADMIN_EXTERNAL_ID"
+  if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
+    log "[10/10] client already enrolled as $ADMIN_EXTERNAL_ID"
+    ensure_agent_registration
     return
   fi
-  if [[ ! -f "$CLIENT_ENROLLED_MARKER" && ! -s "$ENROLMENT_FILE" ]]; then
+  if [[ ! -s "$ENROLMENT_FILE" ]]; then
     log "[10/10] --with-client: no enrolment token to redeem; skipped"
     return
   fi
@@ -850,14 +974,126 @@ ensure_client() {
       head -c 24 /dev/urandom | base64 >"$CLIENT_PASSWORD_FILE"
     )
   fi
-  if [[ ! -f "$CLIENT_ENROLLED_MARKER" ]]; then
-    log "[10/10] enrolling $ADMIN_EXTERNAL_ID with yaadgaar; password in $CLIENT_PASSWORD_FILE (0600)"
-    "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
-    touch "$CLIENT_ENROLLED_MARKER"
+  log "[10/10] enrolling $ADMIN_EXTERNAL_ID with yaadgaar; password in $CLIENT_PASSWORD_FILE (0600)"
+  "$bin" enrol --token-file "$ENROLMENT_FILE" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
+  # The marker before the rename: a run that stops between them must not send
+  # the spent token again.
+  touch "$CLIENT_ENROLLED_MARKER"
+  retire_spent_token 10
+  ensure_agent_registration "$bin"
+}
+
+# ─── --add-user ──────────────────────────────────────────────────────────────
+
+# One admin request as the enrolled admin: the bearer goes on curl's stdin like
+# the bootstrap token, the workspace header on argv (it is no secret).
+user_admin_post() {
+  gateway_post "$1" "$2" "$3" "authorization: Bearer $4" -H "x-yadgar-project: $ADMIN_PROJECT_HEADER"
+}
+
+# Dies with the gateway's answer to one --add-user request.
+add_user_refused() {
+  local verb="$1" code="$2" out="$3" answer hint=""
+  answer="$(jq -r '.error // empty' "$out" 2>/dev/null || true)"
+  rm -f "$out"
+  case "$code" in
+    401) hint=" The admin credential in $CLIENT_CONFIG_FILE was refused; renew it: yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < $CLIENT_PASSWORD_FILE" ;;
+    503) [[ "$verb" == create-user ]] &&
+      hint=" The gateway answers a username that already exists with this same opaque 503 as an outage, by design (ADR-0927). If $ADD_USER_ID was added before without a record in $USERS_DIR, choose another username; otherwise check the estate is healthy." ;;
+  esac
+  die "$verb answered ${code:-nothing}: ${answer:-no body}.$hint"
+}
+
+# What the new user runs. The token is never printed: the file is handed over.
+print_add_user_steps() {
+  local out="$1"
+  cat <<EOF | tee -a "$LOG_FILE"
+
+  Hand $out to $ADD_USER_ID over a private channel; it is single-use and
+  valid 24 hours. For a Unix user <user> on this host:
+    install -o <user> -m 0600 $out ~<user>/yadgar-enrolment.token
+  Then, as that user:
+    pipx install yaadgaar==$(yaadgaar_version)
+    yaadgaar enrol --token-file ~/yadgar-enrolment.token --password-stdin < <password-file>
+    mkdir -p .yadgar && echo <owner>/<repo> > .yadgar/project-id   # in each repository
+    yaadgaar install                                                # when Claude Code is installed
+  enrol sets the password and stores the credential; no login is needed after it.
+  A machine other than this one also needs $GATEWAY_HOST to resolve to this host,
+  and port $GATEWAY_PORT.
+EOF
+}
+
+# Creates one more user as the admin enrolled on this host, and writes their
+# enrolment token to a 0600 file (ledger 1540).
+#
+# IDEMPOTENCY IS LOCAL, for $ADMIN_RECORD's reason: a duplicate username comes
+# back as the gateway's opaque 503 (ADR-0927) and there is no lookup route. So
+# the user id is recorded the moment create-user answers 200, tied to the
+# installation, and create-user is sent at most once per user and installation.
+#   record, token younger than 23h → nothing is sent; the steps are printed
+#   record, no fresh token         → a new enrolment for the recorded user
+#   no record                      → create-user, record, issue-enrolment
+add_user() {
+  local safe out record uid recorded_uid gateway bearer work code user_id
+  [[ -n "$ADD_USER_ID" && "$ADD_USER_ID" != */* && ! "$ADD_USER_ID" =~ [[:space:][:cntrl:]] ]] ||
+    die "--add-user takes a username with no '/' and no whitespace"
+  safe="${ADD_USER_ID//[^A-Za-z0-9._@-]/_}"
+  out="${ADD_USER_OUT:-$(dirname "$ENROLMENT_FILE")/yadgar-enrolment-$safe.token}"
+  record="$USERS_DIR/$safe.json"
+  [[ -s "$CA_FILE" ]] || die "no edge CA at $CA_FILE; run kind-up.sh without --add-user first"
+  [[ -s "$CLIENT_CONFIG_FILE" ]] ||
+    die "no client credential at $CLIENT_CONFIG_FILE. --add-user acts as the admin this host enrolled: run kind-up.sh --with-client first, or set YADGAR_CONFIG_DIR to an enrolled admin's yaadgaar config directory"
+  gateway="$(jq -r '.gateway // empty' "$CLIENT_CONFIG_FILE")"
+  [[ "${gateway%/}" == "${GATEWAY_URL%/}" ]] ||
+    die "$CLIENT_CONFIG_FILE is enrolled with ${gateway:-no gateway}, not $GATEWAY_URL"
+  uid="$(install_uid)"
+  [[ -n "$uid" ]] || die "Secret $ESTATE_NAMESPACE/admin-bootstrap-token has no uid; the estate has not minted it"
+
+  if [[ -s "$record" ]]; then
+    recorded_uid="$(jq -r '.install_uid // empty' "$record")"
+    if [[ "$recorded_uid" != "$uid" ]]; then
+      log "[add-user] $record belongs to another installation (${recorded_uid:-unrecorded}, this one is $uid)"
+      set_aside "$record" "$out"
+    fi
   fi
-  log "[10/10] logging in as $ADMIN_EXTERNAL_ID"
-  "$bin" login --gateway "$GATEWAY_URL" --username "$ADMIN_EXTERNAL_ID" --password-stdin <"$CLIENT_PASSWORD_FILE" 2>&1 | tee -a "$LOG_FILE"
-  touch "$CLIENT_LOGGED_IN_MARKER"
+  if [[ -s "$record" && -s "$out" ]] &&
+    [[ -n "$(find "$out" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
+    log "[add-user] $ADD_USER_ID already added ($(jq -r '.user_id' "$record")); $out holds an enrolment token younger than 23 hours"
+    print_add_user_steps "$out"
+    return
+  fi
+
+  bearer="$(jq -r '.token // empty' "$CLIENT_CONFIG_FILE")"
+  [[ "$bearer" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die "no usable credential in $CLIENT_CONFIG_FILE"
+  install -d -m 0700 "$USERS_DIR"
+  work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
+  if [[ -s "$record" ]]; then
+    user_id="$(jq -r '.user_id' "$record")"
+    log "[add-user] $ADD_USER_ID already created ($user_id), and $out is missing or older than 23 hours: issuing a new enrolment. If $ADD_USER_ID has already enrolled, redeeming it sets a new password"
+  else
+    log "[add-user] creating $ADD_USER_ID"
+    jq -n --arg e "$ADD_USER_ID" --arg d "${ADD_USER_DISPLAY_NAME:-$ADD_USER_ID}" \
+      '{external_id: $e, display_name: $d, is_admin: false}' >"$work/body"
+    code="$(user_admin_post create-user "$work/body" "$work/out" "$bearer")"
+    [[ "$code" == 200 ]] || add_user_refused create-user "$code" "$work/out"
+    user_id="$(jq -r '.user_id // empty' "$work/out")"
+    [[ -n "$user_id" ]] || die "create-user answered 200 with no user_id"
+    jq -n --arg e "$ADD_USER_ID" --arg u "$user_id" --arg i "$uid" \
+      '{external_id: $e, user_id: $u, install_uid: $i}' >"$record.tmp"
+    mv "$record.tmp" "$record"
+    log "[add-user] created $ADD_USER_ID as $user_id"
+  fi
+  jq -n --arg u "$user_id" '{user_id: $u}' >"$work/body"
+  code="$(user_admin_post issue-enrolment "$work/body" "$work/out" "$bearer")"
+  bearer=""
+  [[ "$code" == 200 ]] || add_user_refused issue-enrolment "$code" "$work/out"
+  jq -r '.token // empty' "$work/out" >"$work/token"
+  [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
+  mkdir -p "$(dirname "$out")"
+  install -m 0600 "$work/token" "$out"
+  rm -rf "$work"
+  log "[add-user] enrolment token for $ADD_USER_ID written to $out (0600, valid 24 hours)"
+  print_add_user_steps "$out"
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -867,24 +1103,50 @@ usage() {
 }
 
 main() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
+  local args=("$@") display_set=0 out_set=0
+  while (($#)); do
+    case "$1" in
       --with-client) WITH_CLIENT=1 ;;
+      --add-user | --display-name | --out)
+        if (($# < 2)) || [[ "$2" == --* ]]; then
+          printf '%s needs a value\n' "$1" >&2
+          return 2
+        fi
+        case "$1" in
+          --add-user) ADD_USER=1 ADD_USER_ID="$2" ;;
+          --display-name) display_set=1 ADD_USER_DISPLAY_NAME="$2" ;;
+          --out) out_set=1 ADD_USER_OUT="$2" ;;
+        esac
+        shift
+        ;;
       -h | --help)
         usage
         return 0
         ;;
       *)
-        printf 'unknown argument: %s\n' "$arg" >&2
+        printf 'unknown argument: %s\n' "$1" >&2
         return 2
         ;;
     esac
+    shift
   done
-  require_root "$@"
+  if ((!ADD_USER && (display_set || out_set))); then
+    printf -- '--display-name and --out belong to --add-user\n' >&2
+    return 2
+  fi
+  if ((ADD_USER && WITH_CLIENT)); then
+    printf -- '--add-user runs on an installed host, on its own; run --with-client first\n' >&2
+    return 2
+  fi
+  require_root "${args[@]}"
   ensure_state_dir
   trap 'rm -rf "$STATE_DIR"/tmp.*' EXIT
   load_examples
+  if ((ADD_USER)); then
+    log "kind-up --add-user: edge $GATEWAY_URL, log $LOG_FILE"
+    add_user
+    return
+  fi
   log "kind-up: cluster $CLUSTER_NAME, edge $GATEWAY_URL, log $LOG_FILE"
 
   check_clock
