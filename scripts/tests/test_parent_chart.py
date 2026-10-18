@@ -6336,6 +6336,35 @@ def test_a_source_that_drops_or_changes_the_registry_reddens_the_agreement_gate(
     assert len(failures) == 1 and "different registries" in failures[0], failures
 
 
+def defaulted_registry_keys(defaults: dict) -> list[str]:
+    """Every `SEEDER_REGISTRY_KEYS` leaf `chart/values.yaml` states. PURE.
+
+    `default_disagreements` skips `ADOPTER_ONLY_KEYS` and `unstated_defaults` is
+    satisfied because the example states them, so neither K1 walk can see a
+    registry DEFAULT. ADR-0705 gives the registry none: a parent default would
+    seed every adopter with this placeholder organisation, and the sync archives
+    whatever the declaration omits (ADR-0934).
+    """
+    return [
+        f"`{path}` is stated in `chart/values.yaml`; the registry is the adopter's and has no default"
+        for path in sorted(SEEDER_REGISTRY_KEYS)
+        if value_at(defaults, path) is not _ABSENT
+    ]
+
+
+def test_the_parent_defaults_state_no_seeder_registry() -> None:
+    assert defaulted_registry_keys(yaml.safe_load((CHART / "values.yaml").read_text()) or {}) == []
+
+
+def test_a_registry_default_reddens_the_no_default_gate() -> None:
+    """THE RED CASE: the parent's defaults with the example's registry copied in."""
+    defaults = yaml.safe_load((CHART / "values.yaml").read_text())
+    defaults["seeder"]["registry"] = copied(value_at(yaml.safe_load(ADOPTER_VALUES.read_text()), "seeder.registry"))
+    failures = defaulted_registry_keys(defaults)
+    assert len(failures) == len(SEEDER_REGISTRY_KEYS), failures
+    assert any("`seeder.registry.roots`" in failure for failure in failures), failures
+
+
 A_NEW_PARENT_EXAMPLE = "example/new/application.yaml"
 
 
