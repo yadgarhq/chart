@@ -39,7 +39,10 @@ helm v4.3.0 arm64 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a
 # 0.1.12 (yadgar v0.1.12) adds `login --ca-file` (0.1.9) and `admin
 # issue-enrolment` (0.1.10), which the next steps `kind-up.sh` prints use
 # (ledger 1555), so root's own client can issue an enrolment (ledger 1623). The
-# config directory, `enrol`, `install`, `verify` and `serve` are as in 0.1.6.
+# config directory (~/.config/yaadgaar), `enrol`, `install`, `verify` and `serve`
+# keep their flags and behaviour. Since 0.1.8 a config write never follows a
+# symlink and refuses a config directory that another uid owns (ledger 1553,
+# 1574); `kind-up.sh` creates no config directory, so root's own is root-owned.
 # From PyPI, version 0.1.12 only; this row carries no wheel checksum, and pipx
 # takes PyPI's own hashes. Not yet measured on the VM.
 yaadgaar 0.1.12 pypi
