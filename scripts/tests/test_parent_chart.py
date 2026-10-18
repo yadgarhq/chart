@@ -6840,7 +6840,7 @@ def test_the_seeder_job_verifies_project_and_presents_its_own_leaf(tmp_path: Pat
 def test_without_the_parents_wiring_the_seeder_refuses_naming_the_key(tmp_path: Path, key: str) -> None:
     """THE WIRING'S RED CASE: empty the parent's default and the seeder's own check refuses.
 
-    The seeder chart has no default for either Secret (ADR-0854), so this is what
+    The seeder chart has no default for either Secret (ADR-0705), so this is what
     a declared registry meets if the parent stops stating them.
     """
     values = overlay(

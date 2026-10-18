@@ -193,7 +193,7 @@ task-db:
 
 # ─── the D35 seeder's transport (plans/the-d35-seeder.md stage 6) ────────────
 #
-# TWO SECRET NAMES THE SEEDER CHART REQUIRES AND DOES NOT DEFAULT (ADR-0854),
+# TWO SECRET NAMES THE SEEDER CHART REQUIRES AND DOES NOT DEFAULT (ADR-0705),
 # stated here for the reason `gateway.adminBootstrap.tokenSecret` is: `platform`,
 # which this parent also ships, mints both. `project-tls` is `project`'s serving
 # leaf, and its `ca.crt` is the authority the seeder verifies `project` against —
