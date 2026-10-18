@@ -2397,14 +2397,14 @@ def test_a_server_enforcing_clientauth_with_no_presenter_refuses(
 EMPTY_CALLER_SECRET_CASES = [
     pytest.param(
         "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
-        "gateway:\n  iam:\n    tls:\n      enabled: true\n",
+        "gateway:\n  iam:\n    tls:\n      enabled: true\n  clientCertificate:\n    secret: \"\"\n",
         'iam.tls.clientAuth is "required"',
         "gateway.clientCertificate.secret is \"\"",
         id="iam-from-gateway",
     ),
     pytest.param(
         "iam-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
-        "iam:\n  iamDb:\n    tls:\n      enabled: true\n",
+        "iam:\n  iamDb:\n    tls:\n      enabled: true\n      clientCertSecret: \"\"\n",
         'iam-db.tls.clientAuth is "required"',
         "iam.iamDb.tls.clientCertSecret is \"\"",
         id="iam-db-from-iam",
@@ -2572,16 +2572,32 @@ def test_a_non_boolean_certificates_create_refuses_by_name_instead_of_panicking(
         assert raise_text not in message, f"RAISED instead of refusing: {message}"
 
 
+# THE GATEWAY PRESENTING NOTHING, AS THE ADOPTER VALUES HAD IT BEFORE LEDGER 1616.
+# `example/values.yaml` now names `gateway-client-tls` and holds `iam`, `task` and
+# `project` at `"required"`, so emptying the gateway's leaf there is refused by
+# B-U6 PART 2 before any check below can speak. The cases that need the gateway
+# to present nothing take this as a second `-f`, which puts its three servers
+# back at `"off"` too, the posture those cases were written against.
+GATEWAY_PRESENTS_NOTHING = (
+    'gateway:\n  clientCertificate:\n    secret: ""\n'
+    + "".join(
+        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n' for server in ("iam", "task", "project")
+    )
+)
+
+
+def gateway_presents_nothing(directory: Path) -> Path:
+    return overlay(directory / "gateway-presents-nothing.yaml", GATEWAY_PRESENTS_NOTHING)
+
+
 def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Path) -> None:
     """B-U6 PART 1's OTHER SKIP: an empty Secret name means "presents nothing", not "named wrong".
 
-    `gateway.clientCertificate.secret` defaults to `""`, which the adopter
-    render already carries and already renders clean — this red-adjacent case
-    states the premise explicitly rather than leaving it implied by the
-    default.
+    `gateway.clientCertificate.secret` defaults to `""` in the gateway chart.
+    The adopter values name it since ledger 1616, so `GATEWAY_PRESENTS_NOTHING`
+    restores the empty name, with the three servers it dials back at `"off"`.
     """
-    values = overlay(tmp_path / "an-empty-client-secret.yaml", 'gateway:\n  clientCertificate:\n    secret: ""\n')
-    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)))
     assert documents
 
 
@@ -3076,7 +3092,10 @@ def test_nats_clientauth_required_with_an_empty_presenting_secret_refuses(
     false on both arms — this reaches the refusal on the NEW half alone.
     """
     values = overlay(tmp_path / "nats-required-empty-presenting-secret.yaml", overlay_body)
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm(
+        "template", "yadgar", str(CHART), *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)), "-f", str(values),
+    )
     assert result.returncode != 0, result.stdout
     assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
     assert "gateway.nats.tls.enabled is true" in result.stderr, result.stderr
@@ -3115,7 +3134,10 @@ def test_valkey_clientauth_with_an_empty_presenting_secret_refuses(tmp_path: Pat
         tmp_path / "valkey-clientauth-empty-presenting-secret.yaml",
         "platform:\n  valkey:\n    tls:\n      clientAuth: optional\ngateway:\n  valkey:\n    tls:\n      enabled: true\n",
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm(
+        "template", "yadgar", str(CHART), *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)), "-f", str(values),
+    )
     assert result.returncode != 0, result.stdout
     assert 'platform.valkey.tls.clientAuth is "optional"' in result.stderr, result.stderr
     assert "gateway.valkey.tls.enabled is true" in result.stderr, result.stderr
@@ -4932,6 +4954,32 @@ ADOPTER_ONLY_KEYS = {
     "seeder.registry.roots",
     "seeder.registry.projects",
     "seeder.registry.allowMassArchive",
+    # THE mTLS POSTURE THE SEEDER'S SYNC NEEDS (plans/the-d35-seeder.md stage 8,
+    # ledger 1616). `project` admits `SyncProjects` only from a verified leaf
+    # whose common name is `seeder-caller`, and `project-db` only from
+    # `project-caller` (ADR-0936). A listener at `clientAuth: "off"` never asks
+    # for a client certificate, so both checks see no caller and refuse. The six
+    # `clientAuth` keys above therefore move to `"required"`, the live estate's
+    # posture (`yadgarhq/argocd` `applications/yadgar.yaml`), and each needs the
+    # authority it verifies against and each caller the leaf it presents. These
+    # are the adopter's, like the switches above: a parent default would be a
+    # tenth writer (`MTLS_POSTURE_KEYS` below).
+    "iam.tls.clientCaSecret",
+    "iam.tls.clientCaSecretKey",
+    "iam-db.tls.clientCaSecret",
+    "iam-db.tls.clientCaSecretKey",
+    "task.tls.clientCaSecret",
+    "task.tls.clientCaSecretKey",
+    "task-db.tls.clientCaSecret",
+    "task-db.tls.clientCaSecretKey",
+    "project.tls.clientCaSecret",
+    "project.tls.clientCaSecretKey",
+    "project-db.tls.clientCaSecret",
+    "project-db.tls.clientCaSecretKey",
+    "gateway.clientCertificate.secret",
+    "iam.iamDb.tls.clientCertSecret",
+    "task.taskDb.tls.clientCertSecret",
+    "project.projectDb.tls.clientCertSecret",
 }
 
 # THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
@@ -6178,6 +6226,16 @@ assert len(SIX_TLS_CLIENT_AUTH_KEYS) == 6, sorted(SIX_TLS_CLIENT_AUTH_KEYS)
 SEEDER_REGISTRY_KEYS = {key for key in ADOPTER_ONLY_KEYS if key.startswith("seeder.registry.")}
 assert len(SEEDER_REGISTRY_KEYS) == 3, sorted(SEEDER_REGISTRY_KEYS)
 
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ledger 1616): the six
+# servers' verifying authority and the four callers' client leaves. Subtracted
+# from `TWELVE_TLS_SWITCHES` for the reason `SEEDER_REGISTRY_KEYS` is.
+MTLS_POSTURE_KEYS = {
+    key
+    for key in ADOPTER_ONLY_KEYS
+    if key.endswith((".tls.clientCaSecret", ".tls.clientCaSecretKey", ".tls.clientCertSecret", ".clientCertificate.secret"))
+}
+assert len(MTLS_POSTURE_KEYS) == 16, sorted(MTLS_POSTURE_KEYS)
+
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
 # exception list `default_disagreements` walks past (the two edge-issuer keys,
 # the eight NATS/valkey keys above, the six `clientAuth` keys above, the three
@@ -6187,7 +6245,7 @@ assert len(SEEDER_REGISTRY_KEYS) == 3, sorted(SEEDER_REGISTRY_KEYS)
 TWELVE_TLS_SWITCHES = ADOPTER_ONLY_KEYS - {
     "platform.edgeTLS.issuerRef.name",
     "platform.edgeTLS.issuerRef.kind",
-} - EIGHT_NATS_VALKEY_TLS_KEYS - SIX_TLS_CLIENT_AUTH_KEYS - SEEDER_REGISTRY_KEYS
+} - EIGHT_NATS_VALKEY_TLS_KEYS - SIX_TLS_CLIENT_AUTH_KEYS - SEEDER_REGISTRY_KEYS - MTLS_POSTURE_KEYS
 assert len(TWELVE_TLS_SWITCHES) == 12, sorted(TWELVE_TLS_SWITCHES)
 
 
@@ -6288,6 +6346,45 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
     }
     assert not_quoted_strings == {name: [] for name in sources}, not_quoted_strings
     assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+
+
+def mtls_posture_keys_of(values: dict) -> dict[str, object]:
+    """Every one of `MTLS_POSTURE_KEYS` `values` states, by path, with its value. PURE."""
+    return {path: value_at(values, path) for path in MTLS_POSTURE_KEYS if value_at(values, path) is not _ABSENT}
+
+
+def test_the_mtls_posture_keys_agree_across_every_adopter_source() -> None:
+    """ledger 1616: the sixteen authority and client-leaf keys are PRESENT and the
+    SAME in `example/values.yaml`, `chart/ci/values.yaml` and both parent examples,
+    the twin of the `clientAuth` gate above for the keys `"required"` needs.
+    """
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    stated = {name: mtls_posture_keys_of(values) for name, values in sources.items()}
+    missing = {name: sorted(MTLS_POSTURE_KEYS - keys.keys()) for name, keys in stated.items()}
+    assert missing == {name: [] for name in sources}, missing
+    assert len({frozenset(keys.items()) for keys in stated.values()}) == 1, stated
+
+
+def test_every_adopter_source_states_every_grpc_server_at_required() -> None:
+    """ledger 1616: `"required"`, not merely agreeing. Six `"off"` would agree too, and
+    under `"off"` the seeder's sync is refused at `project`'s `admit`.
+    """
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    not_required = {
+        name: sorted(path for path in SIX_TLS_CLIENT_AUTH_KEYS if value_at(values, path) != "required")
+        for name, values in sources.items()
+    }
+    assert not_required == {name: [] for name in sources}, not_required
 
 
 def seeder_registries_by_source() -> dict[str, object]:
@@ -7100,3 +7197,113 @@ def test_an_empty_declaration_list_reddens_the_seeding_gate(key: str) -> None:
         {"kind": "ConfigMap", "metadata": {"name": "seeder-registry"}, "data": {"registry.json": json.dumps(declaration)}},
     ]
     assert kind_seeding_failures(documents) == [f"ConfigMap `seeder-registry` declares no {key}: {declaration}"]
+
+
+# ── the seeder's sync passes `admit` on both hops (ledger 1616) ──────────────
+#
+# A rendered Job is not a seeded registry. `project` admits `SyncProjects` only
+# from the verified leaf `seeder-caller` and relays it to `project-db`, which
+# admits only `project-caller` (ADR-0936). A listener reads a caller's leaf only
+# when its `LISTEN_TLS_CLIENT_AUTH` verifies, so the kind example must render
+# both servers at `"required"`, the seeder and `project` each mounting the leaf
+# whose common name the next hop checks, and every OTHER caller mounting its own
+# leaf too, or `"required"` on its server refuses that caller's every call.
+
+# (Deployment, the Secret it must mount as its client leaf).
+CALLER_LEAVES = {
+    ("Deployment", "gateway"): "gateway-client-tls",
+    ("Deployment", "iam"): "iam-client-tls",
+    ("Deployment", "task"): "task-client-tls",
+    ("Deployment", "project"): "project-client-tls",
+    ("Job", "seeder"): "seeder-client-tls",
+}
+VERIFYING_SERVERS = ("iam", "iam-db", "task", "task-db", "project", "project-db")
+ADMITTED_COMMON_NAMES = {"seeder-client-tls": "seeder-caller", "project-client-tls": "project-caller"}
+
+
+def pod_spec(documents: list[dict], kind: str, name: str) -> dict | None:
+    for document in documents:
+        if document.get("kind") == kind and (document.get("metadata") or {}).get("name") == name:
+            return document["spec"]["template"]["spec"]
+    return None
+
+
+def admit_failures(documents: list[dict]) -> list[str]:
+    """Why the seeder's sync would be refused at either hop's `admit`, or []. PURE."""
+    failures = []
+    for server in VERIFYING_SERVERS:
+        spec = pod_spec(documents, "Deployment", server)
+        env = {e["name"]: e.get("value") for c in (spec or {}).get("containers", []) for e in c.get("env", [])}
+        if env.get("LISTEN_TLS_CLIENT_AUTH") != "required":
+            failures.append(
+                f"Deployment `{server}` renders LISTEN_TLS_CLIENT_AUTH {env.get('LISTEN_TLS_CLIENT_AUTH')!r}, "
+                f"not \"required\", so it never reads a caller's leaf"
+            )
+    for (kind, name), secret in CALLER_LEAVES.items():
+        spec = pod_spec(documents, kind, name)
+        mounted = {v["secret"]["secretName"] for v in (spec or {}).get("volumes", []) if "secret" in v}
+        if secret not in mounted:
+            failures.append(f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf")
+    issued = {str(d["spec"].get("secretName")): d["spec"].get("commonName") for d in certificates(documents)}
+    for secret, common_name in ADMITTED_COMMON_NAMES.items():
+        if issued.get(secret) != common_name:
+            failures.append(f"`{secret}` is issued with common name {issued.get(secret)!r}, not `{common_name}`")
+    return failures
+
+
+def test_the_kind_example_renders_both_hops_of_the_seeders_sync_admitted(pinned: Path, tmp_path: Path) -> None:
+    """THE OFFLINE PROOF (ADR-0881's shape) that the sync can pass `admit` end to end."""
+    assert admit_failures(kind_render(pinned, kind_values(), tmp_path / "kind")) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "named"),
+    [
+        ("project.tls.clientAuth", "off", "Deployment `project` renders LISTEN_TLS_CLIENT_AUTH 'off'"),
+        ("project-db.tls.clientAuth", "off", "Deployment `project-db` renders LISTEN_TLS_CLIENT_AUTH 'off'"),
+    ],
+    ids=["project-off", "project-db-off"],
+)
+def test_the_kind_example_back_at_the_old_posture_reddens_the_admit_gate(
+    pinned: Path, tmp_path: Path, path: str, value: str, named: str
+) -> None:
+    """THE RED CASES: one hop back at `"off"` (the posture before ledger 1616), or
+    `project`'s leaf unnamed. The `"off"` cases also drop that server's
+    `clientCaSecret` and `clientCaSecretKey`, exactly the pre-1616 shape.
+    """
+    values_object = kind_values()
+    *parents, leaf = path.split(".")
+    node = values_object
+    for key in parents:
+        node = node[key]
+    node[leaf] = value
+    if value == "off":
+        node.pop("clientCaSecret", None)
+        node.pop("clientCaSecretKey", None)
+    failures = admit_failures(kind_render(pinned, values_object, tmp_path / "kind-red"))
+    assert any(named in failure for failure in failures), failures
+
+
+def test_the_kind_example_without_projects_leaf_is_refused_at_render(pinned: Path, tmp_path: Path) -> None:
+    """`project` naming no leaf while `project-db` requires one is refused by the
+    parent itself (B-U6 PART 2), before the admit gate is ever reached.
+    """
+    values_object = kind_values()
+    values_object["project"]["projectDb"]["tls"]["clientCertSecret"] = ""
+    destination = tmp_path / "kind-no-project-leaf"
+    destination.mkdir()
+    result = example_render(pinned, values_object, destination)
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "project.projectDb.tls.clientCertSecret" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(("kind", "name"), list(CALLER_LEAVES), ids=[name for _, name in CALLER_LEAVES])
+def test_a_caller_with_its_leaf_unmounted_reddens_the_admit_gate(
+    pinned: Path, tmp_path: Path, kind: str, name: str
+) -> None:
+    """THE MOUNT HALF'S RED CASES: the green render with one caller's leaf volume removed."""
+    documents = kind_render(pinned, kind_values(), tmp_path / "kind")
+    secret = CALLER_LEAVES[(kind, name)]
+    spec = pod_spec(documents, kind, name)
+    spec["volumes"] = [v for v in spec["volumes"] if (v.get("secret") or {}).get("secretName") != secret]
+    assert admit_failures(documents) == [f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf"]

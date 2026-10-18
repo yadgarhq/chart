@@ -267,6 +267,10 @@ platform:
 #   platform.valkey.tls.{enabled,clientAuth,plaintext}  (the cache itself)
 
 gateway:
+  # ledger 1616: the leaf the gateway presents on its three dials, which
+  # `iam`, `task` and `project` require.
+  clientCertificate:
+    secret: gateway-client-tls
   adminBootstrap:
     # THE SECRET THE GATEWAY MOUNTS, and the same name the bootstrap Job mints
     # above. EMPTY IS THE GATEWAY CHART'S DEFAULT (this parent's default names it)
@@ -305,15 +309,20 @@ iam:
   # chart's section.
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925): the off posture of a
-    # key this chart cannot default for you either, same reason as the
-    # twelve switches above. No binary in this repository enforces it yet
-    # (B-U5 is the contract); the render check refuses any value but this
-    # one until then.
-    clientAuth: "off"
+    # ledger 1616: REQUIRED, the live estate's posture (`yadgarhq/argocd`
+    # `applications/yadgar.yaml`). The listener verifies every caller's leaf
+    # against `ca.crt` in its own serving Secret, which the internal CA that
+    # issued every client leaf also signed. `"off"` would never read a caller's
+    # leaf, and the seeder's sync needs `project` to read `seeder-caller` and
+    # `project-db` to read `project-caller` (ADR-0936). Each caller below names
+    # the leaf `platform` mints for it.
+    clientAuth: "required"
+    clientCaSecret: iam-tls
+    clientCaSecretKey: ca.crt
   iamDb:
     tls:
       enabled: true
+      clientCertSecret: iam-client-tls
   # THE BROKER DIAL THIS SERVICE MAKES, stated at the off posture for the
   # same reason gateway's is above.
   nats:
@@ -324,21 +333,27 @@ project:
     enabled: true
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
-    clientAuth: "off"
+    # ledger 1616: required, as on the live estate. See iam's comment above.
+    clientAuth: "required"
+    clientCaSecret: project-tls
+    clientCaSecretKey: ca.crt
   projectDb:
     tls:
       enabled: true
+      clientCertSecret: project-client-tls
 task:
   autoscaling:
     enabled: true
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
-    clientAuth: "off"
+    # ledger 1616: required, as on the live estate. See iam's comment above.
+    clientAuth: "required"
+    clientCaSecret: task-tls
+    clientCaSecretKey: ca.crt
   taskDb:
     tls:
       enabled: true
+      clientCertSecret: task-client-tls
 
 # THE THREE DATABASE MODULES. `database.create` renders a MariaDB CR for
 # mariadb-operator to reconcile; set it false in any module whose database you run
@@ -351,8 +366,10 @@ iam-db:
   # WHAT THIS SERVICE SERVES, iam's own `iamDb.tls.enabled` dial above.
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
-    clientAuth: "off"
+    # ledger 1616: required, as on the live estate. See iam's comment above.
+    clientAuth: "required"
+    clientCaSecret: iam-db-tls
+    clientCaSecretKey: ca.crt
 project-db:
   autoscaling:
     enabled: true
@@ -360,8 +377,10 @@ project-db:
     create: true
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
-    clientAuth: "off"
+    # ledger 1616: required, as on the live estate. See iam's comment above.
+    clientAuth: "required"
+    clientCaSecret: project-db-tls
+    clientCaSecretKey: ca.crt
 task-db:
   autoscaling:
     enabled: true
@@ -369,8 +388,10 @@ task-db:
     create: true
   tls:
     enabled: true
-    # B-U5E EXPAND (K-8's "fixture" step, ledger 925). See iam's comment above.
-    clientAuth: "off"
+    # ledger 1616: required, as on the live estate. See iam's comment above.
+    clientAuth: "required"
+    clientCaSecret: task-db-tls
+    clientCaSecretKey: ca.crt
 
 # THE D35 SEEDER, which writes your organisation's project registry through
 # `project` as one Argo-synced Job (plans/the-d35-seeder.md). These two names are
