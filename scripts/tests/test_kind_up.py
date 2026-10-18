@@ -1419,7 +1419,10 @@ def test_with_client_pins_the_client_version(rig: Rig) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
     assert installs == [["install", f"yaadgaar=={client_version()}"]]
-    assert f"pipx install yaadgaar=={client_version()}" in proc.stdout
+    # The steps for ANOTHER machine name a client new enough for `login --ca-file`
+    # and `admin issue-enrolment` (0.1.9, 0.1.10), which the locked version lacks
+    # (ledger 1555); root's own install above stays at the lock.
+    assert "pipx install 'yaadgaar>=0.1.10'" in proc.stdout
 
 
 def test_a_changed_application_is_applied_and_the_difference_logged(rig: Rig) -> None:
@@ -2184,3 +2187,143 @@ def test_a_late_write_failure_keeps_the_token_and_the_rerun_names_it(rig: Rig) -
     assert again.returncode != 0
     assert str(pending) in again.stderr and "resets their password" in again.stderr
     assert rig.calls("curl") == []
+
+
+# ─── next steps for another machine (ledger 1555) ──────────────────────────────
+#
+# A plain `yaadgaar login` fails against the install's private CA: a machine that
+# never enrolled has no anchor for the gateway. The client has `login --ca-file`
+# (yadgar#61, first in 0.1.9) and `admin issue-enrolment` (yadgar#62, first in
+# 0.1.10), and the printed steps must use them.
+
+NEXT_STEPS_STATES = {
+    "enrolled here": lambda rig: (rig.state / "client-enrolled").write_text(""),
+    "token waiting": lambda rig: rig.enrolment_file.write_text("TOKEN\n"),
+    "credential held elsewhere": lambda rig: None,
+}
+
+
+def print_next_steps(rig: Rig, state: str) -> str:
+    rig.state.mkdir(exist_ok=True)
+    NEXT_STEPS_STATES[state](rig)
+    proc = rig.run("load_examples; print_next_steps")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout
+
+
+@pytest.mark.parametrize("state", ["enrolled here", "credential held elsewhere"])
+def test_next_steps_for_another_machine_use_the_ca_file_and_issue_enrolment(rig: Rig, state: str) -> None:
+    out = print_next_steps(rig, state)
+    logins = [line for line in out.splitlines() if "yaadgaar login" in line]
+    assert logins, "no login step printed"
+    for line in logins:
+        assert "--ca-file" in line, f"a login that fails against the private CA: {line.strip()}"
+    # Where the operator gets the CA file, and the enrolment route.
+    assert "/etc/yadgar/edge-ca.crt" in out
+    assert "yaadgaar admin issue-enrolment --user-id" in out
+    assert "--revoke-existing" in out
+    # Neither flag exists in the locked 0.1.6: the steps name a client that has them.
+    assert "yaadgaar>=0.1.10" in out
+
+
+def test_next_steps_for_a_waiting_token_still_enrol_without_a_login(rig: Rig) -> None:
+    out = print_next_steps(rig, "token waiting")
+    assert "yaadgaar enrol --token-file" in out
+    assert "yaadgaar login" not in out
+
+
+# ─── root's environment is scrubbed (ledger 1563) ──────────────────────────────
+#
+# Run as root, the script's pipx (`pipx install --force`), apt-get and kind would
+# otherwise inherit whatever the caller exported: PIP_INDEX_URL, PIPX_DEFAULT_PYTHON,
+# APT_CONFIG, DOCKER_HOST and the like, all of which redirect root's installs.
+
+PLANTED = {
+    "PIP_INDEX_URL": "https://evil.example/simple",
+    "PIPX_DEFAULT_PYTHON": "/tmp/evil-python",
+    "PIPX_HOME": "/tmp/evil-pipx",
+    "APT_CONFIG": "/tmp/evil-apt.conf",
+    "DOCKER_HOST": "tcp://evil.example:2375",
+    "CONTAINER_HOST": "tcp://evil.example:2376",
+    "KIND_EXPERIMENTAL_PROVIDER": "podman",
+}
+DOCUMENTED_INPUTS = {
+    "YADGAR_ADMIN_EXTERNAL_ID": "boss",
+    "YADGAR_ADMIN_DISPLAY_NAME": "TheBoss",
+    "YADGAR_RUNTIME": "docker",
+    "YADGAR_OPERATORS_TIMEOUT": "11",
+    "YADGAR_ESTATE_TIMEOUT": "22",
+    "YADGAR_CLIENT_CONFIG": "/root/some/config.json",
+}
+
+
+def rig_path_overrides(rig: Rig) -> set[str]:
+    """The rig's own YADGAR_* path overrides: documented, ignored by root, kept so the notice names them."""
+    return {name for name in rig.env() if name.startswith("YADGAR_")}
+
+
+def run_probe(rig: Rig, body: str, *args: str, **extra: str) -> subprocess.CompletedProcess:
+    """Run a probe script as root. It re-executes itself clean, then runs `body`."""
+    probe = rig.root / "probe.sh"
+    probe.write_text(
+        # The second pass runs before the script is sourced: its PATH is the fixed
+        # one, which on a non-FHS host (NixOS) holds no `dirname` for SCRIPT_DIR.
+        f'if [[ -n "${{YADGAR_KIND_UP_CLEAN:-}}" ]]; then\n{body}\n  exit 0\nfi\n'
+        f'source "{SCRIPT}"\n'
+        'reexec_with_clean_environment "$0" "$@"\n'
+    )
+    (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
+    bash = shutil.which("bash")
+    assert bash, "bash is not installed"
+    return subprocess.run([*root_route(), bash, str(probe), *args], env=rig.env(**extra),
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_root_reexecs_under_a_scrubbed_environment(rig: Rig) -> None:
+    # POSITIVE CONTROL: the planted variables really are in the caller's environment.
+    caller = rig.env(**PLANTED, **DOCUMENTED_INPUTS)
+    for name in PLANTED:
+        assert name in caller
+
+    dump = rig.root / "env.dump"
+    proc = run_probe(rig, f'  declare -x > "{dump}"', "--with-client", **PLANTED, **DOCUMENTED_INPUTS)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert dump.exists(), "the re-executed process never ran"
+    seen = {}
+    for line in dump.read_text().splitlines():
+        m = re.match(r'declare -x (\w+)(?:="(.*)")?$', line)
+        if m:
+            seen[m.group(1)] = m.group(2)
+    for name in PLANTED:
+        assert name not in seen, f"{name} reached root's children"
+    # Nothing but the allowlist, the sentinel and what bash itself sets.
+    allowed = {*DOCUMENTED_INPUTS, *rig_path_overrides(rig), "PATH", "HOME", "TERM", "LANG", "YADGAR_KIND_UP_CLEAN",
+               "PWD", "SHLVL", "OLDPWD", "_"}
+    for name in seen:
+        assert name in allowed, f"{name} leaked into root's environment"
+    for name, value in DOCUMENTED_INPUTS.items():
+        assert seen.get(name) == value, f"documented input {name} was dropped"
+    assert seen["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin"
+    assert seen["HOME"] == str(rig.root_home)
+
+
+def test_root_reexec_runs_once_and_keeps_the_arguments(rig: Rig) -> None:
+    dump = rig.root / "args.dump"
+    body = f'  printf "%s\\n" "$@" > "{dump}"'
+    proc = run_probe(rig, body, "--add-user", "a b", "--force")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert dump.read_text().splitlines() == ["--add-user", "a b", "--force"]
+
+
+def test_main_scrubs_first_as_root_and_not_again_once_scrubbed(rig: Rig) -> None:
+    stub = 'reexec_with_clean_environment() { echo "REEXEC $*"; exit 77; }'
+    # As root, no sentinel: main hands over before anything else happens.
+    proc = as_root(rig, f"{stub}; main --with-client", root=True)
+    assert proc.returncode == 77, proc.stdout + proc.stderr
+    assert "REEXEC" in proc.stdout and "--with-client" in proc.stdout
+    # Sentinel set: no second re-exec (it would loop).
+    proc = as_root(rig, f"{stub}; main --with-client", root=True, YADGAR_KIND_UP_CLEAN="1")
+    assert "REEXEC" not in proc.stdout
+    # Not root: the offline suite and an unprivileged run are untouched.
+    proc = as_root(rig, f"{stub}; main --with-client", root=False)
+    assert "REEXEC" not in proc.stdout

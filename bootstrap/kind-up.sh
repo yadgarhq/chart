@@ -973,6 +973,34 @@ ensure_admin() {
 
 # ─── 10. the client ──────────────────────────────────────────────────────────
 
+# THE TWO WAYS A MACHINE THAT HOLDS NO CREDENTIAL JOINS (ledger 1555). A plain
+# `yaadgaar login` fails there: the gateway's certificate is signed by this
+# install's private CA, and the machine has no anchor for it. `login --ca-file`
+# (yadgar#61, first in 0.1.9) supplies one; `admin issue-enrolment` (yadgar#62,
+# first in 0.1.10) mints a token that carries the CA, redeemed with `enrol`. Both
+# are newer than the client tools.lock pins, so these lines name the first
+# release that has both.
+CLIENT_MIN_FOR_JOINING="0.1.10"
+
+another_machine_steps() {
+  cat <<EOF
+  A. Log in with this install's CA. Copy the CA certificate from this host, where
+     it is world-readable, to the other machine (for example as ca.pem):
+       scp root@<this-host>:$CA_FILE ca.pem
+     Then, on the other machine:
+       pipx install 'yaadgaar>=$CLIENT_MIN_FOR_JOINING'
+       yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --ca-file ca.pem --password-stdin < <your-password-file>
+  B. Or enrol it. On a machine that holds an administrator credential, with the
+     user_id that $ADMIN_RECORD records:
+       yaadgaar admin issue-enrolment --user-id <user-id> --out <new-token-file>
+     Hand the file over privately. The other machine installs the same client and
+     redeems the file with "yaadgaar enrol", which sets that user's password.
+  Re-issue or reset: run the same issue-enrolment command again. Add
+  --revoke-existing after a lost machine; it ends the user's other logins when
+  the token is redeemed.
+EOF
+}
+
 # THREE STATES, read from the files rather than from this run's flags, so a plain
 # rerun after --with-client never offers the token --with-client redeemed:
 #   enrolled here   the marker: the credential is in root's client config
@@ -988,9 +1016,8 @@ print_next_steps() {
 
   The credential is in $(dirname "$CLIENT_CONFIG_FILE"), the password in $CLIENT_PASSWORD_FILE (0600).
   Another person:  sudo $SCRIPT_DIR/kind-up.sh --add-user <username>
-  $ADMIN_EXTERNAL_ID on another machine:
-    pipx install yaadgaar==$version
-    yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <password-file>
+  $ADMIN_EXTERNAL_ID on another machine, by either route:
+$(another_machine_steps)
 EOF
   elif [[ -s "$ENROLMENT_FILE" ]]; then
     log "[10/10] done. Next, on the machine you work from:"
@@ -1003,11 +1030,10 @@ EOF
   The enrolment token carries the edge CA.
 EOF
   else
-    log "[10/10] done. $ADMIN_EXTERNAL_ID already holds a credential; on a machine without one:"
+    log "[10/10] done. $ADMIN_EXTERNAL_ID already holds a credential; on a machine without one, by either route:"
     cat <<EOF | tee -a "$LOG_FILE"
 
-  pipx install yaadgaar==$version
-  yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --password-stdin < <your-password-file>
+$(another_machine_steps)
 EOF
   fi
   cat <<EOF | tee -a "$LOG_FILE"
@@ -1480,6 +1506,41 @@ add_user() {
   print_add_user_steps "$out"
 }
 
+# ROOT'S ENVIRONMENT IS SCRUBBED BEFORE ANYTHING ELSE RUNS (ledger 1563). Run as
+# root, this script's pipx (the `pipx install --force` upgrade included), apt-get,
+# kind and the container runtime would otherwise inherit whatever the caller
+# exported — PIP_*, PIPX_*, PIPX_DEFAULT_PYTHON, APT_CONFIG, DOCKER_HOST,
+# CONTAINER_HOST and the like, each of which redirects an install or a socket
+# root trusts. `sudo -E` and any root login that keeps the caller's environment
+# carry them in. So main re-executes this script once under `env -i`, with only:
+#   PATH   a fixed value, never the caller's
+#   HOME   root's, from the password database (pin_root_environment repeats it)
+#   TERM, LANG   when set, for readable output
+#   every setting documented at the top of this file, and the path overrides that
+#   root ignores by name (so the notice on stderr still names them)
+#   YADGAR_KIND_UP_CLEAN   the sentinel that stops a second re-execution.
+# bash's $EUID decides, as for the fixed paths above. A caller who plants the
+# sentinel gets no scrub; such a caller already runs this script as root. Not
+# root: nothing changes, so the offline suite runs as before.
+ROOT_SAFE_PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+ROOT_KEPT_VARS=(
+  YADGAR_ADMIN_EXTERNAL_ID YADGAR_ADMIN_DISPLAY_NAME YADGAR_RUNTIME
+  YADGAR_OPERATORS_TIMEOUT YADGAR_ESTATE_TIMEOUT YADGAR_CLIENT_CONFIG
+  YADGAR_STATE_DIR YADGAR_BIN_DIR YADGAR_TOOLS_LOCK YADGAR_SYSCTL_FILE
+  YADGAR_HOSTS_FILE YADGAR_CA_FILE YADGAR_ENROLMENT_FILE
+)
+
+reexec_with_clean_environment() {
+  local script="$1" var env_bin=env
+  shift
+  local -a keep=("YADGAR_KIND_UP_CLEAN=1" "PATH=$ROOT_SAFE_PATH" "HOME=$(root_home)")
+  [[ -x /usr/bin/env ]] && env_bin=/usr/bin/env
+  for var in TERM LANG "${ROOT_KEPT_VARS[@]}"; do
+    if [[ -v $var ]]; then keep+=("$var=${!var}"); fi
+  done
+  exec "$env_bin" -i "${keep[@]}" "$BASH" "$script" "$@"
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -1487,6 +1548,9 @@ usage() {
 }
 
 main() {
+  if ((EUID == 0)) && [[ -z "${YADGAR_KIND_UP_CLEAN:-}" ]]; then
+    reexec_with_clean_environment "$SCRIPT_DIR/${BASH_SOURCE[0]##*/}" "$@"
+  fi
   local args=("$@") display_set=0 out_set=0
   while (($#)); do
     case "$1" in
