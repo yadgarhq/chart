@@ -94,3 +94,19 @@ platform:
       enabled: false
       clientAuth: "off"
       plaintext: true
+# THE SEEDER'S `registry`, THE SAME PLACEHOLDER DECLARATION AS
+# `example/values.yaml` (ADR-0857's fixture step, plans/the-d35-seeder.md stage
+# 6). It is adopter-only like the switches above: `chart/values.yaml` must never
+# default an organisation's registry (ADR-0705). Stated here so every render
+# over this file carries the seeder's Job, ConfigMap and ServiceAccount, the
+# set an adopter who copies `example/values.yaml` receives.
+seeder:
+  registry:
+    roots:
+      - path: acme
+        sourceRepo: acme/gitops
+    projects:
+      - path: acme/web
+        displayName: web
+        sourceRepo: acme/web
+    allowMassArchive: false

@@ -119,6 +119,20 @@ spec:
           tls:
             enabled: true
             clientAuth: "off"
+        # THE SEEDER'S REGISTRY, so a cold install ends with a non-empty one
+        # (plans/the-d35-seeder.md stage 8). The same placeholder declaration as
+        # `../values.yaml`; see the comment there. Without it the seeder renders
+        # nothing and the gateway loads an empty registry.
+        seeder:
+          registry:
+            roots:
+              - path: acme
+                sourceRepo: acme/gitops
+            projects:
+              - path: acme/web
+                displayName: web
+                sourceRepo: acme/web
+            allowMassArchive: false
         platform:
           gatewayListener:
             envoyProxy:

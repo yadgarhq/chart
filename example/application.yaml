@@ -206,6 +206,19 @@ spec:
           tls:
             enabled: true
             clientAuth: "off"
+        # THE SEEDER'S REGISTRY: replace the placeholder `acme` declaration with
+        # your own organisation's roots and projects. See `values.yaml` beside
+        # this file for the rules.
+        seeder:
+          registry:
+            roots:
+              - path: acme
+                sourceRepo: acme/gitops
+            projects:
+              - path: acme/web
+                displayName: web
+                sourceRepo: acme/web
+            allowMassArchive: false
         platform:
           edgeTLS:
             # YOUR ISSUER. The chart creates none. Both halves are required.

@@ -375,11 +375,29 @@ task-db:
 # THE D35 SEEDER, which writes your organisation's project registry through
 # `project` as one Argo-synced Job (plans/the-d35-seeder.md). These two names are
 # the chart's defaults and the Secrets `platform` mints: `project-tls` verifies
-# `project`, `seeder-client-tls` is the seeder's own client leaf. The seeder
-# renders nothing until you add a `registry:` block here naming your roots and
-# projects; see the seeder chart's `values.yaml` for its shape.
+# `project`, `seeder-client-tls` is the seeder's own client leaf.
+#
+# `registry` IS YOURS, AND IT HAS NO DEFAULT (ADR-0705, ADR-0857's fixture step).
+# `acme` is a placeholder for your organisation, as the `ClusterIssuer` above is
+# for your issuer: replace the root with your organisation's single-segment
+# namespace, `sourceRepo` with the repository whose pull requests govern it, and
+# the projects with your own. Every project path sits under a declared root. A
+# project you later delete from this list is ARCHIVED on the next sync
+# (ADR-0934). `allowMassArchive: false` keeps the store's guard on, so one sync
+# cannot archive more than half of your active projects; it has no default
+# either (ADR-0939). The chart refuses a malformed declaration at render; see
+# the seeder chart's `values.yaml` for every rule.
 seeder:
   project:
     tls:
       caSecret: project-tls
       clientCertSecret: seeder-client-tls
+  registry:
+    roots:
+      - path: acme
+        sourceRepo: acme/gitops
+    projects:
+      - path: acme/web
+        displayName: web
+        sourceRepo: acme/web
+    allowMassArchive: false
