@@ -790,6 +790,18 @@ configuration, the same false positive `.runs` already closes below for
 {{- if $projectCallerSecret -}}
 {{- $clientSecrets = append $clientSecrets (dict "key" "project.projectDb.tls.clientCertSecret" "name" $projectCallerSecret "runs" true) -}}
 {{- end -}}
+{{/*
+THE SEEDER'S CLIENT LEAF (plans/the-d35-seeder.md stage 6): the Secret its Job
+presents to `project`, defaulted by this parent's `values.yaml` to
+`seeder-client-tls`, which `platform` 0.2.6 issues. `"runs" true` like the gRPC
+callers above: `project` is a module this parent always deploys. Checked even
+while `seeder.registry` is absent and the Job does not render, so a typo is
+named before the registry that would expose it is declared.
+*/}}
+{{- $seederCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.seeder).Values).project).tls).clientCertSecret -}}
+{{- if $seederCallerSecret -}}
+{{- $clientSecrets = append $clientSecrets (dict "key" "seeder.project.tls.clientCertSecret" "name" $seederCallerSecret "runs" true) -}}
+{{- end -}}
 {{- range $clientSecrets -}}
 {{- if and .runs (not (hasKey $leaves .name)) -}}
 {{- $refusals = append $refusals (printf (join "" (list

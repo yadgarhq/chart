@@ -683,7 +683,7 @@ def test_every_parent_example_renders_from_the_packaged_chart(packaged: Path, tm
 
     That test (`test_parent_chart.py`) takes `pinned`, which pulls the parent's own
     PUBLISHED pin — not yet pullable while that very tag is being cut, so it stays
-    out of this file. `packaged` resolves the NINE MODULE charts from the registry
+    out of this file. `packaged` resolves the TEN MODULE charts from the registry
     but never the parent's own version, so this needs no published pin and still
     walls what the other one would have: a contract pin whose fixture pull request
     missed `example/kind/application.yaml` renders a different object set here,
