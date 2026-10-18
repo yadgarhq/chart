@@ -6317,9 +6317,10 @@ def six_tls_client_auth_keys_of(values: dict) -> dict[str, object]:
 def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> None:
     """B-P1, K-8's "fixture" step for `tls.clientAuth` (ledger 925): the same six
     `tls.clientAuth` keys — one per gRPC server (iam, iam-db, task, task-db,
-    project, project-db) — are PRESENT and agree on the same value, wherever an
-    adopter reads them from — `example/values.yaml`, both parent examples'
-    `valuesObject`, and `chart/ci/values.yaml` (K-8's fixture). The twin of
+    project, project-db) — are PRESENT in all four adopter sources, and agree on
+    `"required"` across the three examples (`example/values.yaml` and both
+    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds all six
+    at `"off"` (`CI_ONLY_POSTURE_REASON`, ledger 1616). The twin of
     `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
     key first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
     `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand).

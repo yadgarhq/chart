@@ -408,6 +408,11 @@ task-db:
 # cannot archive more than half of your active projects; it has no default
 # either (ADR-0939). The chart refuses a malformed declaration at render; see
 # the seeder chart's `values.yaml` for every rule.
+#
+# REPLACE THE PLACEHOLDER BEFORE THE FIRST SYNC. If the placeholder already
+# synced, replacing it archives every project it declared, which the guard
+# refuses: set `allowMassArchive: true` for the one sync that replaces it, then
+# back to `false`.
 seeder:
   project:
     tls:

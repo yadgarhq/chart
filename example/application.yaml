@@ -180,7 +180,9 @@ spec:
             # issued every client leaf also signed. `"off"` would never read a caller's
             # leaf, and the seeder's sync needs `project` to read `seeder-caller` and
             # `project-db` to read `project-caller` (ADR-0936). Each caller below names
-            # the leaf `platform` mints for it.
+            # the leaf `platform` mints for it. A RUNNING estate on the older `"off"`
+            # examples steps through `"optional"` first and moves to `"required"`
+            # only after it sees calls succeed under `"optional"` (ADR-0884).
             clientAuth: "required"
             clientCaSecret: iam-tls
             clientCaSecretKey: ca.crt
@@ -236,7 +238,9 @@ spec:
             clientCaSecretKey: ca.crt
         # THE SEEDER'S REGISTRY: replace the placeholder `acme` declaration with
         # your own organisation's roots and projects. See `values.yaml` beside
-        # this file for the rules.
+        # this file for the rules. Replace before the first sync. If the
+        # placeholder already synced, set `allowMassArchive: true` for the one
+        # sync that replaces it, then back to `false` (ADR-0939).
         seeder:
           registry:
             roots:

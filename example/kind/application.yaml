@@ -150,7 +150,8 @@ spec:
         # THE SEEDER'S REGISTRY, so a cold install ends with a non-empty one
         # (plans/the-d35-seeder.md stage 8). The same placeholder declaration as
         # `../values.yaml`; see the comment there. Without it the seeder renders
-        # nothing and the gateway loads an empty registry.
+        # nothing and the gateway loads an empty registry. To replace it after it
+        # synced, see the `allowMassArchive` note in `../values.yaml`.
         seeder:
           registry:
             roots:
