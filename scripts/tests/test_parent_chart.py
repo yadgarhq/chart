@@ -63,7 +63,7 @@ subject is absent reports a pass nobody earned.
 
 THE PACKAGED-CHART RENDERS ARE NOT OFFLINE. Per ADR-0725 nothing under
 `chart/charts/` is committed, so the `packaged` fixture below resolves this
-chart's nine dependencies from `oci://ghcr.io/yadgarhq/charts` with
+chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts` with
 `helm package chart -u` — the same command `ci-release.yaml` runs — and needs
 the registry reachable. The directory-only renders (test 1) need no registry, but
 they DO need `helm dependency update chart` to have run in this working tree,
@@ -244,8 +244,16 @@ API_VERSIONS = tuple(
 # absent from the modules-only render. A MODULE release that adds or drops an object
 # moves BOTH, since every module renders in both. Update whichever moved in the
 # same commit as the pin, and say in the pull request which chart moved it.
+#
+# `platform` 0.2.6 MOVED IT, AND THE BOT'S PIN COMMIT DID NOT. 0.2.6 adds the
+# seeder's client leaf `seeder-client-tls` (common name `seeder-caller`, rung
+# `798h`, plans/the-d35-seeder.md stage 4), so `Certificate` went 14 -> 15 and the
+# total 83 -> 84. `parent_bump.py` pinned 0.2.6 with no PR CI, and this
+# suite was red on `main` until the seeder's own
+# parent PR moved these three literals and the ladder. Re-measured 2026-10-18 on
+# helm 4.3.0 against the pins in `chart/Chart.yaml`.
 ADOPTER_EXPECTED = {
-    "Certificate": 14,
+    "Certificate": 15,
     "ConfigMap": 4,
     "Deployment": 8,
     "EnvoyProxy": 1,
@@ -264,7 +272,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 10,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 83
+ADOPTER_OBJECTS = 84
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -323,12 +331,14 @@ OBJECTS_PER_PROBE_JOB = 4
 # DISTINCT and six hours from its neighbour, so at most one service restarts per
 # renewal instant.
 #
-# FOURTEEN OBJECTS AND THIRTEEN VALUES, and the difference is exactly one object
+# FIFTEEN OBJECTS AND FOURTEEN VALUES since `platform` 0.2.6 added
+# `seeder-client-tls` on `798h` (fourteen and thirteen before it), and the
+# difference is exactly one object
 # contributing no rung: the CA root. It carries a `renewBefore` of its own — one
 # year against a ten-year duration — and nothing mounts it as a serving or client
 # credential, so its renewal re-signs with the same key rather than restarting a
 # service. The set is scoped to the Certificates that are not `isCA`.
-CERTIFICATES_AT_R5 = 14
+CERTIFICATES_AT_R5 = 15
 LADDER = {
     "720h",
     "726h",
@@ -343,6 +353,7 @@ LADDER = {
     "780h",
     "786h",
     "792h",
+    "798h",
 }
 
 # THE PROBE/TOGGLE PAIRS, AND WHY THIS RENDER IS WHERE THEY BECOME ASSERTABLE.
@@ -883,7 +894,8 @@ def test_the_directory_and_the_package_render_the_same_objects(packaged: Path, m
     )
 
 
-# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Nine first-level members,
+# WHAT THE WALK BELOW MUST FIND, and it is TRANSITIVE. Ten first-level members
+# since `seeder` joined (nine when this was measured),
 # one per dependency `chart/Chart.yaml` declares, plus the NINE below that sit
 # BENEATH `platform` — six of them one level down and three of them two.
 #
@@ -1775,24 +1787,24 @@ def test_the_adopter_values_render_the_whole_platform_layer(adopter: list[dict])
 def test_an_object_added_to_the_platform_layer_reddens_the_object_set_gate(tmp_path: Path) -> None:
     """THE OBJECT-SET GATE'S RED CASE, and a values flip rather than an edited chart.
 
-    A fifteenth entry in `certificates.leaves` is the constructible stand-in for
+    A sixteenth entry in `certificates.leaves` is the constructible stand-in for
     an object entering the platform layer: the chart renders one Certificate per
     entry, so the render grows by exactly one and the equality has to fail.
     """
     values = overlay(
-        tmp_path / "a-fifteenth-leaf.yaml",
+        tmp_path / "a-sixteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      fifteenth-tls:\n"
-        "        commonName: fifteenth\n"
+        "      sixteenth-tls:\n"
+        "        commonName: sixteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 798h\n",
+        "        renewBefore: 804h\n",
     )
     documents = adopter_render("-f", str(values))
     assert len(documents) == ADOPTER_OBJECTS + 1, (
-        "a fifteenth leaf did not add an object, so this red case is testing nothing"
+        "a sixteenth leaf did not add an object, so this red case is testing nothing"
     )
     assert dict(kinds(documents)) != ADOPTER_EXPECTED
 
@@ -2430,6 +2442,15 @@ GRPC_CLIENT_SECRET_TYPO_CASES = [
         "project:\n  projectDb:\n    tls:\n      clientCertSecret: projcet-db-tls\n",
         "projcet-db-tls",
         id="project",
+    ),
+    # THE SEEDER'S CLIENT LEAF (plans/the-d35-seeder.md stage 6): the parent
+    # defaults it to `seeder-client-tls`, which `platform` 0.2.6 issues, and a
+    # typo there is a Secret cert-manager never creates.
+    pytest.param(
+        "seeder.project.tls.clientCertSecret",
+        "seeder:\n  project:\n    tls:\n      clientCertSecret: seedr-client-tls\n",
+        "seedr-client-tls",
+        id="seeder",
     ),
 ]
 
@@ -3086,7 +3107,7 @@ def rungs(documents: list[dict]) -> dict[str, list[str]]:
     """Ladder value -> every certificate holding it. PURE.
 
     SCOPED TO THE CERTIFICATES THAT ARE NOT `isCA`, which is the difference between
-    fourteen objects and thirteen values rather than an omission.
+    fifteen objects and fourteen values rather than an omission.
     """
     index: dict[str, list[str]] = {}
     for document in certificates(documents):
@@ -3141,31 +3162,31 @@ def test_the_renewal_ladder_holds_across_the_whole_estate(adopter: list[dict]) -
     assert failures == [], "\n".join(failures)
 
 
-def test_a_fifteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
-    """THE LADDER GATE'S RED CASE: a fifteenth leaf, and the equality names both numbers."""
+def test_a_sixteenth_certificate_reddens_the_ladder_gate(tmp_path: Path) -> None:
+    """THE LADDER GATE'S RED CASE: a sixteenth leaf, and the equality names both numbers."""
     values = overlay(
-        tmp_path / "a-fifteenth-leaf.yaml",
+        tmp_path / "a-sixteenth-leaf.yaml",
         "platform:\n"
         "  certificates:\n"
         "    leaves:\n"
-        "      fifteenth-tls:\n"
-        "        commonName: fifteenth\n"
+        "      sixteenth-tls:\n"
+        "        commonName: sixteenth\n"
         "        clusterLocalNames: true\n"
         "        usages: [server auth, digital signature]\n"
-        "        renewBefore: 798h\n",
+        "        renewBefore: 804h\n",
     )
     failures = ladder_failures(
         adopter_render("-f", str(values)), CERTIFICATES_AT_R5, LADDER
     )
-    assert failures, "a fifteenth Certificate did not redden the ladder gate"
-    assert "expected 14 Certificate objects, found 15" in "\n".join(failures), failures
+    assert failures, "a sixteenth Certificate did not redden the ladder gate"
+    assert "expected 15 Certificate objects, found 16" in "\n".join(failures), failures
 
 
 def test_two_leaves_sharing_a_rung_redden_the_ladder_gate(tmp_path: Path) -> None:
     """THE OTHER HALF OF THE INVARIANT, which a count alone cannot see.
 
-    Fourteen objects holding thirteen distinct values is what the gate asserts.
-    Two leaves moved onto one rung keeps the object count at fourteen and
+    Fifteen objects holding fourteen distinct values is what the gate asserts.
+    Two leaves moved onto one rung keeps the object count at fifteen and
     collapses the ladder, and the pairwise clause is the only thing that reports
     it.
     """
@@ -3455,7 +3476,7 @@ def test_an_object_with_no_probe_reddens_the_agreement_gate(tmp_path: Path) -> N
 
     An explicit `false` is always honoured — losing a diagnostic is a choice an
     adopter is entitled to make — so this is the constructible way to have the
-    objects without the probe. The gate must see the fourteen Certificates and the
+    objects without the probe. The gate must see the fifteen Certificates and the
     absent probe and name both.
     """
     documents = adopter_render(
@@ -6707,3 +6728,140 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
     assert any("node port 30443" in failure for failure in failures), failures
     assert any("nodeSelector" in failure for failure in failures), failures
     assert any("`iam.enrolment.gateway`" in failure for failure in failures), failures
+
+
+# ── the D35 seeder (plans/the-d35-seeder.md stage 6, ADR-0857's expand step) ──
+#
+# `seeder` 0.1.0 IS THE EXPAND STEP: with no `seeder.registry` block it renders
+# NOTHING, and a present block is checked whole by the seeder's own render
+# checks. So the parent's default render does not move, and every gate below that
+# needs a seeder object renders it through `SEEDER_DECLARATION`, an overlay. The
+# FIXTURE step (`chart/ci/values.yaml` and `example/values.yaml` declare a root)
+# is the next pull request; the CONTRACT step is a seeder release.
+#
+# THE TWO TLS SECRETS ARE THE PARENT'S OWN DEFAULTS, for the reason
+# `gateway.adminBootstrap.tokenSecret` is one: `platform`, which this parent
+# also ships, mints both names. `project-tls` is `project`'s serving leaf, whose
+# `ca.crt` verifies `project` (the gateway's own `project.tls.caSecret` names the
+# same Secret); `seeder-client-tls` is the seeder's client leaf, common name
+# `seeder-caller`, which `project` alone admits to `SyncProjects` (ADR-0936).
+SEEDER_DECLARATION = (
+    "seeder:\n"
+    "  registry:\n"
+    "    roots:\n"
+    "      - path: acme\n"
+    "        sourceRepo: acme/gitops\n"
+    "    projects:\n"
+    "      - path: acme/web\n"
+    "        displayName: web\n"
+    "        sourceRepo: acme/web\n"
+    "    allowMassArchive: false\n"
+)
+
+# WHAT THE SEEDER RENDERS ONCE DECLARED, and nothing else: one Job, the
+# ConfigMap holding the declaration, and the ServiceAccount the Job runs as. A
+# literal, for the reason `EXPECTED` is one.
+SEEDER_OBJECTS = {
+    ("Job", "seeder"),
+    ("ConfigMap", "seeder-registry"),
+    ("ServiceAccount", "seeder"),
+}
+SEEDER_CA_SECRET = "project-tls"
+SEEDER_CLIENT_SECRET = "seeder-client-tls"
+SEEDER_CALLER = "seeder-caller"
+
+
+def seeder_objects(documents: list[dict]) -> set[tuple[str, str]]:
+    """Every object the render carries with the seeder's pod label `app: seeder`. PURE."""
+    return {
+        (str(document.get("kind")), str((document.get("metadata") or {}).get("name")))
+        for document in documents
+        if ((document.get("metadata") or {}).get("labels") or {}).get("app") == "seeder"
+    }
+
+
+def seeder_job(documents: list[dict]) -> dict:
+    jobs = [d for d in documents if d.get("kind") == "Job" and (d.get("metadata") or {}).get("name") == "seeder"]
+    assert len(jobs) == 1, f"expected one Job `seeder`, found {len(jobs)}"
+    return jobs[0]
+
+
+def test_the_seeder_is_a_dependency_with_no_condition() -> None:
+    """`seeder` IS A MODULE, SO IT CARRIES NO `condition` (only `platform` does).
+
+    ADR-0857's expand step switches it off by the ABSENT `registry` block, not by a
+    toggle: a toggle would be a tenth `enabled` key for D80's all-off pass to flip,
+    turning off a chart that renders only built-in kinds.
+    """
+    document = yaml.safe_load((CHART / "Chart.yaml").read_text())
+    entries = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
+    assert entries == [
+        {"name": "seeder", "version": "0.1.0", "repository": "oci://ghcr.io/yadgarhq/charts"}
+    ], entries
+
+
+def test_the_seeder_renders_nothing_without_a_registry(adopter: list[dict]) -> None:
+    """THE EXPAND STEP AT THE PARENT: the adopter render carries no seeder object."""
+    assert seeder_objects(adopter) == set()
+
+
+def test_a_declared_registry_renders_the_seeders_three_objects(tmp_path: Path) -> None:
+    """THE RED CASE FOR THE GATE ABOVE, and what the fixture step will turn on.
+
+    A declaration adds exactly `SEEDER_OBJECTS` and nothing else, so the gate above
+    is not green merely because the seeder could never render through this parent.
+    """
+    documents = adopter_render("-f", str(overlay(tmp_path / "declared.yaml", SEEDER_DECLARATION)))
+    assert seeder_objects(documents) == SEEDER_OBJECTS
+    assert len(documents) == ADOPTER_OBJECTS + len(SEEDER_OBJECTS)
+
+
+def test_the_seeder_job_verifies_project_and_presents_its_own_leaf(tmp_path: Path) -> None:
+    """THE PARENT'S WIRING REACHES THE JOB, AND BOTH NAMES ARE LEAVES THE SAME RENDER ISSUES.
+
+    The Job mounts `project-tls` as the authority it verifies `project` against and
+    `seeder-client-tls` as the certificate it presents. Both must be Certificates
+    `platform` emits in this render, and the client leaf must carry the common name
+    `project`'s caller check reads, or `project` refuses every sync.
+    """
+    documents = adopter_render("-f", str(overlay(tmp_path / "declared.yaml", SEEDER_DECLARATION)))
+    volumes = {v["name"]: v for v in seeder_job(documents)["spec"]["template"]["spec"]["volumes"]}
+    assert volumes["project-ca"]["secret"]["secretName"] == SEEDER_CA_SECRET, volumes
+    assert volumes["client-cert"]["secret"]["secretName"] == SEEDER_CLIENT_SECRET, volumes
+    issued = {
+        str(document["spec"].get("secretName")): document["spec"]
+        for document in certificates(documents)
+    }
+    assert SEEDER_CA_SECRET in issued, sorted(issued)
+    assert issued[SEEDER_CLIENT_SECRET]["commonName"] == SEEDER_CALLER, issued[SEEDER_CLIENT_SECRET]
+
+
+@pytest.mark.parametrize("key", ["caSecret", "clientCertSecret"])
+def test_without_the_parents_wiring_the_seeder_refuses_naming_the_key(tmp_path: Path, key: str) -> None:
+    """THE WIRING'S RED CASE: empty the parent's default and the seeder's own check refuses.
+
+    The seeder chart has no default for either Secret (ADR-0705), so this is what
+    a declared registry meets if the parent stops stating them.
+    """
+    values = overlay(
+        tmp_path / f"no-{key}.yaml",
+        SEEDER_DECLARATION + f'  project:\n    tls:\n      {key}: ""\n',
+    )
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout[:2000]
+    assert f"project.tls.{key} must name" in result.stderr, result.stderr
+
+
+def test_the_parent_schema_declares_the_seeder_section(tmp_path: Path) -> None:
+    """THE SCHEMA'S RED CASE: drop `seeder` from the parent's closed root and the
+    default render is refused, the ADR-0850 failure the `config` entry documents.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    schema = json.loads((copy / "values.schema.json").read_text())
+    assert "seeder" in schema["properties"], sorted(schema["properties"])
+    del schema["properties"]["seeder"]
+    (copy / "values.schema.json").write_text(json.dumps(schema))
+    result = helm("template", "yadgar", str(copy), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "seeder" in result.stderr, result.stderr

@@ -31,7 +31,7 @@ a comment on each, for when you change more.
 ## What it contains, and what it deliberately does not
 
 ```
-chart/Chart.yaml          the eight pins, and nothing else of substance
+chart/Chart.yaml          the ten pins, and nothing else of substance
 chart/values.yaml         the whole-estate defaults, and why each key is stated here
 chart/ci/api-versions.txt the four operator API versions the defaults need offline
 chart/templates/          one partial that renders nothing, and it says why
@@ -43,12 +43,12 @@ bootstrap/kind-up.sh      one command from a clean Debian/Ubuntu host to a first
 ```
 
 `chart/charts/` and `chart/Chart.lock` are not in that list, and not in the
-repository: per ADR-0725 the release pipeline resolves the eight pins at
+repository: per ADR-0725 the release pipeline resolves the ten pins at
 package time (`helm package chart -u`), so nothing here is ever committed.
 `chart/charts/` is git-ignored the same way `yadgarhq/config`'s is.
 
-**It renders no objects of its own.** Every one of the 83 objects a default
-install produces comes from one of the eight module charts or the platform layer, each reviewed, gated
+**It renders no objects of its own.** Every one of the 84 objects a default
+install produces comes from one of the module charts or the platform layer, each reviewed, gated
 and released in its own repository. A parent that rendered a Deployment or a
 ConfigMap of its own would be a ninth module nobody declared, and ADR-0723 names
 that outcome in its own `revisit_trigger`. `chart/templates/` exists only because
@@ -138,7 +138,7 @@ enrol an admin who already holds a credential (ADR-0655).
 **The whole estate** (ADR-0803 step B6): every module, the platform layer
 (`yadgarhq/platform` — internal CA and its leaves, the edge leaf, the Gateway
 listener, Valkey, NATS and the bootstrap Jobs), autoscaling in all seven modules
-and a database in each of the three `-db` modules. 83 objects. `example/values.yaml`
+and a database in each of the three `-db` modules. 84 objects. `example/values.yaml`
 restates the same defaults, plus `chart/ci/values.yaml`'s twelve `tls.enabled`
 switches (ruling 11, ADR-0845 — the parent's own `values.yaml` states none of
 them) and its eight NATS/valkey TLS keys at their off posture (B-P2, K-8's
@@ -224,7 +224,7 @@ estate; or set `platform.preflight.probes.prometheus` false.
 
 `ci-release.yaml`'s `chart` job in `yadgarhq/actions` runs
 `helm package chart -u --version ... --app-version ...` (ADR-0725). The `-u`
-resolves this chart's eight dependencies from `oci://ghcr.io/yadgarhq/charts`
+resolves this chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts`
 before packaging, so nothing here has to be committed for a release to
 publish — `chart/charts/` stays git-ignored, exactly as `yadgarhq/config`'s is.
 
@@ -272,7 +272,7 @@ suite needs the registry reachable rather than running offline.
 | what                                                   | asserted as                                                                                                                                                                          |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                                                          |
-| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 83-object set; every example leaf equals its default |
+| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 84-object set; every example leaf equals its default |
 | the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                                                         |
 | the modules alone are 32 objects                       | 3 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                           |
 | the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                                                |
