@@ -2275,8 +2275,15 @@ def run_probe(rig: Rig, body: str, *args: str, **extra: str) -> subprocess.Compl
     (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
     bash = shutil.which("bash")
     assert bash, "bash is not installed"
-    return subprocess.run([*root_route(), bash, str(probe), *args], env=rig.env(**extra),
-                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    env = rig.env(**extra)
+    route = root_route()
+    argv = [bash, str(probe), *args]
+    if route[-1] == "-i":  # sudo resets the environment; env -i restores the rig's (see as_root)
+        argv = [*route, *(f"{k}={v}" for k, v in env.items()), *argv]
+    else:
+        argv = [*route, *argv]
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=60)
 
 
 def test_root_reexecs_under_a_scrubbed_environment(rig: Rig) -> None:
