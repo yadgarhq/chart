@@ -125,7 +125,7 @@ is fetched first with `pipx runpip yaadgaar download`. If that fetch fails, the
 old client is kept and the run warns. If the forced install fails after it,
 the run stops and names the command that puts a client back. When the credential
 is at the old path, the client is kept and the kept version is logged. The
-reason: yaadgaar 0.1.6 does not read the old directory, and `yaadgaar serve`,
+reason: yaadgaar 0.1.5 and later do not read the old directory, and `yaadgaar serve`,
 which Claude Code starts with no environment, would find no credential. Such a
 host stays on its client until a migration of the old credential is decided.
 Neither case moves, copies or writes any config, and neither runs `login` or

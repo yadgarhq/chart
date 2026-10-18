@@ -977,10 +977,37 @@ ensure_admin() {
 # `yaadgaar login` fails there: the gateway's certificate is signed by this
 # install's private CA, and the machine has no anchor for it. `login --ca-file`
 # (yadgar#61, first in 0.1.9) supplies one; `admin issue-enrolment` (yadgar#62,
-# first in 0.1.10) mints a token that carries the CA, redeemed with `enrol`. Both
-# are newer than the client tools.lock pins, so these lines name the first
-# release that has both.
+# first in 0.1.10) mints a token that carries the CA, redeemed with `enrol`.
+# These lines name the first release that has both; tools.lock pins that release
+# or a later one (ledger 1623).
 CLIENT_MIN_FOR_JOINING="0.1.10"
+
+# WHAT ROOT'S INSTALLED CLIENT CAN DO, read from the binary and never from the
+# lock row: a client kept at an older version (credential in the old directory,
+# a failed pre-flight, no --with-client on this run) has not been upgraded to the
+# pin. Printed only where this host's root is enrolled (the marker); where the
+# credential is held elsewhere there is no root client to speak of. One sentence
+# with a leading space, or nothing.
+root_client_note() {
+  [[ -f "$CLIENT_ENROLLED_MARKER" ]] || return 0
+  local bin="$PIPX_BIN_DIR/yaadgaar" have="" rc=0
+  if [[ ! -x "$bin" ]]; then
+    printf ' This host'"'"'s root has no client.'
+    return 0
+  fi
+  have="$("$bin" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
+  if [[ -n "$have" ]]; then
+    version_older "$have" "$CLIENT_MIN_FOR_JOINING" || rc=$?
+  else
+    rc=2
+  fi
+  have="$(printf '%s' "${have:-unknown}" | printable)"
+  if [[ "$rc" == 1 ]]; then
+    printf ' The root client here is %s, which has "yaadgaar admin issue-enrolment".' "$have"
+  else
+    printf ' The root client here is %s, which lacks "yaadgaar admin issue-enrolment"; a rerun with --with-client upgrades it unless its credential is in ~/.config/yadgar (ledger 1573).' "$have"
+  fi
+}
 
 another_machine_steps() {
   cat <<EOF
@@ -990,9 +1017,8 @@ another_machine_steps() {
      Then, on the other machine:
        pipx install 'yaadgaar>=$CLIENT_MIN_FOR_JOINING'
        yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --ca-file ca.pem --password-stdin < <your-password-file>
-  B. Or enrol it. The issuing client must be yaadgaar>=$CLIENT_MIN_FOR_JOINING. The root client here is $(yaadgaar_version),
-     so "yaadgaar admin issue-enrolment" does not work from this host's root client
-     until tools.lock is bumped (ledger 1623). On a machine whose client is new
+  B. Or enrol it. The issuing client must be yaadgaar>=$CLIENT_MIN_FOR_JOINING.$(root_client_note)
+     On a machine whose client is new
      enough and holds an administrator credential, with the user_id that
      $ADMIN_RECORD records:
        yaadgaar admin issue-enrolment --user-id <user-id> --out <new-token-file>

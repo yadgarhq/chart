@@ -642,9 +642,20 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
 def test_the_lock_pins_the_client_once() -> None:
     rows = [line.split() for line in LOCK.read_text().splitlines()
             if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
-    # 0.1.6 (yadgar v0.1.6): since 0.1.5 the client keeps its config in
-    # ~/.config/yaadgaar, which is the default --add-user reads (ledger 1566).
-    assert rows == [["yaadgaar", "0.1.6", "pypi"]]
+    # 0.1.12 (yadgar v0.1.12): the first pin with `login --ca-file` (0.1.9) and
+    # `admin issue-enrolment` (0.1.10) that the printed steps use (ledger 1623).
+    # It keeps its config in ~/.config/yaadgaar, as 0.1.5 began to (ledger 1566).
+    assert rows == [["yaadgaar", "0.1.12", "pypi"]]
+
+
+def test_the_pinned_client_has_what_the_printed_steps_use() -> None:
+    """The lock is at or above the release the steps name, so root's own client can
+    run `admin issue-enrolment` (ledger 1623). Numeric, not lexical: 0.1.9 > 0.1.10 as text."""
+    def release(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in v.split("."))
+    minimum = re.search(r'^CLIENT_MIN_FOR_JOINING="([0-9.]+)"', SCRIPT.read_text(), re.M)
+    assert minimum, "CLIENT_MIN_FOR_JOINING not found"
+    assert release(client_version()) >= release(minimum.group(1))
 
 
 def test_the_printed_steps_name_the_pinned_client_literally(rig: Rig) -> None:
@@ -652,7 +663,7 @@ def test_the_printed_steps_name_the_pinned_client_literally(rig: Rig) -> None:
     add_user_rig(rig)
     proc = rig.main("--add-user", "dave@example.com")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "pipx install yaadgaar==0.1.6" in proc.stdout
+    assert "pipx install yaadgaar==0.1.12" in proc.stdout
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
@@ -1427,8 +1438,8 @@ def test_with_client_pins_the_client_version(rig: Rig) -> None:
     installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
     assert installs == [["install", f"yaadgaar=={client_version()}"]]
     # The steps for ANOTHER machine name a client new enough for `login --ca-file`
-    # and `admin issue-enrolment` (0.1.9, 0.1.10), which the locked version lacks
-    # (ledger 1555); root's own install above stays at the lock.
+    # and `admin issue-enrolment` (0.1.9, 0.1.10) (ledger 1555); the lock (ledger
+    # 1623) is at or above that, so root's own install above has both.
     assert "pipx install 'yaadgaar>=0.1.10'" in proc.stdout
 
 
@@ -1831,6 +1842,21 @@ def test_an_enrolled_client_with_its_credential_at_the_new_path_is_upgraded(rig:
     assert cfg.read_bytes() == before
 
 
+def test_a_host_on_the_previous_pin_0_1_6_is_upgraded_to_the_lock(rig: Rig) -> None:
+    """Ledger 1623: the first bump past a pin a host already runs. 0.1.6 → 0.1.12
+    is a numeric comparison (0.1.12 sorts before 0.1.6 as text) and the credential
+    in ~/.config/yaadgaar stays where it is."""
+    enrolled_with_client(rig, "0.1.6")
+    cfg = root_config(rig, "yaadgaar")
+    before = cfg.read_bytes()
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
+    assert f"upgraded root's client 0.1.6\u2192{client_version()}; credential stays at {cfg}" in proc.stdout
+    assert cfg.read_bytes() == before
+
+
 def test_a_failed_pre_flight_keeps_the_client_and_never_forces(rig: Rig) -> None:
     enrolled_with_client(rig, "0.1.5")
     root_config(rig, "yaadgaar")
@@ -1865,12 +1891,13 @@ def test_an_enrolled_client_newer_than_the_pin_is_kept(rig: Rig) -> None:
 def test_a_pre_release_of_the_pin_is_older_than_the_pin() -> None:
     proc = subprocess.run(
         ["bash", "-c", f'source "{SCRIPT}"; '
-         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1"; do '
+         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1" "0.1.6 0.1.12" "0.1.9 0.1.12" "0.1.10 0.1.12" "0.1.12 0.1.6"; do '
          'set -- $p; if version_older "$1" "$2"; then echo "$1<$2"; else echo "$1>=$2"; fi; done'],
         capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.split() == ["0.1.6a1<0.1.6", "0.1.0a8<0.1.2", "0.1.5<0.1.6",
-                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1"]
+                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1",
+                                   "0.1.6<0.1.12", "0.1.9<0.1.12", "0.1.10<0.1.12", "0.1.12>=0.1.6"]
 
 
 def test_a_symlink_at_the_new_config_keeps_the_client(rig: Rig) -> None:
@@ -2210,10 +2237,14 @@ NEXT_STEPS_STATES = {
 }
 
 
-def print_next_steps(rig: Rig, state: str) -> str:
+def print_next_steps(rig: Rig, state: str, version: str | None = "0.1.12") -> str:
+    """The steps as a rerun prints them: root's environment pinned as `main` does,
+    root's installed client answering *version* (None: it prints nothing)."""
     rig.state.mkdir(exist_ok=True)
     NEXT_STEPS_STATES[state](rig)
-    proc = rig.run("load_examples; print_next_steps")
+    if version is not None:
+        rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": f"yaadgaar {version}\n"}] + rig.rules
+    proc = rig.run("pin_root_environment; load_examples; print_next_steps")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout
 
@@ -2229,15 +2260,21 @@ def test_next_steps_for_another_machine_use_the_ca_file_and_issue_enrolment(rig:
     assert "/etc/yadgar/edge-ca.crt" in out
     assert "yaadgaar admin issue-enrolment --user-id" in out
     assert "--revoke-existing" in out
-    # Neither flag exists in the locked 0.1.6: the steps name a client that has them.
+    # The steps name the first client that has both flags.
     assert "yaadgaar>=0.1.10" in out
     # The CA file is world-readable, so no root login is needed to copy it.
     assert "root@" not in out
-    # Route B: the ISSUING client must be new enough, and this host's root client
-    # (the lock's) is not, until the lock is bumped (ledger 1623).
+    # Route B: the ISSUING client must be new enough. Whether root's own is, is
+    # read from the installed binary (stubbed 0.1.12 here), never from the lock row,
+    # and only where this host's root is enrolled (ledger 1623).
     assert "issuing client must be yaadgaar>=0.1.10" in out
-    assert f"root client here is {client_version()}" in out
-    assert "ledger 1623" in out
+    if state == "enrolled here":
+        assert 'root client here is 0.1.12, which has "yaadgaar admin issue-enrolment"' in out
+    else:
+        assert "root client here" not in out and "root has no client" not in out
+    assert "does not work from this host" not in out
+    assert "until tools.lock is bumped" not in out
+    assert "ledger 1623" not in out
     # Re-issuing the admin's own enrolment makes the stored password stale.
     assert "client-password" in out and "stale" in out
     assert "ends root's credential on this host" in out
@@ -2435,3 +2472,50 @@ def test_the_real_reexec_path_runs_the_script_as_root(rig: Rig, tmp_path: Path) 
                           stdin=subprocess.DEVNULL, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "kind-up.sh" in proc.stdout
+
+
+# ─── route B names what root's INSTALLED client can do (ledger 1623) ───────────
+#
+# The lock row is what a rerun with --with-client installs, not what is installed:
+# a client kept at 0.1.3 (credential in ~/.config/yadgar, ledger 1573), one whose
+# pre-flight failed, or a rerun without --with-client all leave an older one.
+
+
+def test_route_b_reads_the_installed_client_not_the_lock_row_for_a_kept_old_client(rig: Rig) -> None:
+    """A 0.1.3 client kept because its credential is in ~/.config/yadgar."""
+    root_config(rig, "yadgar")
+    out = print_next_steps(rig, "enrolled here", version="0.1.3")
+    assert "which has" not in out
+    assert 'root client here is 0.1.3, which lacks "yaadgaar admin issue-enrolment"' in out
+    assert "a rerun with --with-client upgrades it unless its credential is in ~/.config/yadgar (ledger 1573)" in out
+    assert client_version() not in out.split("B. Or enrol it.")[1].split("On a machine")[0]
+
+
+def test_route_b_on_a_plain_rerun_names_the_installed_client_and_installs_nothing(rig: Rig) -> None:
+    """No --with-client: ensure_client never runs, so the installed client is as it was."""
+    out = print_next_steps(rig, "enrolled here", version="0.1.9")
+    assert 'root client here is 0.1.9, which lacks "yaadgaar admin issue-enrolment"' in out
+    assert not [c for c in rig.calls("pipx") if "install" in c["argv"]]
+
+
+@pytest.mark.parametrize("answer", ["", "banana"])
+def test_route_b_does_not_claim_a_client_that_gave_no_usable_version(rig: Rig, answer: str) -> None:
+    rig.state.mkdir(exist_ok=True)
+    (rig.state / "client-enrolled").write_text("")
+    rig.rules = [{"cmd": "yaadgaar", "match": ["--version"], "stdout": f"yaadgaar {answer}\n"}] + rig.rules
+    proc = rig.run("pin_root_environment; load_examples; print_next_steps")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "which has" not in proc.stdout
+    assert "which lacks" in proc.stdout
+
+
+def test_route_b_says_so_when_root_has_no_client(rig: Rig) -> None:
+    (rig.root_home / ".local" / "bin" / "yaadgaar").unlink()
+    out = print_next_steps(rig, "enrolled here", version=None)
+    assert "This host's root has no client." in out
+    assert "which has" not in out and "root client here" not in out
+
+
+def test_route_b_boundary_is_numeric_not_textual(rig: Rig) -> None:
+    out = print_next_steps(rig, "enrolled here", version="0.1.10")
+    assert 'root client here is 0.1.10, which has "yaadgaar admin issue-enrolment"' in out
