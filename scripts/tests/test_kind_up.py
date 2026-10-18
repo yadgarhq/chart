@@ -419,7 +419,14 @@ def test_the_tools_go_to_a_private_directory_by_default(rig: Rig) -> None:
     proc = subprocess.run(["bash", "-c", f'source "{SCRIPT}"; printf "%s" "$BIN_DIR"'],
                           env=env, capture_output=True, text=True, check=True)
     assert proc.stdout == "/opt/yadgar-bootstrap/bin"
-    assert "/usr/local/bin" not in SCRIPT.read_text().replace("never /usr/local/bin", "")
+    # THE INTENT IS AN INSTALL DESTINATION: the pinned tools never go into the
+    # shared /usr/local/bin. The directory is still a legitimate PATH entry (sudo's
+    # stock secure_path has it, and root's scrubbed PATH must keep it so a plain
+    # `sudo` still finds a global npm `claude` or an existing pipx there), so the
+    # one ROOT_SAFE_PATH line is the only other place it may appear.
+    text = SCRIPT.read_text().replace("never /usr/local/bin", "")
+    text = "\n".join(line for line in text.splitlines() if not line.startswith("ROOT_SAFE_PATH="))
+    assert "/usr/local/bin" not in text
 
 
 # ─── root ignores the path overrides (ledger 1556) ──────────────────────────────
@@ -1419,7 +1426,10 @@ def test_with_client_pins_the_client_version(rig: Rig) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
     assert installs == [["install", f"yaadgaar=={client_version()}"]]
-    assert f"pipx install yaadgaar=={client_version()}" in proc.stdout
+    # The steps for ANOTHER machine name a client new enough for `login --ca-file`
+    # and `admin issue-enrolment` (0.1.9, 0.1.10), which the locked version lacks
+    # (ledger 1555); root's own install above stays at the lock.
+    assert "pipx install 'yaadgaar>=0.1.10'" in proc.stdout
 
 
 def test_a_changed_application_is_applied_and_the_difference_logged(rig: Rig) -> None:
@@ -2184,3 +2194,244 @@ def test_a_late_write_failure_keeps_the_token_and_the_rerun_names_it(rig: Rig) -
     assert again.returncode != 0
     assert str(pending) in again.stderr and "resets their password" in again.stderr
     assert rig.calls("curl") == []
+
+
+# ─── next steps for another machine (ledger 1555) ──────────────────────────────
+#
+# A plain `yaadgaar login` fails against the install's private CA: a machine that
+# never enrolled has no anchor for the gateway. The client has `login --ca-file`
+# (yadgar#61, first in 0.1.9) and `admin issue-enrolment` (yadgar#62, first in
+# 0.1.10), and the printed steps must use them.
+
+NEXT_STEPS_STATES = {
+    "enrolled here": lambda rig: (rig.state / "client-enrolled").write_text(""),
+    "token waiting": lambda rig: rig.enrolment_file.write_text("TOKEN\n"),
+    "credential held elsewhere": lambda rig: None,
+}
+
+
+def print_next_steps(rig: Rig, state: str) -> str:
+    rig.state.mkdir(exist_ok=True)
+    NEXT_STEPS_STATES[state](rig)
+    proc = rig.run("load_examples; print_next_steps")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout
+
+
+@pytest.mark.parametrize("state", ["enrolled here", "credential held elsewhere"])
+def test_next_steps_for_another_machine_use_the_ca_file_and_issue_enrolment(rig: Rig, state: str) -> None:
+    out = print_next_steps(rig, state)
+    logins = [line for line in out.splitlines() if "yaadgaar login" in line]
+    assert logins, "no login step printed"
+    for line in logins:
+        assert "--ca-file" in line, f"a login that fails against the private CA: {line.strip()}"
+    # Where the operator gets the CA file, and the enrolment route.
+    assert "/etc/yadgar/edge-ca.crt" in out
+    assert "yaadgaar admin issue-enrolment --user-id" in out
+    assert "--revoke-existing" in out
+    # Neither flag exists in the locked 0.1.6: the steps name a client that has them.
+    assert "yaadgaar>=0.1.10" in out
+    # The CA file is world-readable, so no root login is needed to copy it.
+    assert "root@" not in out
+    # Route B: the ISSUING client must be new enough, and this host's root client
+    # (the lock's) is not, until the lock is bumped (ledger 1623).
+    assert "issuing client must be yaadgaar>=0.1.10" in out
+    assert f"root client here is {client_version()}" in out
+    assert "ledger 1623" in out
+    # Re-issuing the admin's own enrolment makes the stored password stale.
+    assert "client-password" in out and "stale" in out
+    assert "ends root's credential on this host" in out
+
+
+def test_next_steps_for_a_waiting_token_still_enrol_without_a_login(rig: Rig) -> None:
+    out = print_next_steps(rig, "token waiting")
+    assert "yaadgaar enrol --token-file" in out
+    assert "yaadgaar login" not in out
+
+
+# ─── root's environment is scrubbed (ledger 1563) ──────────────────────────────
+#
+# Run as root, the script's pipx (`pipx install --force`), apt-get and kind would
+# otherwise inherit whatever the caller exported: PIP_INDEX_URL, PIPX_DEFAULT_PYTHON,
+# APT_CONFIG, DOCKER_HOST and the like, all of which redirect root's installs.
+
+PLANTED = {
+    "PIP_INDEX_URL": "https://evil.example/simple",
+    "PIPX_DEFAULT_PYTHON": "/tmp/evil-python",
+    "PIPX_HOME": "/tmp/evil-pipx",
+    "APT_CONFIG": "/tmp/evil-apt.conf",
+    "DOCKER_HOST": "tcp://evil.example:2375",
+    "CONTAINER_HOST": "tcp://evil.example:2376",
+    "KIND_EXPERIMENTAL_PROVIDER": "podman",
+    # A forged "already scrubbed" marker, as an older revision used: it must buy nothing.
+    "YADGAR_KIND_UP_CLEAN": "1",
+    # The test knob that picks which pinned tool binary downloads: dropped for root on purpose.
+    "YADGAR_ARCH": "arm64",
+}
+DOCUMENTED_INPUTS = {
+    "YADGAR_ADMIN_EXTERNAL_ID": "boss",
+    "YADGAR_ADMIN_DISPLAY_NAME": "TheBoss",
+    "YADGAR_RUNTIME": "docker",
+    "YADGAR_OPERATORS_TIMEOUT": "11",
+    "YADGAR_ESTATE_TIMEOUT": "22",
+    "YADGAR_CLIENT_CONFIG": "/root/some/config.json",
+    # Downloads are hash-checked against tools.lock and TLS runs end to end, so a
+    # proxy is kept, in both cases.
+    "http_proxy": "http://proxy.example:3128",
+    "https_proxy": "http://proxy.example:3128",
+    "no_proxy": "localhost",
+    "HTTP_PROXY": "http://proxy.example:3128",
+    "HTTPS_PROXY": "http://proxy.example:3128",
+    "NO_PROXY": "localhost",
+}
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
+
+def rig_path_overrides(rig: Rig) -> set[str]:
+    """The rig's own YADGAR_* path overrides: documented, ignored by root, kept so the notice names them."""
+    return {name for name in rig.env() if name.startswith("YADGAR_")}
+
+
+def run_probe(rig: Rig, body: str, *args: str, **extra: str) -> subprocess.CompletedProcess:
+    """Run a probe script as root. It re-executes itself clean, then runs `body`."""
+    probe = rig.root / "probe.sh"
+    probe.write_text(
+        # The second pass is told apart by its PATH alone, with nothing forgeable
+        # and before the script is sourced: its PATH is the fixed one, which on a
+        # non-FHS host (NixOS) holds no `dirname` for SCRIPT_DIR.
+        f'if [[ "$PATH" == "{SAFE_PATH}" ]]; then\n{body}\n  exit 0\nfi\n'
+        f'source "{SCRIPT}"\n'
+        'reexec_with_clean_environment "$0" "$@"\n'
+    )
+    (rig.root / "fake" / "rules.json").write_text(json.dumps(rig.rules))
+    bash = shutil.which("bash")
+    assert bash, "bash is not installed"
+    env = rig.env(**extra)
+    route = root_route()
+    argv = [bash, str(probe), *args]
+    if route[-1] == "-i":  # sudo resets the environment; env -i restores the rig's (see as_root)
+        argv = [*route, *(f"{k}={v}" for k, v in env.items()), *argv]
+    else:
+        argv = [*route, *argv]
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_root_reexecs_under_a_scrubbed_environment(rig: Rig) -> None:
+    # POSITIVE CONTROL: the planted variables really are in the caller's environment.
+    caller = rig.env(**PLANTED, **DOCUMENTED_INPUTS)
+    for name in PLANTED:
+        assert name in caller
+
+    dump = rig.root / "env.dump"
+    proc = run_probe(rig, f'  declare -x > "{dump}"', "--with-client", **PLANTED, **DOCUMENTED_INPUTS)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert dump.exists(), "the re-executed process never ran"
+    seen = {}
+    for line in dump.read_text().splitlines():
+        m = re.match(r'declare -x (\w+)(?:="(.*)")?$', line)
+        if m:
+            seen[m.group(1)] = m.group(2)
+    for name in PLANTED:
+        assert name not in seen, f"{name} reached root's children"
+    # Nothing but the allowlist and what bash itself sets.
+    allowed = {*DOCUMENTED_INPUTS, *rig_path_overrides(rig), "PATH", "HOME", "TERM", "LANG",
+               "PWD", "SHLVL", "OLDPWD", "_"}
+    for name in seen:
+        assert name in allowed, f"{name} leaked into root's environment"
+    for name, value in DOCUMENTED_INPUTS.items():
+        assert seen.get(name) == value, f"documented input {name} was dropped"
+    assert seen["PATH"] == SAFE_PATH
+    assert seen["HOME"] == str(rig.root_home)
+
+
+def test_root_reexec_runs_once_and_keeps_the_arguments(rig: Rig) -> None:
+    dump = rig.root / "args.dump"
+    body = f'  printf "%s\\n" "$@" > "{dump}"'
+    proc = run_probe(rig, body, "--add-user", "a b", "--force")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert dump.read_text().splitlines() == ["--add-user", "a b", "--force"]
+
+
+def dirty(rig: Rig, safe_path: str | None = None, root_home: str | None = None, **extra: str) -> bool:
+    """`root_environment_is_dirty` in an environment of exactly PATH, HOME and `extra`.
+
+    The safe PATH and root's home default to the test's own, so the verdict
+    depends only on the variables planted; a run as this user never re-executes.
+    """
+    path = f"{rig.root / 'fakebin'}:{rig.root / 'hostbin'}"
+    env = {"PATH": path, "HOME": str(rig.root_home), **extra}
+    safe = safe_path or path
+    home = root_home or str(rig.root_home)
+    snippet = f"ROOT_SAFE_PATH='{safe}'; root_home() {{ echo '{home}'; }}; root_environment_is_dirty"
+    proc = subprocess.run(["bash", "-c", f'source "{SCRIPT}"; {snippet}'], env=env,
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    assert proc.returncode in (0, 1), proc.stderr
+    return proc.returncode == 0
+
+
+def test_the_environment_is_clean_only_when_it_is_exactly_the_allowlist(rig: Rig) -> None:
+    assert not dirty(rig), "a bare PATH and HOME were called dirty: the second pass would loop"
+    assert not dirty(rig, TERM="xterm", LANG="C.UTF-8", YADGAR_RUNTIME="docker", https_proxy="http://p")
+    assert dirty(rig, PIP_INDEX_URL="https://evil.example/simple")
+    assert dirty(rig, DOCKER_HOST="tcp://evil.example:2375")
+    # A planted sentinel is only another unknown variable.
+    assert dirty(rig, YADGAR_KIND_UP_CLEAN="1")
+    assert dirty(rig, YADGAR_ARCH="arm64")
+    # PATH or HOME off their fixed values is dirty on its own.
+    assert dirty(rig, safe_path="/elsewhere")
+    assert dirty(rig, root_home="/root")
+
+
+def test_main_scrubs_first_as_root_whatever_the_caller_planted(rig: Rig) -> None:
+    stub = 'reexec_with_clean_environment() { echo "REEXEC $*"; exit 77; }'
+    # As root with a dirty environment (the rig's own is): main hands over first.
+    proc = as_root(rig, f"{stub}; main --with-client", root=True)
+    assert proc.returncode == 77, proc.stdout + proc.stderr
+    assert "REEXEC" in proc.stdout and "--with-client" in proc.stdout
+    # A planted "already scrubbed" marker plus PIP_INDEX_URL is still scrubbed.
+    proc = as_root(rig, f"{stub}; main --with-client", root=True,
+                   YADGAR_KIND_UP_CLEAN="1", PIP_INDEX_URL="https://evil.example/simple")
+    assert proc.returncode == 77, "a forged marker skipped the scrub: " + proc.stdout + proc.stderr
+    # Not root: the offline suite and an unprivileged run are untouched.
+    proc = as_root(rig, f"{stub}; main --with-client", root=False)
+    assert "REEXEC" not in proc.stdout
+
+
+def test_the_real_reexec_path_runs_the_script_as_root(rig: Rig, tmp_path: Path) -> None:
+    """The actual script, executed (not sourced) as root, re-executes itself and runs.
+
+    The probes above call the function with a name of their own. This one runs
+    `"$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"` as main builds it: a wrong script name
+    there fails here and nowhere else.
+
+    The re-executed script runs under the fixed PATH, which needs the usual tools
+    in /usr/bin. Where /usr/bin lacks them (NixOS) they are bind-mounted over it
+    inside a private mount namespace of the `unshare -r` route, rather than the
+    test being skipped, which this repository's no-test-skips hook forbids."""
+    bash = shutil.which("bash")
+    assert bash, "bash is not installed"
+    env = {"PATH": os.environ["PATH"], "HOME": str(rig.root / "home"), "TERM": "dumb",
+           "PIP_INDEX_URL": "https://evil.example/simple", "YADGAR_KIND_UP_CLEAN": "1"}
+    route = root_route()
+    argv = [bash, str(SCRIPT), "--help"]
+    if Path("/usr/bin/dirname").exists():
+        if route[-1] == "-i":
+            argv = [*route, *(f"{k}={v}" for k, v in env.items()), *argv]
+        else:
+            argv = [*route, *argv]
+    else:
+        assert route[0].endswith("unshare"), "no /usr/bin/dirname and no user namespace to supply one"
+        tools = tmp_path / "usr-bin"
+        tools.mkdir()
+        for name in ("env", "dirname", "sed", "getent", "cut", "tr", "cat", "head", "tail", "grep",
+                     "awk", "tee", "mkdir", "id", "rm"):
+            found = shutil.which(name)
+            assert found, f"{name} is not installed"
+            (tools / name).symlink_to(Path(found).resolve())
+        script = f'mount --bind "{tools}" /usr/bin && exec "$@"'
+        argv = [route[0], "-rm", "/bin/sh", "-c", script, "sh", *argv]
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "kind-up.sh" in proc.stdout
