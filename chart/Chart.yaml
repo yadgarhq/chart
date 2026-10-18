@@ -84,7 +84,7 @@ dependencies:
     version: 0.7.6
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.9.4
+    version: 0.9.5
     repository: oci://ghcr.io/yadgarhq/charts
   # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
   # `condition`. 0.1.0 is ADR-0857's expand step: with no `seeder.registry`
