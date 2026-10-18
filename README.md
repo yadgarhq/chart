@@ -47,7 +47,7 @@ repository: per ADR-0725 the release pipeline resolves the ten pins at
 package time (`helm package chart -u`), so nothing here is ever committed.
 `chart/charts/` is git-ignored the same way `yadgarhq/config`'s is.
 
-**It renders no objects of its own.** Every one of the 84 objects a default
+**It renders no objects of its own.** Every one of the 87 objects a default
 install produces comes from one of the module charts or the platform layer, each reviewed, gated
 and released in its own repository. A parent that rendered a Deployment or a
 ConfigMap of its own would be a ninth module nobody declared, and ADR-0723 names
@@ -138,12 +138,21 @@ enrol an admin who already holds a credential (ADR-0655).
 **The whole estate** (ADR-0803 step B6): every module, the platform layer
 (`yadgarhq/platform` — internal CA and its leaves, the edge leaf, the Gateway
 listener, Valkey, NATS and the bootstrap Jobs), autoscaling in all seven modules
-and a database in each of the three `-db` modules. 84 objects. `example/values.yaml`
-restates the same defaults, plus `chart/ci/values.yaml`'s twelve `tls.enabled`
-switches (ruling 11, ADR-0845 — the parent's own `values.yaml` states none of
-them) and its eight NATS/valkey TLS keys at their off posture (B-P2, K-8's
-"fixture" step), so you can see every choice, and the suite holds the two
-renders equal.
+and a database in each of the three `-db` modules. 87 objects with
+`chart/ci/values.yaml`. `example/values.yaml` restates the same defaults, plus
+`chart/ci/values.yaml`'s twelve `tls.enabled` switches (ruling 11, ADR-0845 — the
+parent's own `values.yaml` states none of them) and its eight NATS/valkey TLS
+keys at their off posture (B-P2, K-8's "fixture" step), so you can see every
+choice, and the suite holds the two renders equal. Both also declare a
+placeholder `seeder.registry` (root `acme`, project `acme/web`), which adds the
+seeder's Job, ConfigMap and ServiceAccount; replace it with your own before the
+first sync. The examples hold all six gRPC servers at `tls.clientAuth:
+"required"`, with each server's client CA and each caller's client leaf named,
+because `project` admits the seeder's sync only from a verified leaf (ADR-0936).
+`chart/ci/values.yaml` keeps those six at `"off"`, because the D80 gate renders it
+with every `enabled` key false and a verifying listener needs TLS on. The posture
+moves no object. A running estate on the older `"off"` examples steps through
+`"optional"` before `"required"` (ADR-0884).
 
 **Four operators must already run in the cluster**: cert-manager, Envoy Gateway,
 mariadb-operator and KEDA. The chart installs none of them by default
@@ -272,9 +281,9 @@ suite needs the registry reachable rather than running offline.
 | what                                                   | asserted as                                                                                                                                                                          |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                                                          |
-| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 84-object set; every example leaf equals its default |
+| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 87-object set; every example leaf equals its default |
 | the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                                                         |
-| the modules alone are 32 objects                       | 3 ConfigMap, 7 Deployment, 7 Service, 7 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                           |
+| the modules alone are 35 objects                       | 4 ConfigMap, 7 Deployment, 1 Job, 7 Service, 8 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                    |
 | the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                                                |
 | the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                                                                                                          |
 | an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300                                                                               |

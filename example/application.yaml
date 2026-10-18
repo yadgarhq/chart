@@ -149,6 +149,10 @@ spec:
         # defaults do not and will not, once a per-repository contract
         # requires each one with no default (K-8).
         gateway:
+          # ledger 1616: the leaf the gateway presents on its three dials, which
+          # `iam`, `task` and `project` require.
+          clientCertificate:
+            secret: gateway-client-tls
           task:
             tls:
               enabled: true
@@ -170,42 +174,83 @@ spec:
         iam:
           tls:
             enabled: true
-            # B-U5E EXPAND (K-8's "fixture" step, ledger 925): the off
-            # posture of a key no binary here reads yet (B-U5 is the
-            # contract). See `../values.yaml` for the full comment.
-            clientAuth: "off"
+            # ledger 1616: REQUIRED, the live estate's posture (`yadgarhq/argocd`
+            # `applications/yadgar.yaml`). The listener verifies every caller's leaf
+            # against `ca.crt` in its own serving Secret, which the internal CA that
+            # issued every client leaf also signed. `"off"` would never read a caller's
+            # leaf, and the seeder's sync needs `project` to read `seeder-caller` and
+            # `project-db` to read `project-caller` (ADR-0936). Each caller below names
+            # the leaf `platform` mints for it. A RUNNING estate on the older `"off"`
+            # examples steps through `"optional"` first and moves to `"required"`
+            # only after it sees calls succeed under `"optional"` (ADR-0884).
+            clientAuth: "required"
+            clientCaSecret: iam-tls
+            clientCaSecretKey: ca.crt
           iamDb:
             tls:
               enabled: true
+              clientCertSecret: iam-client-tls
           nats:
             tls:
               enabled: false
         iam-db:
           tls:
             enabled: true
-            clientAuth: "off"
+            # ledger 1616: required, as on the live estate. See iam's comment above.
+            clientAuth: "required"
+            clientCaSecret: iam-db-tls
+            clientCaSecretKey: ca.crt
         task:
           tls:
             enabled: true
-            clientAuth: "off"
+            # ledger 1616: required, as on the live estate. See iam's comment above.
+            clientAuth: "required"
+            clientCaSecret: task-tls
+            clientCaSecretKey: ca.crt
           taskDb:
             tls:
               enabled: true
+              clientCertSecret: task-client-tls
         task-db:
           tls:
             enabled: true
-            clientAuth: "off"
+            # ledger 1616: required, as on the live estate. See iam's comment above.
+            clientAuth: "required"
+            clientCaSecret: task-db-tls
+            clientCaSecretKey: ca.crt
         project:
           tls:
             enabled: true
-            clientAuth: "off"
+            # ledger 1616: required, as on the live estate. See iam's comment above.
+            clientAuth: "required"
+            clientCaSecret: project-tls
+            clientCaSecretKey: ca.crt
           projectDb:
             tls:
               enabled: true
+              clientCertSecret: project-client-tls
         project-db:
           tls:
             enabled: true
-            clientAuth: "off"
+            # ledger 1616: required, as on the live estate. See iam's comment above.
+            clientAuth: "required"
+            clientCaSecret: project-db-tls
+            clientCaSecretKey: ca.crt
+        # THE SEEDER'S REGISTRY: replace the placeholder `acme` declaration with
+        # your own organisation's roots and projects. See `values.yaml` beside
+        # this file for the rules. Replace before the first sync. If the
+        # placeholder already synced, set `allowMassArchive: true` for the one
+        # sync that replaces it, then back to `false` (ADR-0939).
+        seeder:
+          registry:
+            roots:
+              - path: acme
+                sourceRepo: acme/gitops
+            projects:
+              - path: acme/web
+                displayName: web
+                sourceRepo: acme/web
+            allowMassArchive: false
         platform:
           edgeTLS:
             # YOUR ISSUER. The chart creates none. Both halves are required.

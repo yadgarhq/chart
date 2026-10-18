@@ -129,11 +129,20 @@ CHART = REPO / "chart"
 # same six kinds, unchanged. It first read that way at 0.1.7. ADR-0777 makes the
 # assertion that this dict is UNCHANGED the load-bearing one; a step that adds an
 # object to `platform` moves `ADOPTER_EXPECTED` below and not this.
+#
+# THE SEEDER MOVED IT, AND IT IS A MODULE, NOT `platform`. ADR-0857's fixture
+# step puts the placeholder `seeder.registry` in `EXPLICIT_TLS`
+# (`chart/ci/values.yaml`), which every modules-only render here rides along
+# with, and `seeder` carries no `condition`. So this render gained the seeder's
+# Job, its ConfigMap `seeder-registry` and its ServiceAccount: ConfigMap 3 -> 4,
+# Job 0 -> 1, ServiceAccount 7 -> 8, 32 -> 35 objects. Measured 2026-10-18 on
+# helm 4.3.0 against the pins in `chart/Chart.yaml`.
 EXPECTED = {
-    "ConfigMap": 3,
+    "ConfigMap": 4,
     "Deployment": 7,
+    "Job": 1,
     "Service": 7,
-    "ServiceAccount": 7,
+    "ServiceAccount": 8,
     "PodDisruptionBudget": 7,
     "HTTPRoute": 1,
 }
@@ -252,16 +261,24 @@ API_VERSIONS = tuple(
 # suite was red on `main` until the seeder's own
 # parent PR moved these three literals and the ladder. Re-measured 2026-10-18 on
 # helm 4.3.0 against the pins in `chart/Chart.yaml`.
+#
+# THE SEEDER'S FIXTURE STEP MOVED IT AGAIN (ADR-0857, plans/the-d35-seeder.md
+# stage 6). `example/values.yaml` and `chart/ci/values.yaml` now declare the
+# placeholder `seeder.registry`, so the render carries the seeder's Job, its
+# ConfigMap `seeder-registry` and its ServiceAccount: ConfigMap 4 -> 5, Job
+# 4 -> 5, ServiceAccount 10 -> 11, 84 -> 87 objects. Measured 2026-10-18 on helm
+# 4.3.0. The seeder Job is NOT a helm hook (`NOT_A_HOOK_BY_DESIGN` below), so
+# `HOOK_JOBS_AT_R5` does not move with it.
 ADOPTER_EXPECTED = {
     "Certificate": 15,
-    "ConfigMap": 4,
+    "ConfigMap": 5,
     "Deployment": 8,
     "EnvoyProxy": 1,
     "Gateway": 1,
     "GatewayClass": 1,
     "HTTPRoute": 1,
     "Issuer": 2,
-    "Job": 4,
+    "Job": 5,
     "MariaDB": 3,
     "NetworkPolicy": 2,
     "PodDisruptionBudget": 8,
@@ -269,10 +286,10 @@ ADOPTER_EXPECTED = {
     "RoleBinding": 3,
     "ScaledObject": 7,
     "Service": 10,
-    "ServiceAccount": 10,
+    "ServiceAccount": 11,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 84
+ADOPTER_OBJECTS = 87
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -311,6 +328,19 @@ ADOPTER_OBJECTS = 84
 # always closed for `ADOPTER_OBJECTS` and nothing closed for these.
 RBAC_TRIPLE_NAMES_AT_R5 = ["bootstrap-secrets", "envoy-gateway-probe", "preflight"]
 HOOK_JOBS_AT_R5 = 4
+
+# THE ONE JOB IN THE RENDER THAT IS NOT A HOOK, AND IT IS NOT ONE ON PURPOSE.
+# The D35 seeder (plans/the-d35-seeder.md, "Runtime: a Job, ordered after
+# `project` and `project-db`") is an ordinary release object at Argo sync-wave
+# 1 with `Replace=true,Force=true`, so every umbrella sync re-runs it after wave
+# 0 is healthy. A helm hook would run it once per install or upgrade, before or
+# after the whole release, which is not the ordering the plan asks for. The
+# hook gates below are about the PLATFORM layer's install-time Jobs, so they
+# skip this name and count only the rest; `test_the_seeder_job_is_a_sync_wave_
+# object_and_not_a_hook` pins that the exemption is the seeder's real shape and
+# not a hole a platform Job could slip through. A name, not a label match, so a
+# platform Job that happened to carry `app: seeder` is still read.
+NOT_A_HOOK_BY_DESIGN = {"seeder"}
 
 # WHAT THE FLIP ABOVE LEAVES BEHIND, a literal for the same reason the two above
 # are literals. MEASURED 2026-09-24 at `platform` 0.1.7, and re-measured the same
@@ -1735,6 +1765,11 @@ def hook_annotations(document: dict) -> dict[str, str]:
 THE_HOOK_KEY = "helm.sh/hook"
 
 
+def hook_candidate_jobs(documents: list[dict]) -> list[str]:
+    """The names of every Job the hook gates read: all but `NOT_A_HOOK_BY_DESIGN`. PURE."""
+    return [name for name in names_of(documents, "Job") if name not in NOT_A_HOOK_BY_DESIGN]
+
+
 def jobs_that_are_not_hooks(documents: list[dict]) -> list[str]:
     """Every Job in the render carrying no `helm.sh/hook` annotation. PURE.
 
@@ -1761,7 +1796,9 @@ def jobs_that_are_not_hooks(documents: list[dict]) -> list[str]:
         f"{sorted(hook_annotations(job))}, and every one of those is a modifier "
         f"that means nothing without the phase"
         for job in documents
-        if job.get("kind") == "Job" and THE_HOOK_KEY not in hook_annotations(job)
+        if job.get("kind") == "Job"
+        and (job.get("metadata") or {}).get("name") not in NOT_A_HOOK_BY_DESIGN
+        and THE_HOOK_KEY not in hook_annotations(job)
     ]
 
 
@@ -1848,9 +1885,10 @@ def test_every_job_the_platform_layer_renders_is_an_install_time_hook(
     gate now reads the exact key, through `jobs_that_are_not_hooks`; see that
     function for the measurement.
     """
-    jobs = [document for document in adopter if document.get("kind") == "Job"]
+    jobs = hook_candidate_jobs(adopter)
     assert len(jobs) == HOOK_JOBS_AT_R5, (
-        f"the adopter-values render holds {len(jobs)} Job(s) and this gate expects "
+        f"the adopter-values render holds {len(jobs)} Job(s) besides "
+        f"{sorted(NOT_A_HOOK_BY_DESIGN)} and this gate expects "
         f"{HOOK_JOBS_AT_R5}: {names_of(adopter, 'Job')}"
     )
     not_hooks = jobs_that_are_not_hooks(adopter)
@@ -1932,7 +1970,7 @@ def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gat
     )
     documents = adopter_render("-f", str(values))
 
-    jobs = names_of(documents, "Job")
+    jobs = hook_candidate_jobs(documents)
     assert len(jobs) == HOOK_JOBS_AT_R5 - 1, (
         f"turning off `platform.preflight.probes.envoyGateway` left "
         f"{len(jobs)} Job(s) — {jobs} — where {HOOK_JOBS_AT_R5 - 1} was expected. "
@@ -1957,10 +1995,10 @@ def test_dropping_the_second_preflight_probe_reddens_the_hook_job_and_triple_gat
         f"carries one Job, one Role, one RoleBinding and one ServiceAccount."
     )
     assert dict(kinds(documents)) == ADOPTER_EXPECTED | {
-        "Job": 3,
+        "Job": 4,
         "Role": 2,
         "RoleBinding": 2,
-        "ServiceAccount": 9,
+        "ServiceAccount": 10,
     }, (
         f"the flip's kind-level census is {dict(kinds(documents))} and this test "
         f"expects the decomposition its own docstring names: one Job, one Role, "
@@ -2004,7 +2042,7 @@ def test_the_rbac_triple_names_are_asserted_independently_of_the_job_count(
         "the rename moved a kind count, so this input no longer isolates the names"
     )
     assert len(documents) == ADOPTER_OBJECTS
-    assert len(names_of(documents, "Job")) == HOOK_JOBS_AT_R5, (
+    assert len(hook_candidate_jobs(documents)) == HOOK_JOBS_AT_R5, (
         "the rename moved the Job count, so the count gate would fire on it and "
         "this proof shows nothing about the names being reachable"
     )
@@ -2204,9 +2242,9 @@ def test_a_vendored_job_that_lost_its_hook_annotation_reddens_the_hook_gate(
     assert THE_JOB_THE_MUTATION_UNHOOKS in message, message
     assert THE_HOOK_KEY in message, message
 
-    assert len(names_of(documents, "Job")) == HOOK_JOBS_AT_R5, (
+    assert len(hook_candidate_jobs(documents)) == HOOK_JOBS_AT_R5, (
         f"the deletion moved the Job count to "
-        f"{len(names_of(documents, 'Job'))}, so it perturbed more than the "
+        f"{len(hook_candidate_jobs(documents))}, so it perturbed more than the "
         f"annotation and this case no longer isolates the annotation assert"
     )
     assert len(documents) == ADOPTER_OBJECTS, (
@@ -2359,14 +2397,14 @@ def test_a_server_enforcing_clientauth_with_no_presenter_refuses(
 EMPTY_CALLER_SECRET_CASES = [
     pytest.param(
         "iam:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
-        "gateway:\n  iam:\n    tls:\n      enabled: true\n",
+        "gateway:\n  iam:\n    tls:\n      enabled: true\n  clientCertificate:\n    secret: \"\"\n",
         'iam.tls.clientAuth is "required"',
         "gateway.clientCertificate.secret is \"\"",
         id="iam-from-gateway",
     ),
     pytest.param(
         "iam-db:\n  tls:\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
-        "iam:\n  iamDb:\n    tls:\n      enabled: true\n",
+        "iam:\n  iamDb:\n    tls:\n      enabled: true\n      clientCertSecret: \"\"\n",
         'iam-db.tls.clientAuth is "required"',
         "iam.iamDb.tls.clientCertSecret is \"\"",
         id="iam-db-from-iam",
@@ -2534,16 +2572,32 @@ def test_a_non_boolean_certificates_create_refuses_by_name_instead_of_panicking(
         assert raise_text not in message, f"RAISED instead of refusing: {message}"
 
 
+# THE GATEWAY PRESENTING NOTHING, AS THE ADOPTER VALUES HAD IT BEFORE LEDGER 1616.
+# `example/values.yaml` now names `gateway-client-tls` and holds `iam`, `task` and
+# `project` at `"required"`, so emptying the gateway's leaf there is refused by
+# B-U6 PART 2 before any check below can speak. The cases that need the gateway
+# to present nothing take this as a second `-f`, which puts its three servers
+# back at `"off"` too, the posture those cases were written against.
+GATEWAY_PRESENTS_NOTHING = (
+    'gateway:\n  clientCertificate:\n    secret: ""\n'
+    + "".join(
+        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n' for server in ("iam", "task", "project")
+    )
+)
+
+
+def gateway_presents_nothing(directory: Path) -> Path:
+    return overlay(directory / "gateway-presents-nothing.yaml", GATEWAY_PRESENTS_NOTHING)
+
+
 def test_an_empty_client_secret_is_not_checked_against_the_leaf_map(tmp_path: Path) -> None:
     """B-U6 PART 1's OTHER SKIP: an empty Secret name means "presents nothing", not "named wrong".
 
-    `gateway.clientCertificate.secret` defaults to `""`, which the adopter
-    render already carries and already renders clean — this red-adjacent case
-    states the premise explicitly rather than leaving it implied by the
-    default.
+    `gateway.clientCertificate.secret` defaults to `""` in the gateway chart.
+    The adopter values name it since ledger 1616, so `GATEWAY_PRESENTS_NOTHING`
+    restores the empty name, with the three servers it dials back at `"off"`.
     """
-    values = overlay(tmp_path / "an-empty-client-secret.yaml", 'gateway:\n  clientCertificate:\n    secret: ""\n')
-    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    documents = render(str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)))
     assert documents
 
 
@@ -3038,7 +3092,10 @@ def test_nats_clientauth_required_with_an_empty_presenting_secret_refuses(
     false on both arms — this reaches the refusal on the NEW half alone.
     """
     values = overlay(tmp_path / "nats-required-empty-presenting-secret.yaml", overlay_body)
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm(
+        "template", "yadgar", str(CHART), *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)), "-f", str(values),
+    )
     assert result.returncode != 0, result.stdout
     assert 'platform.nats.tls.clientAuth is "required"' in result.stderr, result.stderr
     assert "gateway.nats.tls.enabled is true" in result.stderr, result.stderr
@@ -3077,7 +3134,10 @@ def test_valkey_clientauth_with_an_empty_presenting_secret_refuses(tmp_path: Pat
         tmp_path / "valkey-clientauth-empty-presenting-secret.yaml",
         "platform:\n  valkey:\n    tls:\n      clientAuth: optional\ngateway:\n  valkey:\n    tls:\n      enabled: true\n",
     )
-    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    result = helm(
+        "template", "yadgar", str(CHART), *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(gateway_presents_nothing(tmp_path)), "-f", str(values),
+    )
     assert result.returncode != 0, result.stdout
     assert 'platform.valkey.tls.clientAuth is "optional"' in result.stderr, result.stderr
     assert "gateway.valkey.tls.enabled is true" in result.stderr, result.stderr
@@ -4885,6 +4945,41 @@ ADOPTER_ONLY_KEYS = {
     "task-db.tls.clientAuth",
     "project.tls.clientAuth",
     "project-db.tls.clientAuth",
+    # ADR-0857's FIXTURE STEP for the D35 seeder (plans/the-d35-seeder.md stage
+    # 6): the organisation's registry. ADR-0705 gives it no default, so the
+    # parent's `values.yaml` must never state one; `example/values.yaml`,
+    # `chart/ci/values.yaml` and both parent examples state the same placeholder
+    # declaration (`SEEDER_REGISTRY_KEYS` below). `leaves()` stops at a list, so
+    # the two lists are one leaf each.
+    "seeder.registry.roots",
+    "seeder.registry.projects",
+    "seeder.registry.allowMassArchive",
+    # THE mTLS POSTURE THE SEEDER'S SYNC NEEDS (plans/the-d35-seeder.md stage 8,
+    # ledger 1616). `project` admits `SyncProjects` only from a verified leaf
+    # whose common name is `seeder-caller`, and `project-db` only from
+    # `project-caller` (ADR-0936). A listener at `clientAuth: "off"` never asks
+    # for a client certificate, so both checks see no caller and refuse. The six
+    # `clientAuth` keys above therefore move to `"required"`, the live estate's
+    # posture (`yadgarhq/argocd` `applications/yadgar.yaml`), and each needs the
+    # authority it verifies against and each caller the leaf it presents. These
+    # are the adopter's, like the switches above: a parent default would be a
+    # tenth writer (`MTLS_POSTURE_KEYS` below).
+    "iam.tls.clientCaSecret",
+    "iam.tls.clientCaSecretKey",
+    "iam-db.tls.clientCaSecret",
+    "iam-db.tls.clientCaSecretKey",
+    "task.tls.clientCaSecret",
+    "task.tls.clientCaSecretKey",
+    "task-db.tls.clientCaSecret",
+    "task-db.tls.clientCaSecretKey",
+    "project.tls.clientCaSecret",
+    "project.tls.clientCaSecretKey",
+    "project-db.tls.clientCaSecret",
+    "project-db.tls.clientCaSecretKey",
+    "gateway.clientCertificate.secret",
+    "iam.iamDb.tls.clientCertSecret",
+    "task.taskDb.tls.clientCertSecret",
+    "project.projectDb.tls.clientCertSecret",
 }
 
 # THE KEYS `chart/values.yaml` STATES AND THE EXAMPLE DOES NOT. `gateway.gateway.enabled`
@@ -6122,15 +6217,36 @@ SIX_TLS_CLIENT_AUTH_KEYS = {
 } - EIGHT_NATS_VALKEY_TLS_KEYS
 assert len(SIX_TLS_CLIENT_AUTH_KEYS) == 6, sorted(SIX_TLS_CLIENT_AUTH_KEYS)
 
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ADR-0857's fixture
+# step for the seeder): the three `seeder.registry` leaves. Defined BEFORE
+# `TWELVE_TLS_SWITCHES` so that set can subtract them out. Without the
+# subtraction the three join the "twelve" (fifteen), and the twelve-switch
+# gate below then demands `seeder.registry.roots` in every source as if it were
+# a TLS switch: the leak ledger 1592 names.
+SEEDER_REGISTRY_KEYS = {key for key in ADOPTER_ONLY_KEYS if key.startswith("seeder.registry.")}
+assert len(SEEDER_REGISTRY_KEYS) == 3, sorted(SEEDER_REGISTRY_KEYS)
+
+# DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ledger 1616): the six
+# servers' verifying authority and the four callers' client leaves. Subtracted
+# from `TWELVE_TLS_SWITCHES` for the reason `SEEDER_REGISTRY_KEYS` is.
+MTLS_POSTURE_KEYS = {
+    key
+    for key in ADOPTER_ONLY_KEYS
+    if key.endswith((".tls.clientCaSecret", ".tls.clientCaSecretKey", ".tls.clientCertSecret", ".clientCertificate.secret"))
+}
+assert len(MTLS_POSTURE_KEYS) == 16, sorted(MTLS_POSTURE_KEYS)
+
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
 # exception list `default_disagreements` walks past (the two edge-issuer keys,
-# the eight NATS/valkey keys above, the six `clientAuth` keys above, plus
-# these twelve), and copying the twelve out by hand would be a second place
-# for the list to drift from the one `ADOPTER_ONLY_KEYS` already names.
+# the eight NATS/valkey keys above, the six `clientAuth` keys above, the three
+# seeder registry keys above, plus these twelve), and copying the twelve out
+# by hand would be a second place for the list to drift from the one
+# `ADOPTER_ONLY_KEYS` already names.
 TWELVE_TLS_SWITCHES = ADOPTER_ONLY_KEYS - {
     "platform.edgeTLS.issuerRef.name",
     "platform.edgeTLS.issuerRef.kind",
-} - EIGHT_NATS_VALKEY_TLS_KEYS - SIX_TLS_CLIENT_AUTH_KEYS
+} - EIGHT_NATS_VALKEY_TLS_KEYS - SIX_TLS_CLIENT_AUTH_KEYS - SEEDER_REGISTRY_KEYS - MTLS_POSTURE_KEYS
+assert len(TWELVE_TLS_SWITCHES) == 12, sorted(TWELVE_TLS_SWITCHES)
 
 
 def twelve_switches_of(values: dict) -> dict[str, object]:
@@ -6201,9 +6317,10 @@ def six_tls_client_auth_keys_of(values: dict) -> dict[str, object]:
 def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> None:
     """B-P1, K-8's "fixture" step for `tls.clientAuth` (ledger 925): the same six
     `tls.clientAuth` keys — one per gRPC server (iam, iam-db, task, task-db,
-    project, project-db) — are PRESENT and agree on the same value, wherever an
-    adopter reads them from — `example/values.yaml`, both parent examples'
-    `valuesObject`, and `chart/ci/values.yaml` (K-8's fixture). The twin of
+    project, project-db) — are PRESENT in all four adopter sources, and agree on
+    `"required"` across the three examples (`example/values.yaml` and both
+    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds all six
+    at `"off"` (`CI_ONLY_POSTURE_REASON`, ledger 1616). The twin of
     `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
     key first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
     `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand).
@@ -6229,7 +6346,172 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
         for name, switches in stated.items()
     }
     assert not_quoted_strings == {name: [] for name in sources}, not_quoted_strings
-    assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+    # LEDGER 1616 SPLITS THE AGREEMENT IN TWO, AND THE SPLIT IS FORCED. The
+    # examples hold all six at `"required"`; `chart/ci/values.yaml` holds all six
+    # at `"off"`, because the shared D80 gate merges that file and sets every
+    # `enabled` key false, and a verifying `clientAuth` over a cleartext listener
+    # is refused (`CI_ONLY_POSTURE_REASON`). Each half must still agree within.
+    examples = {name: switches for name, switches in stated.items() if name != "chart/ci/values.yaml"}
+    assert len({frozenset(switches.items()) for switches in examples.values()}) == 1, examples
+    assert set(stated["chart/ci/values.yaml"].values()) == {"off"}, stated["chart/ci/values.yaml"]
+
+
+def mtls_posture_keys_of(values: dict) -> dict[str, object]:
+    """Every one of `MTLS_POSTURE_KEYS` `values` states, by path, with its value. PURE."""
+    return {path: value_at(values, path) for path in MTLS_POSTURE_KEYS if value_at(values, path) is not _ABSENT}
+
+
+# WHY `chart/ci/values.yaml` IS NOT A POSTURE SOURCE (ledger 1616). The shared
+# D80 gate (`d80_portability.py` in `yadgarhq/actions`) renders the chart over
+# that file with every `enabled` key set false, `tls.enabled` included, and every
+# server refuses `clientAuth: "required"` over a cleartext listener. Measured on
+# this PR's first CI run: `ci / portability` failed at
+# `task/templates/render-checks.yaml:280`. So that file keeps the six at `"off"`
+# and states none of `MTLS_POSTURE_KEYS`; the posture moves no object, so K1 and
+# `parent_example_failures` still compare equal object sets.
+CI_ONLY_POSTURE_REASON = "D80 renders chart/ci/values.yaml with every tls.enabled false"
+
+
+def posture_sources() -> dict[str, dict]:
+    """The adopter sources that carry the ledger-1616 posture: every one but `chart/ci/values.yaml`."""
+    sources = {"example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text())}
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    return sources
+
+
+def ci_posture_failures(values: dict) -> list[str]:
+    """Why `chart/ci/values.yaml` would fail D80's all-off render on the posture, or []. PURE."""
+    failures = [
+        f"`{path}` is {value_at(values, path)!r}, not \"off\" ({CI_ONLY_POSTURE_REASON})"
+        for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS)
+        if value_at(values, path) != "off"
+    ]
+    failures += [
+        f"`{path}` is stated; with `clientAuth` \"off\" nothing reads it ({CI_ONLY_POSTURE_REASON})"
+        for path in sorted(mtls_posture_keys_of(values))
+    ]
+    return failures
+
+
+def test_the_ci_values_keep_the_six_servers_off_for_d80() -> None:
+    assert ci_posture_failures(yaml.safe_load(EXPLICIT_TLS.read_text())) == []
+
+
+def test_the_example_posture_in_the_ci_values_reddens_the_d80_gate() -> None:
+    """THE RED CASE: `chart/ci/values.yaml` given `example/values.yaml`'s posture."""
+    values = copied(yaml.safe_load(EXPLICIT_TLS.read_text()))
+    example = yaml.safe_load(ADOPTER_VALUES.read_text())
+    for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS | MTLS_POSTURE_KEYS):
+        *parents, leaf = path.split(".")
+        node = values
+        for key in parents:
+            node = node.setdefault(key, {})
+        node[leaf] = value_at(example, path)
+    failures = ci_posture_failures(values)
+    assert len(failures) == len(SIX_TLS_CLIENT_AUTH_KEYS) + len(MTLS_POSTURE_KEYS), failures
+
+
+def test_the_mtls_posture_keys_agree_across_every_adopter_source() -> None:
+    """ledger 1616: the sixteen authority and client-leaf keys are PRESENT and the
+    SAME in `example/values.yaml` and both parent examples, the twin of the
+    `clientAuth` gate above for the keys `"required"` needs. `chart/ci/values.yaml`
+    is excluded by `CI_ONLY_POSTURE_REASON` and gated on its own above.
+    """
+    sources = {"example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text())}
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    stated = {name: mtls_posture_keys_of(values) for name, values in sources.items()}
+    missing = {name: sorted(MTLS_POSTURE_KEYS - keys.keys()) for name, keys in stated.items()}
+    assert missing == {name: [] for name in sources}, missing
+    assert len({frozenset(keys.items()) for keys in stated.values()}) == 1, stated
+
+
+def test_every_adopter_source_states_every_grpc_server_at_required() -> None:
+    """ledger 1616: `"required"`, not merely agreeing. Six `"off"` would agree too, and
+    under `"off"` the seeder's sync is refused at `project`'s `admit`.
+    """
+    sources = posture_sources()
+    not_required = {
+        name: sorted(path for path in SIX_TLS_CLIENT_AUTH_KEYS if value_at(values, path) != "required")
+        for name, values in sources.items()
+    }
+    assert not_required == {name: [] for name in sources}, not_required
+
+
+def seeder_registries_by_source() -> dict[str, object]:
+    """`seeder.registry` as each adopter source states it, `_ABSENT` where it does not."""
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    return {name: value_at(values, "seeder.registry") for name, values in sources.items()}
+
+
+def registry_disagreements(registries: dict[str, object]) -> list[str]:
+    """Every source missing `seeder.registry`, and any two that state it differently. PURE."""
+    failures = [f"`{name}` states no `seeder.registry`" for name, value in registries.items() if value is _ABSENT]
+    stated = {name: value for name, value in registries.items() if value is not _ABSENT}
+    if len({json.dumps(value, sort_keys=True) for value in stated.values()}) > 1:
+        failures.append(f"the sources state different registries: {stated}")
+    return failures
+
+
+def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
+    """ADR-0857's FIXTURE STEP: one placeholder `seeder.registry`, PRESENT and the
+    SAME, in `example/values.yaml`, `chart/ci/values.yaml` and both parent examples.
+
+    THE CHAIN THAT FORCES ALL FOUR. The kind example must declare it so a cold
+    install seeds (plans/the-d35-seeder.md stage 8). `parent_example_failures`
+    then holds each parent example's object set equal to the pinned parent over
+    `chart/ci/values.yaml`, which forces the ci file and `example/application.yaml`;
+    K1 holds the ci render equal to `example/values.yaml`'s, which forces that
+    one. Object identity alone cannot see two registries that differ in content,
+    so this gate compares the declarations themselves.
+    """
+    assert registry_disagreements(seeder_registries_by_source()) == []
+
+
+def test_a_source_that_drops_or_changes_the_registry_reddens_the_agreement_gate() -> None:
+    """THE RED CASE: one source without the block, and one stating another root."""
+    registries = seeder_registries_by_source()
+    dropped = dict(registries, **{"example/kind/application.yaml": _ABSENT})
+    assert registry_disagreements(dropped) == ["`example/kind/application.yaml` states no `seeder.registry`"]
+    changed = copied(registries["example/values.yaml"])
+    changed["roots"][0]["path"] = "other"
+    failures = registry_disagreements(dict(registries, **{"chart/ci/values.yaml": changed}))
+    assert len(failures) == 1 and "different registries" in failures[0], failures
+
+
+def defaulted_registry_keys(defaults: dict) -> list[str]:
+    """Every `SEEDER_REGISTRY_KEYS` leaf `chart/values.yaml` states. PURE.
+
+    `default_disagreements` skips `ADOPTER_ONLY_KEYS` and `unstated_defaults` is
+    satisfied because the example states them, so neither K1 walk can see a
+    registry DEFAULT. ADR-0705 gives the registry none: a parent default would
+    seed every adopter with this placeholder organisation, and the sync archives
+    whatever the declaration omits (ADR-0934).
+    """
+    return [
+        f"`{path}` is stated in `chart/values.yaml`; the registry is the adopter's and has no default"
+        for path in sorted(SEEDER_REGISTRY_KEYS)
+        if value_at(defaults, path) is not _ABSENT
+    ]
+
+
+def test_the_parent_defaults_state_no_seeder_registry() -> None:
+    assert defaulted_registry_keys(yaml.safe_load((CHART / "values.yaml").read_text()) or {}) == []
+
+
+def test_a_registry_default_reddens_the_no_default_gate() -> None:
+    """THE RED CASE: the parent's defaults with the example's registry copied in."""
+    defaults = yaml.safe_load((CHART / "values.yaml").read_text())
+    defaults["seeder"]["registry"] = copied(value_at(yaml.safe_load(ADOPTER_VALUES.read_text()), "seeder.registry"))
+    failures = defaulted_registry_keys(defaults)
+    assert len(failures) == len(SEEDER_REGISTRY_KEYS), failures
+    assert any("`seeder.registry.roots`" in failure for failure in failures), failures
 
 
 A_NEW_PARENT_EXAMPLE = "example/new/application.yaml"
@@ -6734,10 +7016,12 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
 #
 # `seeder` 0.1.0 IS THE EXPAND STEP: with no `seeder.registry` block it renders
 # NOTHING, and a present block is checked whole by the seeder's own render
-# checks. So the parent's default render does not move, and every gate below that
-# needs a seeder object renders it through `SEEDER_DECLARATION`, an overlay. The
-# FIXTURE step (`chart/ci/values.yaml` and `example/values.yaml` declare a root)
-# is the next pull request; the CONTRACT step is a seeder release.
+# checks. THIS FILE NOW CARRIES THE FIXTURE STEP: `example/values.yaml`,
+# `chart/ci/values.yaml` and both parent examples declare `SEEDER_DECLARATION`,
+# a placeholder `acme` organisation, so the adopter render and the default render
+# both carry the seeder's three objects. `NO_REGISTRY` removes the block again,
+# which is the expand step's render. The CONTRACT step is a seeder release that
+# makes `registry` required.
 #
 # THE TWO TLS SECRETS ARE THE PARENT'S OWN DEFAULTS, for the reason
 # `gateway.adminBootstrap.tokenSecret` is one: `platform`, which this parent
@@ -6757,6 +7041,10 @@ SEEDER_DECLARATION = (
     "        sourceRepo: acme/web\n"
     "    allowMassArchive: false\n"
 )
+
+# THE EXPAND STEP'S RENDER, rebuilt over the fixture: a `null` in a later `-f`
+# deletes the key, so the seeder sees no `registry` and renders nothing.
+NO_REGISTRY = "seeder:\n  registry: null\n"
 
 # WHAT THE SEEDER RENDERS ONCE DECLARED, and nothing else: one Job, the
 # ConfigMap holding the declaration, and the ServiceAccount the Job runs as. A
@@ -6800,20 +7088,53 @@ def test_the_seeder_is_a_dependency_with_no_condition() -> None:
     ], entries
 
 
-def test_the_seeder_renders_nothing_without_a_registry(adopter: list[dict]) -> None:
-    """THE EXPAND STEP AT THE PARENT: the adopter render carries no seeder object."""
-    assert seeder_objects(adopter) == set()
-
-
-def test_a_declared_registry_renders_the_seeders_three_objects(tmp_path: Path) -> None:
-    """THE RED CASE FOR THE GATE ABOVE, and what the fixture step will turn on.
-
-    A declaration adds exactly `SEEDER_OBJECTS` and nothing else, so the gate above
-    is not green merely because the seeder could never render through this parent.
+def test_the_adopter_values_declare_the_registry_and_render_the_seeders_three_objects(
+    adopter: list[dict],
+) -> None:
+    """THE FIXTURE STEP AT THE PARENT: `example/values.yaml` declares the placeholder
+    registry, and the render carries exactly `SEEDER_OBJECTS` with the seeder's label.
     """
-    documents = adopter_render("-f", str(overlay(tmp_path / "declared.yaml", SEEDER_DECLARATION)))
-    assert seeder_objects(documents) == SEEDER_OBJECTS
-    assert len(documents) == ADOPTER_OBJECTS + len(SEEDER_OBJECTS)
+    assert value_at(yaml.safe_load(ADOPTER_VALUES.read_text()), "seeder.registry") == yaml.safe_load(
+        SEEDER_DECLARATION
+    )["seeder"]["registry"]
+    assert seeder_objects(adopter) == SEEDER_OBJECTS
+
+
+def test_without_a_registry_the_seeder_renders_nothing(tmp_path: Path) -> None:
+    """THE RED CASE FOR THE GATE ABOVE, and the expand step's own render.
+
+    Removing the block drops exactly `SEEDER_OBJECTS` and nothing else, so the gate
+    above is green because of the declaration and not because the seeder always
+    renders through this parent.
+    """
+    documents = adopter_render("-f", str(overlay(tmp_path / "no-registry.yaml", NO_REGISTRY)))
+    assert seeder_objects(documents) == set()
+    assert len(documents) == ADOPTER_OBJECTS - len(SEEDER_OBJECTS)
+
+
+def test_the_seeder_job_is_a_sync_wave_object_and_not_a_hook(adopter: list[dict]) -> None:
+    """`NOT_A_HOOK_BY_DESIGN` IS THE SEEDER'S REAL SHAPE, NOT A HOLE IN THE HOOK GATES.
+
+    The seeder Job carries no `helm.sh/hook` annotation and does carry Argo
+    sync-wave 1 with `Replace=true,Force=true`: an ordinary object that runs after
+    wave 0 on every sync (plans/the-d35-seeder.md). If a seeder release made it a
+    hook, this test goes red and the exemption must go with it.
+    """
+    job = seeder_job(adopter)
+    annotations = job["metadata"].get("annotations") or {}
+    assert THE_HOOK_KEY not in hook_annotations(job), annotations
+    assert annotations.get("argocd.argoproj.io/sync-wave") == "1", annotations
+    assert annotations.get("argocd.argoproj.io/sync-options") == "Replace=true,Force=true", annotations
+    assert NOT_A_HOOK_BY_DESIGN == {job["metadata"]["name"]}
+
+
+def test_a_platform_job_named_outside_the_exemption_still_reddens_the_hook_gate() -> None:
+    """THE EXEMPTION IS ONE NAME: a non-hook Job by any other name is still reported. PURE."""
+    unhooked = {"kind": "Job", "metadata": {"name": "preflight", "annotations": {}}}
+    seeder = {"kind": "Job", "metadata": {"name": "seeder", "annotations": {}}}
+    assert jobs_that_are_not_hooks([seeder]) == []
+    assert len(jobs_that_are_not_hooks([seeder, unhooked])) == 1
+    assert hook_candidate_jobs([seeder, unhooked]) == ["preflight"]
 
 
 def test_the_seeder_job_verifies_project_and_presents_its_own_leaf(tmp_path: Path) -> None:
@@ -6865,3 +7186,176 @@ def test_the_parent_schema_declares_the_seeder_section(tmp_path: Path) -> None:
     result = helm("template", "yadgar", str(copy), *API_VERSIONS, "-f", str(EXPLICIT_TLS))
     assert result.returncode != 0, result.stdout[:2000]
     assert "seeder" in result.stderr, result.stderr
+
+
+# ── the cold install seeds (plans/the-d35-seeder.md stage 8) ─────────────────
+#
+# `bootstrap/kind-up.sh` (cold-install path A) applies `example/kind/application.yaml`
+# and nothing else (`ESTATE_APP_FILE`). Without `seeder.registry` there, the
+# seeder renders nothing, no row is ever written, and the gateway loads an empty
+# registry. This gate renders that file's `valuesObject` over the PUBLISHED parent
+# it pins (`pinned`), which is what the cold install pulls, and requires the Job
+# and a ConfigMap whose declaration names at least one root and one project.
+
+
+def kind_seeding_failures(documents: list[dict]) -> list[str]:
+    """Why a render would leave a cold install's registry empty, or []. PURE."""
+    failures = []
+    if not [d for d in documents if d.get("kind") == "Job" and (d.get("metadata") or {}).get("name") == "seeder"]:
+        failures.append("the render holds no Job `seeder`, so nothing writes the registry")
+    configmaps = [
+        d for d in documents if d.get("kind") == "ConfigMap" and (d.get("metadata") or {}).get("name") == "seeder-registry"
+    ]
+    if not configmaps:
+        return failures + ["the render holds no ConfigMap `seeder-registry`, so the Job has no declaration"]
+    declaration = json.loads((configmaps[0].get("data") or {}).get("registry.json") or "{}")
+    for key in ("roots", "projects"):
+        if not declaration.get(key):
+            failures.append(f"ConfigMap `seeder-registry` declares no {key}: {declaration}")
+    return failures
+
+
+def kind_render(tarball: Path, values_object: dict, destination: Path) -> list[dict]:
+    destination.mkdir(parents=True, exist_ok=True)
+    result = example_render(tarball, values_object, destination)
+    assert result.returncode == 0, result.stderr
+    return [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+
+
+def test_the_kind_example_seeds_a_non_empty_registry(pinned: Path, tmp_path: Path) -> None:
+    """THE COLD-INSTALL GATE: the kind example renders Job `seeder` and a non-empty
+    ConfigMap `seeder-registry` over the parent it pins.
+    """
+    assert kind_seeding_failures(kind_render(pinned, kind_values(), tmp_path / "kind")) == []
+
+
+def test_the_kind_example_without_its_registry_reddens_the_seeding_gate(pinned: Path, tmp_path: Path) -> None:
+    """THE RED CASE: the same file with `seeder.registry` removed renders neither object."""
+    values_object = kind_values()
+    assert "registry" in values_object["seeder"], values_object.get("seeder")
+    del values_object["seeder"]["registry"]
+    failures = kind_seeding_failures(kind_render(pinned, values_object, tmp_path / "kind-no-registry"))
+    assert any("no Job `seeder`" in failure for failure in failures), failures
+    assert any("no ConfigMap `seeder-registry`" in failure for failure in failures), failures
+
+
+@pytest.mark.parametrize("key", ["roots", "projects"])
+def test_an_empty_declaration_list_reddens_the_seeding_gate(key: str) -> None:
+    """THE OTHER RED CASE: a ConfigMap that renders but declares nothing in one list. PURE."""
+    declaration = {"roots": [{"path": "acme"}], "projects": [{"path": "acme/web"}], "allowMassArchive": False}
+    declaration[key] = []
+    documents = [
+        {"kind": "Job", "metadata": {"name": "seeder"}},
+        {"kind": "ConfigMap", "metadata": {"name": "seeder-registry"}, "data": {"registry.json": json.dumps(declaration)}},
+    ]
+    assert kind_seeding_failures(documents) == [f"ConfigMap `seeder-registry` declares no {key}: {declaration}"]
+
+
+# ── the seeder's sync passes `admit` on both hops (ledger 1616) ──────────────
+#
+# A rendered Job is not a seeded registry. `project` admits `SyncProjects` only
+# from the verified leaf `seeder-caller` and relays it to `project-db`, which
+# admits only `project-caller` (ADR-0936). A listener reads a caller's leaf only
+# when its `LISTEN_TLS_CLIENT_AUTH` verifies, so the kind example must render
+# both servers at `"required"`, the seeder and `project` each mounting the leaf
+# whose common name the next hop checks, and every OTHER caller mounting its own
+# leaf too, or `"required"` on its server refuses that caller's every call.
+
+# (Deployment, the Secret it must mount as its client leaf).
+CALLER_LEAVES = {
+    ("Deployment", "gateway"): "gateway-client-tls",
+    ("Deployment", "iam"): "iam-client-tls",
+    ("Deployment", "task"): "task-client-tls",
+    ("Deployment", "project"): "project-client-tls",
+    ("Job", "seeder"): "seeder-client-tls",
+}
+VERIFYING_SERVERS = ("iam", "iam-db", "task", "task-db", "project", "project-db")
+ADMITTED_COMMON_NAMES = {"seeder-client-tls": "seeder-caller", "project-client-tls": "project-caller"}
+
+
+def pod_spec(documents: list[dict], kind: str, name: str) -> dict | None:
+    for document in documents:
+        if document.get("kind") == kind and (document.get("metadata") or {}).get("name") == name:
+            return document["spec"]["template"]["spec"]
+    return None
+
+
+def admit_failures(documents: list[dict]) -> list[str]:
+    """Why the seeder's sync would be refused at either hop's `admit`, or []. PURE."""
+    failures = []
+    for server in VERIFYING_SERVERS:
+        spec = pod_spec(documents, "Deployment", server)
+        env = {e["name"]: e.get("value") for c in (spec or {}).get("containers", []) for e in c.get("env", [])}
+        if env.get("LISTEN_TLS_CLIENT_AUTH") != "required":
+            failures.append(
+                f"Deployment `{server}` renders LISTEN_TLS_CLIENT_AUTH {env.get('LISTEN_TLS_CLIENT_AUTH')!r}, "
+                f"not \"required\", so it never reads a caller's leaf"
+            )
+    for (kind, name), secret in CALLER_LEAVES.items():
+        spec = pod_spec(documents, kind, name)
+        mounted = {v["secret"]["secretName"] for v in (spec or {}).get("volumes", []) if "secret" in v}
+        if secret not in mounted:
+            failures.append(f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf")
+    issued = {str(d["spec"].get("secretName")): d["spec"].get("commonName") for d in certificates(documents)}
+    for secret, common_name in ADMITTED_COMMON_NAMES.items():
+        if issued.get(secret) != common_name:
+            failures.append(f"`{secret}` is issued with common name {issued.get(secret)!r}, not `{common_name}`")
+    return failures
+
+
+def test_the_kind_example_renders_both_hops_of_the_seeders_sync_admitted(pinned: Path, tmp_path: Path) -> None:
+    """THE OFFLINE PROOF (ADR-0881's shape) that the sync can pass `admit` end to end."""
+    assert admit_failures(kind_render(pinned, kind_values(), tmp_path / "kind")) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "named"),
+    [
+        ("project.tls.clientAuth", "off", "Deployment `project` renders LISTEN_TLS_CLIENT_AUTH 'off'"),
+        ("project-db.tls.clientAuth", "off", "Deployment `project-db` renders LISTEN_TLS_CLIENT_AUTH 'off'"),
+    ],
+    ids=["project-off", "project-db-off"],
+)
+def test_the_kind_example_back_at_the_old_posture_reddens_the_admit_gate(
+    pinned: Path, tmp_path: Path, path: str, value: str, named: str
+) -> None:
+    """THE RED CASES: one hop back at `"off"` (the posture before ledger 1616), or
+    `project`'s leaf unnamed. The `"off"` cases also drop that server's
+    `clientCaSecret` and `clientCaSecretKey`, exactly the pre-1616 shape.
+    """
+    values_object = kind_values()
+    *parents, leaf = path.split(".")
+    node = values_object
+    for key in parents:
+        node = node[key]
+    node[leaf] = value
+    if value == "off":
+        node.pop("clientCaSecret", None)
+        node.pop("clientCaSecretKey", None)
+    failures = admit_failures(kind_render(pinned, values_object, tmp_path / "kind-red"))
+    assert any(named in failure for failure in failures), failures
+
+
+def test_the_kind_example_without_projects_leaf_is_refused_at_render(pinned: Path, tmp_path: Path) -> None:
+    """`project` naming no leaf while `project-db` requires one is refused by the
+    parent itself (B-U6 PART 2), before the admit gate is ever reached.
+    """
+    values_object = kind_values()
+    values_object["project"]["projectDb"]["tls"]["clientCertSecret"] = ""
+    destination = tmp_path / "kind-no-project-leaf"
+    destination.mkdir()
+    result = example_render(pinned, values_object, destination)
+    assert result.returncode != 0, result.stdout[:2000]
+    assert "project.projectDb.tls.clientCertSecret" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(("kind", "name"), list(CALLER_LEAVES), ids=[name for _, name in CALLER_LEAVES])
+def test_a_caller_with_its_leaf_unmounted_reddens_the_admit_gate(
+    pinned: Path, tmp_path: Path, kind: str, name: str
+) -> None:
+    """THE MOUNT HALF'S RED CASES: the green render with one caller's leaf volume removed."""
+    documents = kind_render(pinned, kind_values(), tmp_path / "kind")
+    secret = CALLER_LEAVES[(kind, name)]
+    spec = pod_spec(documents, kind, name)
+    spec["volumes"] = [v for v in spec["volumes"] if (v.get("secret") or {}).get("secretName") != secret]
+    assert admit_failures(documents) == [f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf"]

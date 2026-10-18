@@ -26,12 +26,15 @@
 # `example/values.yaml` for the full comment.
 #
 # THE SIX `tls.clientAuth` KEYS BELOW, ONE PER gRPC SERVER, JOIN THE SAME
-# EXCEPTION TOO, AT THEIR OFF POSTURE (B-P1, K-8's "fixture" step, ledger
-# 925): first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
-# `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand,
-# folded into C-SVb and C-DB1). No binary in any of the six reads it yet —
-# B-U5 is the contract — so `"off"` is the only value the render check
-# accepts today. See `example/values.yaml` for the full comment.
+# EXCEPTION TOO (B-P1, ledger 925), first declared in `iam` 0.9.2 / `iam-db`
+# 0.9.0 / `task` 0.6.1 / `task-db` 0.8.1 / `project` 0.2.1 / `project-db`
+# 0.5.1. THIS FILE KEEPS THEM AT `"off"`, while the examples hold them at
+# `"required"` (ledger 1616), AND THAT SPLIT IS FORCED. The shared D80 gate
+# (`d80_portability.py` in `yadgarhq/actions`) merges this file and then sets
+# every `enabled` key false, `tls.enabled` included, and each server refuses
+# a verifying `clientAuth` over a cleartext listener. `"off"` is the only value
+# that survives that render. The posture moves no object, so the renders this
+# file must match (K1, every parent example) still match.
 gateway:
   task:
     tls:
@@ -94,3 +97,19 @@ platform:
       enabled: false
       clientAuth: "off"
       plaintext: true
+# THE SEEDER'S `registry`, THE SAME PLACEHOLDER DECLARATION AS
+# `example/values.yaml` (ADR-0857's fixture step, plans/the-d35-seeder.md stage
+# 6). It is adopter-only like the switches above: `chart/values.yaml` must never
+# default an organisation's registry (ADR-0705). Stated here so every render
+# over this file carries the seeder's Job, ConfigMap and ServiceAccount, the
+# set an adopter who copies `example/values.yaml` receives.
+seeder:
+  registry:
+    roots:
+      - path: acme
+        sourceRepo: acme/gitops
+    projects:
+      - path: acme/web
+        displayName: web
+        sourceRepo: acme/web
+    allowMassArchive: false
