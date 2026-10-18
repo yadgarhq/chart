@@ -6345,7 +6345,14 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
         for name, switches in stated.items()
     }
     assert not_quoted_strings == {name: [] for name in sources}, not_quoted_strings
-    assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+    # LEDGER 1616 SPLITS THE AGREEMENT IN TWO, AND THE SPLIT IS FORCED. The
+    # examples hold all six at `"required"`; `chart/ci/values.yaml` holds all six
+    # at `"off"`, because the shared D80 gate merges that file and sets every
+    # `enabled` key false, and a verifying `clientAuth` over a cleartext listener
+    # is refused (`CI_ONLY_POSTURE_REASON`). Each half must still agree within.
+    examples = {name: switches for name, switches in stated.items() if name != "chart/ci/values.yaml"}
+    assert len({frozenset(switches.items()) for switches in examples.values()}) == 1, examples
+    assert set(stated["chart/ci/values.yaml"].values()) == {"off"}, stated["chart/ci/values.yaml"]
 
 
 def mtls_posture_keys_of(values: dict) -> dict[str, object]:
@@ -6353,15 +6360,64 @@ def mtls_posture_keys_of(values: dict) -> dict[str, object]:
     return {path: value_at(values, path) for path in MTLS_POSTURE_KEYS if value_at(values, path) is not _ABSENT}
 
 
+# WHY `chart/ci/values.yaml` IS NOT A POSTURE SOURCE (ledger 1616). The shared
+# D80 gate (`d80_portability.py` in `yadgarhq/actions`) renders the chart over
+# that file with every `enabled` key set false, `tls.enabled` included, and every
+# server refuses `clientAuth: "required"` over a cleartext listener. Measured on
+# this PR's first CI run: `ci / portability` failed at
+# `task/templates/render-checks.yaml:280`. So that file keeps the six at `"off"`
+# and states none of `MTLS_POSTURE_KEYS`; the posture moves no object, so K1 and
+# `parent_example_failures` still compare equal object sets.
+CI_ONLY_POSTURE_REASON = "D80 renders chart/ci/values.yaml with every tls.enabled false"
+
+
+def posture_sources() -> dict[str, dict]:
+    """The adopter sources that carry the ledger-1616 posture: every one but `chart/ci/values.yaml`."""
+    sources = {"example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text())}
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    return sources
+
+
+def ci_posture_failures(values: dict) -> list[str]:
+    """Why `chart/ci/values.yaml` would fail D80's all-off render on the posture, or []. PURE."""
+    failures = [
+        f"`{path}` is {value_at(values, path)!r}, not \"off\" ({CI_ONLY_POSTURE_REASON})"
+        for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS)
+        if value_at(values, path) != "off"
+    ]
+    failures += [
+        f"`{path}` is stated; with `clientAuth` \"off\" nothing reads it ({CI_ONLY_POSTURE_REASON})"
+        for path in sorted(mtls_posture_keys_of(values))
+    ]
+    return failures
+
+
+def test_the_ci_values_keep_the_six_servers_off_for_d80() -> None:
+    assert ci_posture_failures(yaml.safe_load(EXPLICIT_TLS.read_text())) == []
+
+
+def test_the_example_posture_in_the_ci_values_reddens_the_d80_gate() -> None:
+    """THE RED CASE: `chart/ci/values.yaml` given `example/values.yaml`'s posture."""
+    values = copied(yaml.safe_load(EXPLICIT_TLS.read_text()))
+    example = yaml.safe_load(ADOPTER_VALUES.read_text())
+    for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS | MTLS_POSTURE_KEYS):
+        *parents, leaf = path.split(".")
+        node = values
+        for key in parents:
+            node = node.setdefault(key, {})
+        node[leaf] = value_at(example, path)
+    failures = ci_posture_failures(values)
+    assert len(failures) == len(SIX_TLS_CLIENT_AUTH_KEYS) + len(MTLS_POSTURE_KEYS), failures
+
+
 def test_the_mtls_posture_keys_agree_across_every_adopter_source() -> None:
     """ledger 1616: the sixteen authority and client-leaf keys are PRESENT and the
-    SAME in `example/values.yaml`, `chart/ci/values.yaml` and both parent examples,
-    the twin of the `clientAuth` gate above for the keys `"required"` needs.
+    SAME in `example/values.yaml` and both parent examples, the twin of the
+    `clientAuth` gate above for the keys `"required"` needs. `chart/ci/values.yaml`
+    is excluded by `CI_ONLY_POSTURE_REASON` and gated on its own above.
     """
-    sources = {
-        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
-        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
-    }
+    sources = {"example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text())}
     for name, document in parent_examples().items():
         sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
     stated = {name: mtls_posture_keys_of(values) for name, values in sources.items()}
@@ -6374,12 +6430,7 @@ def test_every_adopter_source_states_every_grpc_server_at_required() -> None:
     """ledger 1616: `"required"`, not merely agreeing. Six `"off"` would agree too, and
     under `"off"` the seeder's sync is refused at `project`'s `admit`.
     """
-    sources = {
-        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
-        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
-    }
-    for name, document in parent_examples().items():
-        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    sources = posture_sources()
     not_required = {
         name: sorted(path for path in SIX_TLS_CLIENT_AUTH_KEYS if value_at(values, path) != "required")
         for name, values in sources.items()
