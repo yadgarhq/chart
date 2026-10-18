@@ -986,18 +986,24 @@ another_machine_steps() {
   cat <<EOF
   A. Log in with this install's CA. Copy the CA certificate from this host, where
      it is world-readable, to the other machine (for example as ca.pem):
-       scp root@<this-host>:$CA_FILE ca.pem
+       scp <this-host>:$CA_FILE ca.pem
      Then, on the other machine:
        pipx install 'yaadgaar>=$CLIENT_MIN_FOR_JOINING'
        yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --ca-file ca.pem --password-stdin < <your-password-file>
-  B. Or enrol it. On a machine that holds an administrator credential, with the
-     user_id that $ADMIN_RECORD records:
+  B. Or enrol it. The issuing client must be yaadgaar>=$CLIENT_MIN_FOR_JOINING. The root client here is $(yaadgaar_version),
+     so "yaadgaar admin issue-enrolment" does not work from this host's root client
+     until tools.lock is bumped (ledger 1623). On a machine whose client is new
+     enough and holds an administrator credential, with the user_id that
+     $ADMIN_RECORD records:
        yaadgaar admin issue-enrolment --user-id <user-id> --out <new-token-file>
      Hand the file over privately. The other machine installs the same client and
      redeems the file with "yaadgaar enrol", which sets that user's password.
-  Re-issue or reset: run the same issue-enrolment command again. Add
-  --revoke-existing after a lost machine; it ends the user's other logins when
-  the token is redeemed.
+  Re-issue or reset: run the same issue-enrolment command again, with
+  --revoke-existing after a lost machine. Two warnings:
+    - Re-issuing the ADMIN's own enrolment sets a new password when it is redeemed,
+      so $CLIENT_PASSWORD_FILE is stale after that.
+    - --revoke-existing ends root's credential on this host, if it is for the
+      same user; this host's root client then needs a new login or enrolment.
 EOF
 }
 
@@ -1506,34 +1512,59 @@ add_user() {
   print_add_user_steps "$out"
 }
 
-# ROOT'S ENVIRONMENT IS SCRUBBED BEFORE ANYTHING ELSE RUNS (ledger 1563). Run as
-# root, this script's pipx (the `pipx install --force` upgrade included), apt-get,
-# kind and the container runtime would otherwise inherit whatever the caller
-# exported — PIP_*, PIPX_*, PIPX_DEFAULT_PYTHON, APT_CONFIG, DOCKER_HOST,
-# CONTAINER_HOST and the like, each of which redirects an install or a socket
-# root trusts. `sudo -E` and any root login that keeps the caller's environment
-# carry them in. So main re-executes this script once under `env -i`, with only:
-#   PATH   a fixed value, never the caller's
+# ROOT'S ENVIRONMENT IS SCRUBBED FIRST IN main (ledger 1563). Only reads run
+# before it: the top of this file (dirname, getent, cut and the numeric settings)
+# changes nothing and calls no tool that acts on the host. Run as root, this
+# script's pipx (the `pipx install --force` upgrade included), apt-get, kind and
+# the container runtime would otherwise inherit whatever the caller exported —
+# PIP_*, PIPX_*, PIPX_DEFAULT_PYTHON, APT_CONFIG, DOCKER_HOST, CONTAINER_HOST and
+# the like, each of which redirects an install or a socket root trusts. `sudo -E`
+# and any root login that keeps the caller's environment carry them in. So main
+# re-executes this script under `env -i`, with only:
+#   PATH   sudo's stock secure_path (Ubuntu's, with /snap/bin), never the caller's
 #   HOME   root's, from the password database (pin_root_environment repeats it)
 #   TERM, LANG   when set, for readable output
+#   http_proxy, https_proxy, no_proxy, in both cases: TLS runs end to end and
+#   every download is checked against tools.lock, so a proxy can delay a run
+#   but not change what root installs
 #   every setting documented at the top of this file, and the path overrides that
 #   root ignores by name (so the notice on stderr still names them)
-#   YADGAR_KIND_UP_CLEAN   the sentinel that stops a second re-execution.
-# bash's $EUID decides, as for the fixed paths above. A caller who plants the
-# sentinel gets no scrub; such a caller already runs this script as root. Not
-# root: nothing changes, so the offline suite runs as before.
-ROOT_SAFE_PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+# YADGAR_ARCH, YADGAR_POLL_SECONDS and YADGAR_PROBE_ATTEMPTS are test knobs, not
+# documented settings, and are dropped for root ON PURPOSE: YADGAR_ARCH would pick
+# which binary root downloads and installs.
+#
+# THERE IS NO SENTINEL. A flag in the environment is something a `sudo -E` caller,
+# or a `SETENV:` sudoers rule, can forge to skip the scrub, and ledger 1556 treats
+# that caller as untrusted. The test is the state itself, root_environment_is_dirty:
+# any exported name outside the allowlist, a PATH other than ROOT_SAFE_PATH, or a
+# HOME other than root's. The second pass meets none of them, so it runs on, and a
+# forged variable only makes the first pass re-execute.
+# bash's $EUID decides, as for the fixed paths above. Not root: nothing changes,
+# so the offline suite runs as before.
+ROOT_SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
 ROOT_KEPT_VARS=(
   YADGAR_ADMIN_EXTERNAL_ID YADGAR_ADMIN_DISPLAY_NAME YADGAR_RUNTIME
   YADGAR_OPERATORS_TIMEOUT YADGAR_ESTATE_TIMEOUT YADGAR_CLIENT_CONFIG
   YADGAR_STATE_DIR YADGAR_BIN_DIR YADGAR_TOOLS_LOCK YADGAR_SYSCTL_FILE
   YADGAR_HOSTS_FILE YADGAR_CA_FILE YADGAR_ENROLMENT_FILE
+  http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
 )
+
+# Succeeds (0) when this process's environment is not the scrubbed one.
+root_environment_is_dirty() {
+  local name allowed=" PATH HOME TERM LANG PWD SHLVL OLDPWD _ ${ROOT_KEPT_VARS[*]} "
+  [[ "${PATH:-}" == "$ROOT_SAFE_PATH" ]] || return 0
+  [[ "${HOME:-}" == "$(root_home)" ]] || return 0
+  while IFS= read -r name; do
+    [[ "$allowed" == *" $name "* ]] || return 0
+  done < <(compgen -e)
+  return 1
+}
 
 reexec_with_clean_environment() {
   local script="$1" var env_bin=env
   shift
-  local -a keep=("YADGAR_KIND_UP_CLEAN=1" "PATH=$ROOT_SAFE_PATH" "HOME=$(root_home)")
+  local -a keep=("PATH=$ROOT_SAFE_PATH" "HOME=$(root_home)")
   [[ -x /usr/bin/env ]] && env_bin=/usr/bin/env
   for var in TERM LANG "${ROOT_KEPT_VARS[@]}"; do
     if [[ -v $var ]]; then keep+=("$var=${!var}"); fi
@@ -1548,7 +1579,7 @@ usage() {
 }
 
 main() {
-  if ((EUID == 0)) && [[ -z "${YADGAR_KIND_UP_CLEAN:-}" ]]; then
+  if ((EUID == 0)) && root_environment_is_dirty; then
     reexec_with_clean_environment "$SCRIPT_DIR/${BASH_SOURCE[0]##*/}" "$@"
   fi
   local args=("$@") display_set=0 out_set=0
