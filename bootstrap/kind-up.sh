@@ -977,9 +977,9 @@ ensure_admin() {
 # `yaadgaar login` fails there: the gateway's certificate is signed by this
 # install's private CA, and the machine has no anchor for it. `login --ca-file`
 # (yadgar#61, first in 0.1.9) supplies one; `admin issue-enrolment` (yadgar#62,
-# first in 0.1.10) mints a token that carries the CA, redeemed with `enrol`. Both
-# are newer than the client tools.lock pins, so these lines name the first
-# release that has both.
+# first in 0.1.10) mints a token that carries the CA, redeemed with `enrol`.
+# These lines name the first release that has both; tools.lock pins that release
+# or a later one (ledger 1623).
 CLIENT_MIN_FOR_JOINING="0.1.10"
 
 another_machine_steps() {
@@ -991,8 +991,7 @@ another_machine_steps() {
        pipx install 'yaadgaar>=$CLIENT_MIN_FOR_JOINING'
        yaadgaar login --gateway $GATEWAY_URL --username $ADMIN_EXTERNAL_ID --ca-file ca.pem --password-stdin < <your-password-file>
   B. Or enrol it. The issuing client must be yaadgaar>=$CLIENT_MIN_FOR_JOINING. The root client here is $(yaadgaar_version),
-     so "yaadgaar admin issue-enrolment" does not work from this host's root client
-     until tools.lock is bumped (ledger 1623). On a machine whose client is new
+     which has "yaadgaar admin issue-enrolment". On a machine whose client is new
      enough and holds an administrator credential, with the user_id that
      $ADMIN_RECORD records:
        yaadgaar admin issue-enrolment --user-id <user-id> --out <new-token-file>

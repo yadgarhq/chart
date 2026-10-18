@@ -642,9 +642,20 @@ def test_the_committed_lock_pins_every_tool_for_both_architectures() -> None:
 def test_the_lock_pins_the_client_once() -> None:
     rows = [line.split() for line in LOCK.read_text().splitlines()
             if line and not line.startswith("#") and line.split()[0] == "yaadgaar"]
-    # 0.1.6 (yadgar v0.1.6): since 0.1.5 the client keeps its config in
-    # ~/.config/yaadgaar, which is the default --add-user reads (ledger 1566).
-    assert rows == [["yaadgaar", "0.1.6", "pypi"]]
+    # 0.1.12 (yadgar v0.1.12): the first pin with `login --ca-file` (0.1.9) and
+    # `admin issue-enrolment` (0.1.10) that the printed steps use (ledger 1623).
+    # It keeps its config in ~/.config/yaadgaar, as 0.1.5 began to (ledger 1566).
+    assert rows == [["yaadgaar", "0.1.12", "pypi"]]
+
+
+def test_the_pinned_client_has_what_the_printed_steps_use() -> None:
+    """The lock is at or above the release the steps name, so root's own client can
+    run `admin issue-enrolment` (ledger 1623). Numeric, not lexical: 0.1.9 > 0.1.10 as text."""
+    def release(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in v.split("."))
+    minimum = re.search(r'^CLIENT_MIN_FOR_JOINING="([0-9.]+)"', SCRIPT.read_text(), re.M)
+    assert minimum, "CLIENT_MIN_FOR_JOINING not found"
+    assert release(client_version()) >= release(minimum.group(1))
 
 
 def test_the_printed_steps_name_the_pinned_client_literally(rig: Rig) -> None:
@@ -652,7 +663,7 @@ def test_the_printed_steps_name_the_pinned_client_literally(rig: Rig) -> None:
     add_user_rig(rig)
     proc = rig.main("--add-user", "dave@example.com")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "pipx install yaadgaar==0.1.6" in proc.stdout
+    assert "pipx install yaadgaar==0.1.12" in proc.stdout
 
 
 # ─── 6/7. Argo verdicts ─────────────────────────────────────────────────────────
@@ -1427,8 +1438,8 @@ def test_with_client_pins_the_client_version(rig: Rig) -> None:
     installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
     assert installs == [["install", f"yaadgaar=={client_version()}"]]
     # The steps for ANOTHER machine name a client new enough for `login --ca-file`
-    # and `admin issue-enrolment` (0.1.9, 0.1.10), which the locked version lacks
-    # (ledger 1555); root's own install above stays at the lock.
+    # and `admin issue-enrolment` (0.1.9, 0.1.10) (ledger 1555); the lock (ledger
+    # 1623) is at or above that, so root's own install above has both.
     assert "pipx install 'yaadgaar>=0.1.10'" in proc.stdout
 
 
@@ -1831,6 +1842,21 @@ def test_an_enrolled_client_with_its_credential_at_the_new_path_is_upgraded(rig:
     assert cfg.read_bytes() == before
 
 
+def test_a_host_on_the_previous_pin_0_1_6_is_upgraded_to_the_lock(rig: Rig) -> None:
+    """Ledger 1623: the first bump past a pin a host already runs. 0.1.6 → 0.1.12
+    is a numeric comparison (0.1.12 sorts before 0.1.6 as text) and the credential
+    in ~/.config/yaadgaar stays where it is."""
+    enrolled_with_client(rig, "0.1.6")
+    cfg = root_config(rig, "yaadgaar")
+    before = cfg.read_bytes()
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
+    assert f"upgraded root's client 0.1.6\u2192{client_version()}; credential stays at {cfg}" in proc.stdout
+    assert cfg.read_bytes() == before
+
+
 def test_a_failed_pre_flight_keeps_the_client_and_never_forces(rig: Rig) -> None:
     enrolled_with_client(rig, "0.1.5")
     root_config(rig, "yaadgaar")
@@ -1865,12 +1891,13 @@ def test_an_enrolled_client_newer_than_the_pin_is_kept(rig: Rig) -> None:
 def test_a_pre_release_of_the_pin_is_older_than_the_pin() -> None:
     proc = subprocess.run(
         ["bash", "-c", f'source "{SCRIPT}"; '
-         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1"; do '
+         'for p in "0.1.6a1 0.1.6" "0.1.0a8 0.1.2" "0.1.5 0.1.6" "0.1.6 0.1.6" "0.1.7 0.1.6" "0.1.6 0.1.6rc1" "0.1.6 0.1.12" "0.1.9 0.1.12" "0.1.10 0.1.12" "0.1.12 0.1.6"; do '
          'set -- $p; if version_older "$1" "$2"; then echo "$1<$2"; else echo "$1>=$2"; fi; done'],
         capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.split() == ["0.1.6a1<0.1.6", "0.1.0a8<0.1.2", "0.1.5<0.1.6",
-                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1"]
+                                   "0.1.6>=0.1.6", "0.1.7>=0.1.6", "0.1.6>=0.1.6rc1",
+                                   "0.1.6<0.1.12", "0.1.9<0.1.12", "0.1.10<0.1.12", "0.1.12>=0.1.6"]
 
 
 def test_a_symlink_at_the_new_config_keeps_the_client(rig: Rig) -> None:
@@ -2229,15 +2256,17 @@ def test_next_steps_for_another_machine_use_the_ca_file_and_issue_enrolment(rig:
     assert "/etc/yadgar/edge-ca.crt" in out
     assert "yaadgaar admin issue-enrolment --user-id" in out
     assert "--revoke-existing" in out
-    # Neither flag exists in the locked 0.1.6: the steps name a client that has them.
+    # The steps name the first client that has both flags.
     assert "yaadgaar>=0.1.10" in out
     # The CA file is world-readable, so no root login is needed to copy it.
     assert "root@" not in out
-    # Route B: the ISSUING client must be new enough, and this host's root client
-    # (the lock's) is not, until the lock is bumped (ledger 1623).
+    # Route B: the ISSUING client must be new enough. The lock (ledger 1623) pins
+    # one that is, so no note says this host's root client is too old.
     assert "issuing client must be yaadgaar>=0.1.10" in out
     assert f"root client here is {client_version()}" in out
-    assert "ledger 1623" in out
+    assert "does not work from this host" not in out
+    assert "until tools.lock is bumped" not in out
+    assert "ledger 1623" not in out
     # Re-issuing the admin's own enrolment makes the stored password stale.
     assert "client-password" in out and "stale" in out
     assert "ends root's credential on this host" in out
