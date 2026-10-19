@@ -2635,3 +2635,92 @@ def test_route_b_says_so_when_root_has_no_client(rig: Rig) -> None:
 def test_route_b_boundary_is_numeric_not_textual(rig: Rig) -> None:
     out = print_next_steps(rig, "enrolled here", version="0.1.10")
     assert 'root client here is 0.1.10, which has "yaadgaar admin issue-enrolment"' in out
+
+
+# ─── copy_old_client_config's own guards, called directly (review of chart#54) ──
+#
+# upgrade_enrolled_client's shell tests never reach these: its `! -e` guard and its
+# earlier checks mask them. Each test here calls the helper alone.
+
+
+def run_copy(rig: Rig, src: Path, dst_dir: Path) -> subprocess.CompletedProcess:
+    return rig.run(f'copy_old_client_config "{src}" "{dst_dir}"')
+
+
+def fresh_old(rig: Rig, data: bytes = b'{"token": "t"}', mode: int = 0o600) -> Path:
+    old = rig.root_home / "old.json"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(data)
+    old.chmod(mode)
+    return old
+
+
+def test_the_copy_never_replaces_an_existing_destination_file(rig: Rig) -> None:
+    """O_EXCL: proved without the shell's `! -e` guard in front of it."""
+    old = fresh_old(rig)
+    dst = rig.root_home / "newdir"
+    dst.mkdir(mode=0o700)
+    existing = dst / "config.json"
+    existing.write_bytes(b"keep")
+    existing.chmod(0o600)
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert existing.read_bytes() == b"keep"
+
+
+def test_the_copy_refuses_a_source_over_1_mib(rig: Rig) -> None:
+    old = fresh_old(rig, data=b"x" * ((1 << 20) + 1))
+    dst = rig.root_home / "newdir"
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0
+    assert "larger than 1 MiB" in proc.stderr
+    assert not (dst / "config.json").exists()
+
+
+def test_the_copy_takes_a_source_of_exactly_1_mib(rig: Rig) -> None:
+    old = fresh_old(rig, data=b"x" * (1 << 20))
+    dst = rig.root_home / "newdir"
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode == 0, proc.stderr
+    assert (dst / "config.json").read_bytes() == old.read_bytes()
+
+
+def test_the_copy_refuses_an_empty_source(rig: Rig) -> None:
+    old = fresh_old(rig, data=b"")
+    dst = rig.root_home / "newdir"
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0
+    assert "is empty" in proc.stderr
+    assert not (dst / "config.json").exists()
+
+
+def test_the_copy_refuses_an_existing_destination_directory_open_to_group_or_other(rig: Rig) -> None:
+    old = fresh_old(rig)
+    dst = rig.root_home / "newdir"
+    dst.mkdir()
+    dst.chmod(0o755)
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0
+    assert "no group or other access" in proc.stderr
+    assert not (dst / "config.json").exists()
+
+
+def test_the_copy_refuses_a_fifo_source_without_blocking(rig: Rig) -> None:
+    old = rig.root_home / "fifo.json"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(old, 0o600)
+    dst = rig.root_home / "newdir"
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0
+    assert "not a regular file" in proc.stderr
+    assert not (dst / "config.json").exists()
+
+
+def test_the_copy_refuses_a_directory_source(rig: Rig) -> None:
+    old = rig.root_home / "dir.json"
+    old.mkdir(parents=True, mode=0o700)
+    dst = rig.root_home / "newdir"
+    proc = run_copy(rig, old, dst)
+    assert proc.returncode != 0
+    assert "not a regular file" in proc.stderr
+    assert not (dst / "config.json").exists()

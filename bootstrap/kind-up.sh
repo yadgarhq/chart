@@ -1130,7 +1130,7 @@ version_older() {
 # COPIES ROOT'S OLD CLIENT CONFIG TO THE NEW DIRECTORY, through descriptors only
 # (ledger 1573). The source is opened without following a symlink and fstat-ed on
 # that descriptor: a regular file, owned by this uid, mode exactly 0600, read
-# capped at 1 MiB. The destination directory is made 0700 (or an existing one must
+# capped at 1 MiB, read to EOF and never empty. The destination directory is made 0700 (or an existing one must
 # be a real directory owned by this uid, not a symlink), and the file is created
 # with O_EXCL | O_NOFOLLOW at 0600 relative to that directory's descriptor, so an
 # existing entry of any kind is never replaced or written through. Nothing about
@@ -1149,9 +1149,18 @@ if not stat.S_ISREG(st.st_mode):
     sys.exit(f"the old config {src} is not a regular file")
 if (st.st_uid, stat.S_IMODE(st.st_mode)) != (euid, 0o600):
     sys.exit(f"the old config {src} is owner/mode {st.st_uid} {stat.S_IMODE(st.st_mode):o}, not {euid} 600")
-data = os.read(sfd, (1 << 20) + 1)
-if len(data) > 1 << 20:
-    sys.exit(f"the old config {src} is larger than 1 MiB")
+chunks, size = [], 0
+while True:
+    chunk = os.read(sfd, 65536)
+    if not chunk:
+        break
+    chunks.append(chunk)
+    size += len(chunk)
+    if size > 1 << 20:
+        sys.exit(f"the old config {src} is larger than 1 MiB")
+data = b"".join(chunks)
+if not data:
+    sys.exit(f"the old config {src} is empty")
 try:
     os.mkdir(dst_dir, 0o700)
 except FileExistsError:
