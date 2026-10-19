@@ -7014,7 +7014,7 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
 
 # ── the D35 seeder (plans/the-d35-seeder.md stage 6, ADR-0857's expand step) ──
 #
-# `seeder` 0.1.0 IS THE EXPAND STEP: with no `seeder.registry` block it renders
+# `seeder` 0.1.0 WAS THE EXPAND STEP (the pin bot has moved it since): with no `seeder.registry` block it renders
 # NOTHING, and a present block is checked whole by the seeder's own render
 # checks. THIS FILE NOW CARRIES THE FIXTURE STEP: `example/values.yaml`,
 # `chart/ci/values.yaml` and both parent examples declare `SEEDER_DECLARATION`,
@@ -7079,13 +7079,14 @@ def test_the_seeder_is_a_dependency_with_no_condition() -> None:
 
     ADR-0857's expand step switches it off by the ABSENT `registry` block, not by a
     toggle: a toggle would be a tenth `enabled` key for D80's all-off pass to flip,
-    turning off a chart that renders only built-in kinds.
+    turning off a chart that renders only built-in kinds. The version is not
+    asserted: the pin bot bumps it.
     """
     document = yaml.safe_load((CHART / "Chart.yaml").read_text())
     entries = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
-    assert entries == [
-        {"name": "seeder", "version": "0.1.0", "repository": "oci://ghcr.io/yadgarhq/charts"}
-    ], entries
+    assert len(entries) == 1, entries
+    assert entries[0]["repository"] == "oci://ghcr.io/yadgarhq/charts", entries
+    assert "condition" not in entries[0], entries
 
 
 def test_the_adopter_values_declare_the_registry_and_render_the_seeders_three_objects(
