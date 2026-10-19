@@ -1005,7 +1005,7 @@ root_client_note() {
   if [[ "$rc" == 1 ]]; then
     printf ' The root client here is %s, which has "yaadgaar admin issue-enrolment".' "$have"
   else
-    printf ' The root client here is %s, which lacks "yaadgaar admin issue-enrolment"; a rerun with --with-client upgrades it unless its credential is in ~/.config/yadgar (ledger 1573).' "$have"
+    printf ' The root client here is %s, which lacks "yaadgaar admin issue-enrolment"; a rerun with --with-client upgrades it.' "$have"
   fi
 }
 
@@ -1127,13 +1127,75 @@ version_older() {
   "$py" -I -c "$VERSION_OLDER_PY" "$1" "$2"
 }
 
+# COPIES ROOT'S OLD CLIENT CONFIG TO THE NEW DIRECTORY, through descriptors only
+# (ledger 1573). The source is opened without following a symlink and fstat-ed on
+# that descriptor: a regular file, owned by this uid, mode exactly 0600, read
+# capped at 1 MiB. The destination directory is made 0700 (or an existing one must
+# be a real directory owned by this uid, not a symlink), and the file is created
+# with O_EXCL | O_NOFOLLOW at 0600 relative to that directory's descriptor, so an
+# existing entry of any kind is never replaced or written through. Nothing about
+# the contents reaches stdout or stderr. A partial copy is unlinked.
+# shellcheck disable=SC2016
+COPY_CLIENT_CONFIG_PY='
+import os, stat, sys
+src, dst_dir, euid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+name = "config.json"
+try:
+    sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+except OSError as e:
+    sys.exit(f"the old config {src} cannot be opened ({e.strerror})")
+st = os.fstat(sfd)
+if not stat.S_ISREG(st.st_mode):
+    sys.exit(f"the old config {src} is not a regular file")
+if (st.st_uid, stat.S_IMODE(st.st_mode)) != (euid, 0o600):
+    sys.exit(f"the old config {src} is owner/mode {st.st_uid} {stat.S_IMODE(st.st_mode):o}, not {euid} 600")
+data = os.read(sfd, (1 << 20) + 1)
+if len(data) > 1 << 20:
+    sys.exit(f"the old config {src} is larger than 1 MiB")
+try:
+    os.mkdir(dst_dir, 0o700)
+except FileExistsError:
+    pass
+except OSError as e:
+    sys.exit(f"{dst_dir} cannot be created ({e.strerror})")
+try:
+    dfd = os.open(dst_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+except OSError as e:
+    sys.exit(f"{dst_dir} cannot be used as a directory ({e.strerror})")
+dst = os.fstat(dfd)
+if dst.st_uid != euid or stat.S_IMODE(dst.st_mode) & 0o077:
+    sys.exit(f"{dst_dir} is owner/mode {dst.st_uid} {stat.S_IMODE(dst.st_mode):o}, not {euid} with no group or other access")
+try:
+    ofd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+except OSError as e:
+    sys.exit(f"{dst_dir}/{name} cannot be created ({e.strerror})")
+try:
+    os.fchmod(ofd, 0o600)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(ofd, view):]
+    os.fsync(ofd)
+except OSError as e:
+    os.unlink(name, dir_fd=dfd)
+    sys.exit(f"{dst_dir}/{name} cannot be written ({e.strerror})")
+'
+copy_old_client_config() {
+  local py
+  py="$(kind_up_python)" || {
+    printf 'python3 is not available\n' >&2
+    return 1
+  }
+  "$py" -I -c "$COPY_CLIENT_CONFIG_PY" "$1" "$2" "$EUID"
+}
+
 # ROOT'S ENROLLED CLIENT FOLLOWS tools.lock (ledger 1554), upward only, and only
 # where the new client can find its credential. yaadgaar 0.1.5 and later read
 # only ~/.config/yaadgaar, and `yaadgaar serve`, which Claude Code starts with no
 # environment, reads nothing else. So:
 #   no version answer, or not older    kept (never a downgrade)
-#   credential not a regular file at   kept, and named: a 0.1.3 credential in
-#   ~/.config/yaadgaar                 ~/.config/yadgar would strand a new client
+#   credential not a regular file at   kept, and named; but when the new path has
+#   ~/.config/yaadgaar                 no entry and ~/.config/yadgar has one, that
+#                                      one is copied across first (below)
 #   otherwise                          pre-flight, then `pipx install --force`
 #
 # THE PRE-FLIGHT EXISTS BECAUSE pipx 1.8.0 DELETES THE VENV when a forced install
@@ -1143,12 +1205,18 @@ version_older() {
 # old client is kept and the run warns. If the forced install still fails after
 # that, root has no client, and the run stops with the command that restores one.
 #
-# No config is moved, copied or written, and neither `login` nor `enrol` runs:
-# a `login` into an empty new directory has no CA for this edge, which only an
-# enrolment token carries, and the bootstrap token cannot enrol an admin who
-# holds a credential (ADR-0655). Moving an old credential waits for a decision.
+# THE OLD CREDENTIAL IS COPIED FIRST (ledger 1573, ruled by Max 2026-10-18). A host
+# enrolled by yaadgaar 0.1.3 holds it in ~/.config/yadgar/config.json, which
+# 0.1.5 and later do not read. When the new path has no entry at all and the old
+# one is a root-owned, mode 0600 regular file, copy_old_client_config copies it
+# to the new path, after the pre-flight and before the forced install. The old
+# file stays: yadgar 0.1.6 `config/legacy.rs` declines to migrate because that
+# directory also holds the memory engine's secrets. Neither `login` nor `enrol`
+# runs: a `login` into an empty new directory has no CA for this edge, which only
+# an enrolment token carries, and the bootstrap token cannot enrol an admin who
+# holds a credential (ADR-0655).
 upgrade_enrolled_client() {
-  local pin have cfg rc=0 tmp
+  local pin have cfg old copy=0 rc=0 tmp note
   [[ -x "$PIPX_BIN_DIR/yaadgaar" ]] || return 0
   pin="$(yaadgaar_version)"
   [[ -n "$pin" ]] || return 0
@@ -1172,7 +1240,10 @@ upgrade_enrolled_client() {
       ;;
   esac
   cfg="$(root_home)/.config/yaadgaar/config.json"
-  if [[ ! -f "$cfg" || -L "$cfg" ]]; then
+  old="$(root_home)/.config/yadgar/config.json"
+  if [[ ! -e "$cfg" && ! -L "$cfg" && ( -e "$old" || -L "$old" ) ]]; then
+    copy=1
+  elif [[ ! -f "$cfg" || -L "$cfg" ]]; then
     log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because its credential is not at $cfg, where the pinned client reads it"
     return 0
   fi
@@ -1183,6 +1254,13 @@ upgrade_enrolled_client() {
     return 0
   fi
   rm -rf "$tmp"
+  if ((copy)); then
+    if ! note="$(copy_old_client_config "$old" "$(dirname "$cfg")" 2>&1)"; then
+      log "[10/10] root's client is yaadgaar $have, not the pinned $pin; kept, because $(printf '%s' "$note" | printable); not copied to $cfg"
+      return 0
+    fi
+    log "[10/10] copied root's client config $old to $cfg; the old file stays"
+  fi
   if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
     die "upgrading root's client $have→$pin failed, and pipx removes the old client when a forced install fails. Put one back: pipx install --force yaadgaar==$pin"
   fi

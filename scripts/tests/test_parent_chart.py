@@ -7084,7 +7084,7 @@ def test_the_seeder_is_a_dependency_with_no_condition() -> None:
     document = yaml.safe_load((CHART / "Chart.yaml").read_text())
     entries = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
     assert entries == [
-        {"name": "seeder", "version": "0.1.0", "repository": "oci://ghcr.io/yadgarhq/charts"}
+        {"name": "seeder", "version": "0.1.1", "repository": "oci://ghcr.io/yadgarhq/charts"}
     ], entries
 
 

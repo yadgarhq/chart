@@ -1922,20 +1922,135 @@ def test_a_client_that_reports_no_version_is_kept(rig: Rig) -> None:
     assert "did not report its version; kept" in proc.stdout
 
 
-def test_an_enrolled_client_with_its_credential_at_the_old_path_is_kept(rig: Rig) -> None:
-    """0.1.6 does not read ~/.config/yadgar, and `yaadgaar serve`, which Claude Code
-    starts with no environment, would then find no credential. So the client is
-    kept until a migration is decided; nothing is moved, copied or written."""
+def new_config_path(rig: Rig) -> Path:
+    return rig.root_home / ".config" / "yaadgaar" / "config.json"
+
+
+def test_an_old_path_credential_is_copied_to_the_new_path_then_the_client_is_upgraded(rig: Rig) -> None:
+    """Ledger 1573 (ruled by Max, 2026-10-18): a host enrolled by yaadgaar 0.1.3
+    holds root's credential in ~/.config/yadgar. kind-up COPIES it to
+    ~/.config/yaadgaar, where 0.1.5 and later read it, then upgrades the client.
+    The old file stays: that directory also holds the memory engine's secrets."""
     enrolled_with_client(rig, "0.1.3")
     old = root_config(rig, "yadgar")
     before = old.read_bytes()
+    token = json.loads(before)["token"]
     proc = rig.run("pin_root_environment; ensure_client")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert rig.calls("pipx") == [], "replaced a client whose credential it cannot read"
+    new = new_config_path(rig)
+    assert new.read_bytes() == before
+    assert stat.S_IMODE(new.stat().st_mode) == 0o600
+    assert stat.S_IMODE(new.parent.stat().st_mode) == 0o700
+    assert old.read_bytes() == before and stat.S_IMODE(old.stat().st_mode) == 0o600
+    installs = [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
     assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] in (["login"], ["enrol"])]
-    assert f"yaadgaar 0.1.3, not the pinned {client_version()}; kept" in proc.stdout
-    assert old.read_bytes() == before
+    assert f"copied root's client config {old} to {new}" in proc.stdout
+    assert token not in proc.stdout + proc.stderr, "printed the credential"
+
+
+def test_a_second_run_after_the_copy_leaves_both_configs_alone(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.3")
+    old = root_config(rig, "yadgar")
+    assert rig.run("pin_root_environment; ensure_client").returncode == 0
+    new = new_config_path(rig)
+    new_before, old_before = new.read_bytes(), old.read_bytes()
+    enrolled_with_client(rig, client_version())
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "copied" not in proc.stdout
+    assert new.read_bytes() == new_before and old.read_bytes() == old_before
+
+
+def test_an_existing_new_path_config_is_never_overwritten(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.5")
+    old = root_config(rig, "yadgar", gateway="https://elsewhere.example:443/")
+    new = root_config(rig, "yaadgaar")
+    new_before, old_before = new.read_bytes(), old.read_bytes()
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert new.read_bytes() == new_before
+    assert old.read_bytes() == old_before
+    assert "copied" not in proc.stdout
+    assert [c["argv"] for c in rig.calls("pipx") if "install" in c["argv"]] == [
+        ["install", "--force", f"yaadgaar=={client_version()}"]]
+
+
+def test_with_neither_config_nothing_is_created_and_the_client_is_kept(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.3")
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert rig.calls("pipx") == [], "replaced a client that has no credential anywhere"
     assert not (rig.root_home / ".config" / "yaadgaar").exists()
+    assert not (rig.root_home / ".config" / "yadgar").exists()
+    assert f"yaadgaar 0.1.3, not the pinned {client_version()}; kept" in proc.stdout
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o400, 0o666])
+def test_an_old_config_that_is_not_mode_0600_is_not_copied(rig: Rig, mode: int) -> None:
+    """Permissions are preserved, not widened or guessed: a file the reader would
+    refuse is not copied, and the client stays."""
+    enrolled_with_client(rig, "0.1.3")
+    old = root_config(rig, "yadgar")
+    old.chmod(mode)
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+    assert not [c for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert "kept" in proc.stdout and "not copied" in proc.stdout
+    assert stat.S_IMODE(old.stat().st_mode) == mode
+
+
+def test_a_symlinked_old_config_is_not_copied(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.3")
+    real = root_config(rig, "elsewhere")
+    old = rig.root_home / ".config" / "yadgar" / "config.json"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(real)
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+    assert not [c for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert "not copied" in proc.stdout
+
+
+def test_a_symlinked_new_directory_is_not_written_through(rig: Rig) -> None:
+    enrolled_with_client(rig, "0.1.3")
+    root_config(rig, "yadgar")
+    target = rig.root / "attacker-dir"
+    target.mkdir()
+    (rig.root_home / ".config" / "yaadgaar").symlink_to(target)
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert list(target.iterdir()) == [], "wrote through a symlinked directory"
+    assert not [c for c in rig.calls("pipx") if "install" in c["argv"]]
+    assert "not copied" in proc.stdout
+
+
+def test_a_failed_pre_flight_copies_nothing(rig: Rig) -> None:
+    """The copy waits for a good pre-flight: a client that is kept gets no second
+    copy of the secret."""
+    enrolled_with_client(rig, "0.1.3")
+    root_config(rig, "yadgar")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (rig.root_home / ".config" / "yaadgaar").exists()
+    assert "WARNING" in proc.stdout
+
+
+def test_the_copy_runs_inside_the_re_exec_allowlist(rig: Rig) -> None:
+    """chart#52: the copy reads no environment. A caller's HOME, XDG_CONFIG_HOME and
+    YAADGAAR_CONFIG_DIR change neither its source nor its destination."""
+    enrolled_with_client(rig, "0.1.3")
+    old = root_config(rig, "yadgar")
+    decoy = rig.root / "decoy"
+    decoy.mkdir()
+    proc = rig.run("pin_root_environment; ensure_client", HOME=str(decoy), XDG_CONFIG_HOME=str(decoy),
+                   YAADGAAR_CONFIG_DIR=str(decoy), YADGAR_CONFIG_DIR=str(decoy))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert new_config_path(rig).read_bytes() == old.read_bytes()
+    assert list(decoy.iterdir()) == []
 
 
 def test_an_enrolled_client_at_the_pin_is_left_alone(rig: Rig) -> None:
@@ -2477,17 +2592,18 @@ def test_the_real_reexec_path_runs_the_script_as_root(rig: Rig, tmp_path: Path) 
 # ─── route B names what root's INSTALLED client can do (ledger 1623) ───────────
 #
 # The lock row is what a rerun with --with-client installs, not what is installed:
-# a client kept at 0.1.3 (credential in ~/.config/yadgar, ledger 1573), one whose
+# a client kept at 0.1.3 (credential in ~/.config/yadgar, mode not 0600), one whose
 # pre-flight failed, or a rerun without --with-client all leave an older one.
 
 
 def test_route_b_reads_the_installed_client_not_the_lock_row_for_a_kept_old_client(rig: Rig) -> None:
-    """A 0.1.3 client kept because its credential is in ~/.config/yadgar."""
+    """A 0.1.3 client kept because its old credential could not be copied."""
     root_config(rig, "yadgar")
     out = print_next_steps(rig, "enrolled here", version="0.1.3")
     assert "which has" not in out
     assert 'root client here is 0.1.3, which lacks "yaadgaar admin issue-enrolment"' in out
-    assert "a rerun with --with-client upgrades it unless its credential is in ~/.config/yadgar (ledger 1573)" in out
+    assert "a rerun with --with-client upgrades it" in out
+    assert "unless its credential" not in out
     assert client_version() not in out.split("B. Or enrol it.")[1].split("On a machine")[0]
 
 
