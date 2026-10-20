@@ -905,7 +905,13 @@ presents one — so a red case for this clause names a real leaf there too, or
 the server's own refusal fires first and names nothing this clause is about.
 */}}
 {{- $iamTls := default dict (default dict (default dict .Subcharts.iam).Values).tls -}}
-{{- if and (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
+{{/*
+ADR-0974: `iam` AND `iam-db` DO NOT VALIDATE `tls.clientAuth` WITH THEIR OWN
+`tls.enabled` FALSE (a cleartext listener sees no caller name and refuses every
+call, ADR-0972), so this clause is skipped there too. It is what lets the D80
+all-off render, which flips every `enabled` key, render these two servers.
+*/}}
+{{- if and $iamTls.enabled (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
 {{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).iam).tls).enabled -}}
 {{- $callerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
 {{- if or (not $callerEnabled) (not $callerSecret) -}}
@@ -948,7 +954,7 @@ the server's own refusal fires first and names nothing this clause is about.
 {{- end -}}
 
 {{- $iamDbTls := default dict (default dict (default dict (index .Subcharts "iam-db")).Values).tls -}}
-{{- if and (kindIs "string" $iamDbTls.clientAuth) (has $iamDbTls.clientAuth (list "optional" "required")) -}}
+{{- if and $iamDbTls.enabled (kindIs "string" $iamDbTls.clientAuth) (has $iamDbTls.clientAuth (list "optional" "required")) -}}
 {{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).enabled -}}
 {{- $callerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
 {{- if or (not $callerEnabled) (not $callerSecret) -}}

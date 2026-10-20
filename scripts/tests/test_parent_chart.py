@@ -2452,6 +2452,51 @@ def test_the_no_presenter_refusal_no_longer_offers_off_as_the_way_out(
     assert f"set {server}.tls.clientAuth back to" not in result.stderr, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("overlay_body", "parent_sentence"),
+    [
+        (
+            "iam:\n  tls:\n    enabled: false\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
+            "gateway:\n  iam:\n    tls:\n      enabled: false\n",
+            'iam.tls.clientAuth is "required"',
+        ),
+        (
+            "iam-db:\n  tls:\n    enabled: false\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
+            "iam:\n  iamDb:\n    tls:\n      enabled: false\n",
+            'iam-db.tls.clientAuth is "required"',
+        ),
+    ],
+    ids=["iam", "iam-db"],
+)
+def test_the_no_presenter_refusal_skips_iam_and_iam_db_with_their_own_tls_off(
+    tmp_path: Path, overlay_body: str, parent_sentence: str
+) -> None:
+    """ADR-0974, THE RED CASE for the parent: with the module's own
+    `tls.enabled` false (what D80's all-off render produces) the parent's B-U6
+    PART 2 clause for `iam` and `iam-db` does not fire. The pinned module may
+    still refuse for its own reason until the pin carries K1, so this asserts
+    the PARENT's sentence is absent, not that the render succeeds. The
+    `tls.enabled: true` rows of the same clause stay in
+    `test_a_server_enforcing_clientauth_with_no_presenter_refuses`."""
+    values = overlay(tmp_path / "module-tls-off.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert parent_sentence not in result.stderr, result.stderr
+
+
+def test_the_iam_and_iam_db_no_presenter_clauses_are_gated_on_their_own_tls_enabled() -> None:
+    """ADR-0974, SOURCE-LEVEL RED CASE. The pinned `iam`/`iam-db` still refuse
+    `required` beside a cleartext listener with their own sentence, which helm
+    raises before the parent's collected refusals print, so the render test
+    above cannot tell the gate from its absence until the pin carries K1. This
+    reads the template: the two clauses open with their module's own
+    `tls.enabled`, and the other four servers' clauses do not."""
+    text = (CHART / "templates" / "_validate.tpl").read_text()
+    assert '{{- if and $iamTls.enabled (kindIs "string" $iamTls.clientAuth)' in text
+    assert '{{- if and $iamDbTls.enabled (kindIs "string" $iamDbTls.clientAuth)' in text
+    for server in ("task", "project", "taskDb", "projectDb"):
+        assert f"{{{{- if and ${server}Tls.enabled" not in text, server
+
+
 def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp_path: Path) -> None:
     """THE MUTATION CHECK'S GREEN HALF, for the representative `iam` pair.
 
