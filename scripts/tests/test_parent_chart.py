@@ -2430,6 +2430,28 @@ def test_an_empty_caller_secret_also_counts_as_no_presenter(
     assert empty_secret_substring in result.stderr, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("overlay_body", "server"),
+    [
+        (EMPTY_CALLER_SECRET_CASES[0].values[0], "iam"),
+        (EMPTY_CALLER_SECRET_CASES[1].values[0], "iam-db"),
+    ],
+    ids=["iam", "iam-db"],
+)
+def test_the_no_presenter_refusal_no_longer_offers_off_as_the_way_out(
+    tmp_path: Path, overlay_body: str, server: str
+) -> None:
+    """K1 (ledger 1629, ADR-0972), THE RED CASE for the advice text: `iam` and
+    `iam-db` refuse `"off"`, so the parent's refusal may not tell the operator
+    to set `<server>.tls.clientAuth` back to it. It names the fix (the caller's
+    client certificate) and says `"off"` is no way out."""
+    values = overlay(tmp_path / "no-presenter-advice.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert f'{server}.tls.clientAuth "off" is no way out' in result.stderr, result.stderr
+    assert f"set {server}.tls.clientAuth back to" not in result.stderr, result.stderr
+
+
 def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp_path: Path) -> None:
     """THE MUTATION CHECK'S GREEN HALF, for the representative `iam` pair.
 
@@ -6319,8 +6341,9 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
     `tls.clientAuth` keys — one per gRPC server (iam, iam-db, task, task-db,
     project, project-db) — are PRESENT in all four adopter sources, and agree on
     `"required"` across the three examples (`example/values.yaml` and both
-    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds all six
-    at `"off"` (`CI_ONLY_POSTURE_REASON`, ledger 1616). The twin of
+    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds four of
+    the six at `"off"` (`CI_ONLY_POSTURE_REASON`, ledger 1616) and `iam` and
+    `iam-db` at `"required"` (`CI_REQUIRED_SERVERS`, K1, ADR-0972). The twin of
     `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
     key first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
     `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand).
@@ -6353,7 +6376,7 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
     # is refused (`CI_ONLY_POSTURE_REASON`). Each half must still agree within.
     examples = {name: switches for name, switches in stated.items() if name != "chart/ci/values.yaml"}
     assert len({frozenset(switches.items()) for switches in examples.values()}) == 1, examples
-    assert set(stated["chart/ci/values.yaml"].values()) == {"off"}, stated["chart/ci/values.yaml"]
+    assert stated["chart/ci/values.yaml"] == CI_EXPECTED_CLIENT_AUTH, stated["chart/ci/values.yaml"]
 
 
 def mtls_posture_keys_of(values: dict) -> dict[str, object]:
@@ -6371,6 +6394,25 @@ def mtls_posture_keys_of(values: dict) -> dict[str, object]:
 # `parent_example_failures` still compare equal object sets.
 CI_ONLY_POSTURE_REASON = "D80 renders chart/ci/values.yaml with every tls.enabled false"
 
+# K1 (ledger 1629, ADR-0972): `iam` and `iam-db` refuse `clientAuth: "off"` at
+# render, so `chart/ci/values.yaml` states them at `"required"`, with the
+# authority each verifies against and the client leaf its one caller presents
+# (the parent's B-U6 PART 2 demands the leaf beside a verifying mode). The other
+# four servers stay at `"off"`.
+CI_REQUIRED_SERVERS = ("iam", "iam-db")
+CI_REQUIRED_POSTURE_KEYS = {
+    "iam.tls.clientCaSecret",
+    "iam.tls.clientCaSecretKey",
+    "iam-db.tls.clientCaSecret",
+    "iam-db.tls.clientCaSecretKey",
+    "gateway.clientCertificate.secret",
+    "iam.iamDb.tls.clientCertSecret",
+}
+CI_EXPECTED_CLIENT_AUTH = {
+    path: "required" if path.split(".")[0] in CI_REQUIRED_SERVERS else "off"
+    for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS)
+}
+
 
 def posture_sources() -> dict[str, dict]:
     """The adopter sources that carry the ledger-1616 posture: every one but `chart/ci/values.yaml`."""
@@ -6383,19 +6425,37 @@ def posture_sources() -> dict[str, dict]:
 def ci_posture_failures(values: dict) -> list[str]:
     """Why `chart/ci/values.yaml` would fail D80's all-off render on the posture, or []. PURE."""
     failures = [
-        f"`{path}` is {value_at(values, path)!r}, not \"off\" ({CI_ONLY_POSTURE_REASON})"
-        for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS)
-        if value_at(values, path) != "off"
+        f"`{path}` is {value_at(values, path)!r}, not {want!r} ({CI_ONLY_POSTURE_REASON}; "
+        f"`iam` and `iam-db` refuse \"off\", ADR-0972)"
+        for path, want in sorted(CI_EXPECTED_CLIENT_AUTH.items())
+        if value_at(values, path) != want
     ]
     failures += [
         f"`{path}` is stated; with `clientAuth` \"off\" nothing reads it ({CI_ONLY_POSTURE_REASON})"
         for path in sorted(mtls_posture_keys_of(values))
+        if path not in CI_REQUIRED_POSTURE_KEYS
+    ]
+    failures += [
+        f"`{path}` is absent; a `\"required\"` server needs it (ADR-0972, B-U6 PART 2)"
+        for path in sorted(CI_REQUIRED_POSTURE_KEYS)
+        if value_at(values, path) in (_ABSENT, "", None)
     ]
     return failures
 
 
-def test_the_ci_values_keep_the_six_servers_off_for_d80() -> None:
+def test_the_ci_values_keep_four_servers_off_for_d80_and_iam_and_iam_db_required() -> None:
     assert ci_posture_failures(yaml.safe_load(EXPLICIT_TLS.read_text())) == []
+
+
+@pytest.mark.parametrize("server", CI_REQUIRED_SERVERS)
+def test_the_ci_values_with_iam_or_iam_db_back_at_off_redden_the_k1_gate(server: str) -> None:
+    """K1 (ADR-0972), THE RED CASE: `chart/ci/values.yaml` with `iam` or `iam-db`
+    put back at `"off"` is named, because the module chart refuses `"off"` from
+    the release that carries K1."""
+    values = copied(yaml.safe_load(EXPLICIT_TLS.read_text()))
+    values[server]["tls"]["clientAuth"] = "off"
+    failures = ci_posture_failures(values)
+    assert any(f"`{server}.tls.clientAuth` is 'off', not 'required'" in f and "ADR-0972" in f for f in failures), failures
 
 
 def test_the_example_posture_in_the_ci_values_reddens_the_d80_gate() -> None:
@@ -6409,7 +6469,10 @@ def test_the_example_posture_in_the_ci_values_reddens_the_d80_gate() -> None:
             node = node.setdefault(key, {})
         node[leaf] = value_at(example, path)
     failures = ci_posture_failures(values)
-    assert len(failures) == len(SIX_TLS_CLIENT_AUTH_KEYS) + len(MTLS_POSTURE_KEYS), failures
+    # Every key `example/values.yaml` states differently from the ci file's
+    # K1 posture is named: the four servers kept at "off", and the ten
+    # authority and leaf keys `chart/ci/values.yaml` does not state.
+    assert len(failures) == 4 + len(MTLS_POSTURE_KEYS - CI_REQUIRED_POSTURE_KEYS), failures
 
 
 def test_the_mtls_posture_keys_agree_across_every_adopter_source() -> None:

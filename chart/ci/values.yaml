@@ -28,14 +28,25 @@
 # THE SIX `tls.clientAuth` KEYS BELOW, ONE PER gRPC SERVER, JOIN THE SAME
 # EXCEPTION TOO (B-P1, ledger 925), first declared in `iam` 0.9.2 / `iam-db`
 # 0.9.0 / `task` 0.6.1 / `task-db` 0.8.1 / `project` 0.2.1 / `project-db`
-# 0.5.1. THIS FILE KEEPS THEM AT `"off"`, while the examples hold them at
-# `"required"` (ledger 1616), AND THAT SPLIT IS FORCED. The shared D80 gate
+# 0.5.1. THIS FILE KEEPS FOUR OF THEM (task, task-db, project, project-db) AT
+# `"off"`, while the examples hold all six at `"required"` (ledger 1616), AND
+# THAT SPLIT IS FORCED. The shared D80 gate
 # (`d80_portability.py` in `yadgarhq/actions`) merges this file and then sets
 # every `enabled` key false, `tls.enabled` included, and each server refuses
 # a verifying `clientAuth` over a cleartext listener. `"off"` is the only value
 # that survives that render. The posture moves no object, so the renders this
 # file must match (K1, every parent example) still match.
+#
+# `iam` AND `iam-db` ARE THE TWO EXCEPTIONS (K1, ledger 1629, ADR-0972): both
+# charts refuse `"off"` at render from the release that carries K1, so this file
+# states them at `"required"`, with the client CA each verifies against and the
+# client leaf its one caller presents (`gateway.clientCertificate.secret` for
+# iam, `iam.iamDb.tls.clientCertSecret` for iam-db), which the parent's own
+# B-U6 PART 2 demands beside a verifying mode. The pinned `iam` and `iam-db`
+# render this posture today.
 gateway:
+  clientCertificate:
+    secret: gateway-client-tls
   task:
     tls:
       enabled: true
@@ -54,17 +65,22 @@ gateway:
 iam:
   tls:
     enabled: true
-    clientAuth: "off"
+    clientAuth: "required"
+    clientCaSecret: iam-tls
+    clientCaSecretKey: ca.crt
   iamDb:
     tls:
       enabled: true
+      clientCertSecret: iam-client-tls
   nats:
     tls:
       enabled: false
 iam-db:
   tls:
     enabled: true
-    clientAuth: "off"
+    clientAuth: "required"
+    clientCaSecret: iam-db-tls
+    clientCaSecretKey: ca.crt
 task:
   tls:
     enabled: true

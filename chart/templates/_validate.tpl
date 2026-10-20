@@ -913,7 +913,8 @@ the server's own refusal fires first and names nothing this clause is about.
       "iam.tls.clientAuth is %q, which verifies a client certificate on every call, and gateway — "
       "iam's only caller in this estate — presents none: gateway.iam.tls.enabled is %t and "
       "gateway.clientCertificate.secret is %q. Set gateway.iam.tls.enabled true and name "
-      "gateway.clientCertificate.secret, or set iam.tls.clientAuth back to \"off\"."))
+      "gateway.clientCertificate.secret, so that gateway presents a client certificate to iam. "
+      "iam.tls.clientAuth \"off\" is no way out: iam refuses it (ADR-0972)."))
       $iamTls.clientAuth $callerEnabled $callerSecret) -}}
 {{- end -}}
 {{- end -}}
@@ -955,7 +956,8 @@ the server's own refusal fires first and names nothing this clause is about.
       "iam-db.tls.clientAuth is %q, which verifies a client certificate on every call, and iam — "
       "iam-db's only caller in this estate — presents none: iam.iamDb.tls.enabled is %t and "
       "iam.iamDb.tls.clientCertSecret is %q. Set iam.iamDb.tls.enabled true and name "
-      "iam.iamDb.tls.clientCertSecret, or set iam-db.tls.clientAuth back to \"off\"."))
+      "iam.iamDb.tls.clientCertSecret, so that iam presents a client certificate to iam-db. "
+      "iam-db.tls.clientAuth \"off\" is no way out: iam-db refuses it (ADR-0972)."))
       $iamDbTls.clientAuth $callerEnabled $callerSecret) -}}
 {{- end -}}
 {{- end -}}
