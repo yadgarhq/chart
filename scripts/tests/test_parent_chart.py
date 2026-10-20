@@ -2658,9 +2658,8 @@ GATEWAY_PRESENTS_NOTHING = (
         for server in ("iam", "task", "project")
     )
     # K1 (ADR-0972, ADR-0974): the K1 `iam` refuses `"off"` while its own TLS is
-    # on, so `iam` goes cleartext here, as in `chart/ci/values.yaml`. The older
-    # pinned `iam` accepts `"off"` over cleartext and the K1 one ignores the
-    # mode, so this overlay renders under both.
+    # on, so `iam` goes cleartext here. With its own TLS off the K1 `iam`
+    # ignores the mode, so this overlay renders under the pin.
 )
 
 
@@ -6348,21 +6347,10 @@ def test_the_twelve_tls_switches_agree_across_every_adopter_source() -> None:
     stated = {name: twelve_switches_of(values) for name, values in sources.items()}
     missing = {name: sorted(TWELVE_TLS_SWITCHES - switches.keys()) for name, switches in stated.items()}
     assert missing == {name: [] for name in sources}, missing
-    # K1 (ledger 1629, ADR-0974): `chart/ci/values.yaml` states `iam` and `iam-db`
-    # cleartext, CI ONLY, so its render survives both the older pinned modules
-    # (`"off"` over cleartext) and the K1 modules (they ignore the mode with TLS
-    # off), and D80's flip of `enabled`. The other ten switches still agree.
-    ci = dict(stated["chart/ci/values.yaml"])
-    for path in CI_CLEARTEXT_SERVERS:
-        assert ci[path] is False, (path, ci[path])
-        ci[path] = True
-    stated = dict(stated, **{"chart/ci/values.yaml": ci})
+    # NO EXCEPTION FOR `iam` OR `iam-db` (K1, ledger 1629, ADR-0975): the pins
+    # carry iam 0.13.0 and iam-db 0.11.0, so `chart/ci/values.yaml` states both
+    # listeners at TLS on again, and all twelve switches agree in every source.
     assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
-
-
-# K1: the two servers `chart/ci/values.yaml` runs cleartext until the pins carry
-# the K1 modules and a later change restores TLS on and `"required"` there.
-CI_CLEARTEXT_SERVERS = ("iam.tls.enabled", "iam-db.tls.enabled")
 
 
 def nats_valkey_tls_keys_of(values: dict) -> dict[str, object]:
@@ -6411,8 +6399,8 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
     `tls.clientAuth` keys — one per gRPC server (iam, iam-db, task, task-db,
     project, project-db) — are PRESENT in all four adopter sources, and agree on
     `"required"` across the three examples (`example/values.yaml` and both
-    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds all six
-    at `"off"` (`CI_ONLY_POSTURE_REASON`, ledger 1616). The twin of
+    parent examples' `valuesObject`), while `chart/ci/values.yaml` holds
+    `CI_EXPECTED_CLIENT_AUTH` (`CI_ONLY_POSTURE_REASON`, ledger 1616, K1). The twin of
     `test_the_twelve_tls_switches_agree_across_every_adopter_source`, for the
     key first declared in `iam` 0.9.2 / `iam-db` 0.9.0 / `task` 0.6.1 /
     `task-db` 0.8.1 / `project` 0.2.1 / `project-db` 0.5.1 (the B-U5E expand).
@@ -6439,13 +6427,13 @@ def test_the_six_tls_client_auth_keys_agree_across_every_adopter_source() -> Non
     }
     assert not_quoted_strings == {name: [] for name in sources}, not_quoted_strings
     # LEDGER 1616 SPLITS THE AGREEMENT IN TWO, AND THE SPLIT IS FORCED. The
-    # examples hold all six at `"required"`; `chart/ci/values.yaml` holds all six
-    # at `"off"`, because the shared D80 gate merges that file and sets every
-    # `enabled` key false, and a verifying `clientAuth` over a cleartext listener
-    # is refused (`CI_ONLY_POSTURE_REASON`). Each half must still agree within.
+    # examples hold all six at `"required"`; `chart/ci/values.yaml` holds the four
+    # servers that still refuse a verifying `clientAuth` over a cleartext listener
+    # at `"off"` (`CI_ONLY_POSTURE_REASON`), and `iam` and `iam-db` at `"required"`,
+    # because from K1 they refuse `"off"` and ignore the mode with TLS off.
     examples = {name: switches for name, switches in stated.items() if name != "chart/ci/values.yaml"}
     assert len({frozenset(switches.items()) for switches in examples.values()}) == 1, examples
-    assert set(stated["chart/ci/values.yaml"].values()) == {"off"}, stated["chart/ci/values.yaml"]
+    assert stated["chart/ci/values.yaml"] == CI_EXPECTED_CLIENT_AUTH, stated["chart/ci/values.yaml"]
 
 
 def mtls_posture_keys_of(values: dict) -> dict[str, object]:
@@ -6458,10 +6446,43 @@ def mtls_posture_keys_of(values: dict) -> dict[str, object]:
 # that file with every `enabled` key set false, `tls.enabled` included, and every
 # server refuses `clientAuth: "required"` over a cleartext listener. Measured on
 # this PR's first CI run: `ci / portability` failed at
-# `task/templates/render-checks.yaml:280`. So that file keeps the six at `"off"`
-# and states none of `MTLS_POSTURE_KEYS`; the posture moves no object, so K1 and
-# `parent_example_failures` still compare equal object sets.
+# `task/templates/render-checks.yaml:280`. So that file keeps those servers at
+# `"off"` and states none of their `MTLS_POSTURE_KEYS`; the posture moves no
+# object, so K1 and `parent_example_failures` still compare equal object sets.
+#
+# `iam` AND `iam-db` ARE THE EXCEPTION (K1, ledger 1629, ADR-0972, ADR-0975).
+# From iam 0.13.0 and iam-db 0.11.0 both refuse `"off"` with TLS on, and with
+# TLS off (D80's flip) they ignore the mode, and the parent's no-presenter clause
+# for them is skipped (ADR-0974). So that file holds them at `"required"` with
+# the example's authority, and names their callers' client leaves, which the
+# parent's no-presenter clause asks for when TLS is on (B-U6 PART 2).
 CI_ONLY_POSTURE_REASON = "D80 renders chart/ci/values.yaml with every tls.enabled false"
+
+# THE `clientAuth` EACH SERVER HOLDS IN `chart/ci/values.yaml`: `"required"` for
+# the two K1 servers, `"off"` for the four that refuse a verifying mode over a
+# cleartext listener.
+CI_EXPECTED_CLIENT_AUTH = {
+    "iam.tls.clientAuth": "required",
+    "iam-db.tls.clientAuth": "required",
+    "task.tls.clientAuth": "off",
+    "task-db.tls.clientAuth": "off",
+    "project.tls.clientAuth": "off",
+    "project-db.tls.clientAuth": "off",
+}
+assert CI_EXPECTED_CLIENT_AUTH.keys() == SIX_TLS_CLIENT_AUTH_KEYS, sorted(CI_EXPECTED_CLIENT_AUTH)
+
+# THE `MTLS_POSTURE_KEYS` `chart/ci/values.yaml` MUST STATE, at the example's
+# value: the two K1 servers' authority, and their one caller's client leaf each.
+# Every other posture key stays unstated there (nothing reads it at `"off"`).
+CI_REQUIRED_POSTURE_KEYS = {
+    "iam.tls.clientCaSecret",
+    "iam.tls.clientCaSecretKey",
+    "iam-db.tls.clientCaSecret",
+    "iam-db.tls.clientCaSecretKey",
+    "gateway.clientCertificate.secret",
+    "iam.iamDb.tls.clientCertSecret",
+}
+assert CI_REQUIRED_POSTURE_KEYS <= MTLS_POSTURE_KEYS, sorted(CI_REQUIRED_POSTURE_KEYS - MTLS_POSTURE_KEYS)
 
 
 def posture_sources() -> dict[str, dict]:
@@ -6473,35 +6494,75 @@ def posture_sources() -> dict[str, dict]:
 
 
 def ci_posture_failures(values: dict) -> list[str]:
-    """Why `chart/ci/values.yaml` would fail D80's all-off render on the posture, or []. PURE."""
+    """Why `chart/ci/values.yaml` would fail D80's all-off render, K1's refusal
+    of `"off"`, or the parent's no-presenter clause on the posture, or []. PURE."""
+    example = yaml.safe_load(ADOPTER_VALUES.read_text())
     failures = [
-        f"`{path}` is {value_at(values, path)!r}, not \"off\" ({CI_ONLY_POSTURE_REASON})"
-        for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS)
-        if value_at(values, path) != "off"
+        f"`{path}` is {value_at(values, path)!r}, not {expected!r} ({CI_ONLY_POSTURE_REASON}; K1)"
+        for path, expected in sorted(CI_EXPECTED_CLIENT_AUTH.items())
+        if value_at(values, path) != expected
+    ]
+    failures += [
+        f"`{path}` is {value_at(values, path)!r}, not the example's {value_at(example, path)!r} (K1, B-U6 PART 2)"
+        for path in sorted(CI_REQUIRED_POSTURE_KEYS)
+        if value_at(values, path) != value_at(example, path)
     ]
     failures += [
         f"`{path}` is stated; with `clientAuth` \"off\" nothing reads it ({CI_ONLY_POSTURE_REASON})"
-        for path in sorted(mtls_posture_keys_of(values))
+        for path in sorted(mtls_posture_keys_of(values).keys() - CI_REQUIRED_POSTURE_KEYS)
     ]
     return failures
 
 
-def test_the_ci_values_keep_the_six_servers_off_for_d80() -> None:
+def set_at(values: dict, path: str, value: object) -> None:
+    """Set the dotted `path` in `values` to `value`, creating parents. MUTATES `values`."""
+    *parents, leaf = path.split(".")
+    node = values
+    for key in parents:
+        node = node.setdefault(key, {})
+    node[leaf] = value
+
+
+def test_the_ci_values_hold_the_k1_posture_and_keep_the_other_four_off_for_d80() -> None:
     assert ci_posture_failures(yaml.safe_load(EXPLICIT_TLS.read_text())) == []
 
 
 def test_the_example_posture_in_the_ci_values_reddens_the_d80_gate() -> None:
-    """THE RED CASE: `chart/ci/values.yaml` given `example/values.yaml`'s posture."""
+    """THE RED CASE: `chart/ci/values.yaml` given `example/values.yaml`'s posture.
+    The four non-K1 servers go `"required"` and their ten posture keys appear."""
     values = copied(yaml.safe_load(EXPLICIT_TLS.read_text()))
     example = yaml.safe_load(ADOPTER_VALUES.read_text())
     for path in sorted(SIX_TLS_CLIENT_AUTH_KEYS | MTLS_POSTURE_KEYS):
+        set_at(values, path, value_at(example, path))
+    failures = ci_posture_failures(values)
+    off_servers = [path for path, mode in CI_EXPECTED_CLIENT_AUTH.items() if mode == "off"]
+    assert len(failures) == len(off_servers) + len(MTLS_POSTURE_KEYS - CI_REQUIRED_POSTURE_KEYS), failures
+
+
+def test_iam_and_iam_db_back_at_off_in_the_ci_values_redden_the_gate() -> None:
+    """THE RED CASE for K1: `iam` and `iam-db` back at `"off"` with their
+    authority and caller leaves dropped, the posture of chart#55."""
+    values = copied(yaml.safe_load(EXPLICIT_TLS.read_text()))
+    set_at(values, "iam.tls.clientAuth", "off")
+    set_at(values, "iam-db.tls.clientAuth", "off")
+    for path in CI_REQUIRED_POSTURE_KEYS:
         *parents, leaf = path.split(".")
         node = values
         for key in parents:
-            node = node.setdefault(key, {})
-        node[leaf] = value_at(example, path)
+            node = node[key]
+        del node[leaf]
     failures = ci_posture_failures(values)
-    assert len(failures) == len(SIX_TLS_CLIENT_AUTH_KEYS) + len(MTLS_POSTURE_KEYS), failures
+    assert len(failures) == 2 + len(CI_REQUIRED_POSTURE_KEYS), failures
+
+
+def test_iam_back_at_off_over_tls_in_the_ci_values_is_refused_by_the_pinned_module(tmp_path: Path) -> None:
+    """THE RENDER RED CASE for K1: the pinned iam (>= 0.13.0) refuses
+    `clientAuth: "off"` while its own TLS is on, so `chart/ci/values.yaml` cannot
+    go back to chart#55's mode with TLS on. Renders red against the real pin."""
+    values = overlay(tmp_path / "iam-off.yaml", 'iam:\n  tls:\n    clientAuth: "off"\n')
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(EXPLICIT_TLS), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert 'iam: tls.clientAuth is "off", which iam refuses while tls.enabled is true' in result.stderr, result.stderr
 
 
 def test_the_mtls_posture_keys_agree_across_every_adopter_source() -> None:
