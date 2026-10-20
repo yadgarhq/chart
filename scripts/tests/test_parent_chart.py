@@ -2430,6 +2430,76 @@ def test_an_empty_caller_secret_also_counts_as_no_presenter(
     assert empty_secret_substring in result.stderr, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("overlay_body", "server"),
+    [
+        (EMPTY_CALLER_SECRET_CASES[0].values[0], "iam"),
+        (EMPTY_CALLER_SECRET_CASES[1].values[0], "iam-db"),
+    ],
+    ids=["iam", "iam-db"],
+)
+def test_the_no_presenter_refusal_no_longer_offers_off_as_the_way_out(
+    tmp_path: Path, overlay_body: str, server: str
+) -> None:
+    """K1 (ledger 1629, ADR-0972), THE RED CASE for the advice text: `iam` and
+    `iam-db` refuse `"off"`, so the parent's refusal may not tell the operator
+    to set `<server>.tls.clientAuth` back to it. It names the fix (the caller's
+    client certificate) and says `"off"` is no way out."""
+    values = overlay(tmp_path / "no-presenter-advice.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert result.returncode != 0, result.stdout
+    assert f'{server}.tls.clientAuth "off" is no way out' in result.stderr, result.stderr
+    assert f"set {server}.tls.clientAuth back to" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("overlay_body", "parent_sentence"),
+    [
+        (
+            "iam:\n  tls:\n    enabled: false\n    clientAuth: required\n    clientCaSecret: iam-tls\n    clientCaSecretKey: ca.crt\n"
+            "gateway:\n  iam:\n    tls:\n      enabled: false\n",
+            'iam.tls.clientAuth is "required"',
+        ),
+        (
+            "iam-db:\n  tls:\n    enabled: false\n    clientAuth: required\n    clientCaSecret: iam-db-tls\n    clientCaSecretKey: ca.crt\n"
+            "iam:\n  iamDb:\n    tls:\n      enabled: false\n",
+            'iam-db.tls.clientAuth is "required"',
+        ),
+    ],
+    ids=["iam", "iam-db"],
+)
+def test_the_no_presenter_refusal_skips_iam_and_iam_db_with_their_own_tls_off(
+    tmp_path: Path, overlay_body: str, parent_sentence: str
+) -> None:
+    """ADR-0974, THE RED CASE for the parent: with the module's own
+    `tls.enabled` false (what D80's all-off render produces) the parent's B-U6
+    PART 2 clause for `iam` and `iam-db` does not fire. The pinned module may
+    still refuse for its own reason until the pin carries K1, so this asserts
+    the PARENT's sentence is absent, not that the render succeeds. The
+    `tls.enabled: true` rows of the same clause stay in
+    `test_a_server_enforcing_clientauth_with_no_presenter_refuses`.
+    DISCRIMINATES ONLY ONCE THE PINS CARRY K1: until then the pinned module
+    refuses first and this test passes with or without the gate; the
+    source-level test below is what is red without it."""
+    values = overlay(tmp_path / "module-tls-off.yaml", overlay_body)
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
+    assert parent_sentence not in result.stderr, result.stderr
+
+
+def test_the_iam_and_iam_db_no_presenter_clauses_are_gated_on_their_own_tls_enabled() -> None:
+    """ADR-0974, SOURCE-LEVEL RED CASE. The pinned `iam`/`iam-db` still refuse
+    `required` beside a cleartext listener with their own sentence, which helm
+    raises before the parent's collected refusals print, so the render test
+    above cannot tell the gate from its absence until the pin carries K1. This
+    reads the template: the two clauses open with their module's own
+    `tls.enabled`, and the other four servers' clauses do not."""
+    text = (CHART / "templates" / "_validate.tpl").read_text()
+    assert '{{- if and $iamTls.enabled (kindIs "string" $iamTls.clientAuth)' in text
+    assert '{{- if and $iamDbTls.enabled (kindIs "string" $iamDbTls.clientAuth)' in text
+    for server in ("task", "project", "taskDb", "projectDb"):
+        assert f"{{{{- if and ${server}Tls.enabled" not in text, server
+
+
 def test_a_server_enforcing_clientauth_with_a_real_presenter_does_not_refuse(tmp_path: Path) -> None:
     """THE MUTATION CHECK'S GREEN HALF, for the representative `iam` pair.
 
@@ -2581,8 +2651,16 @@ def test_a_non_boolean_certificates_create_refuses_by_name_instead_of_panicking(
 GATEWAY_PRESENTS_NOTHING = (
     'gateway:\n  clientCertificate:\n    secret: ""\n'
     + "".join(
-        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n' for server in ("iam", "task", "project")
+        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n'
+        # K1 (below): `iam` also goes cleartext, in the SAME mapping (a second
+        # `iam:` key would silently replace this one).
+        + ("    enabled: false\n" if server == "iam" else "")
+        for server in ("iam", "task", "project")
     )
+    # K1 (ADR-0972, ADR-0974): the K1 `iam` refuses `"off"` while its own TLS is
+    # on, so `iam` goes cleartext here, as in `chart/ci/values.yaml`. The older
+    # pinned `iam` accepts `"off"` over cleartext and the K1 one ignores the
+    # mode, so this overlay renders under both.
 )
 
 
@@ -6270,7 +6348,21 @@ def test_the_twelve_tls_switches_agree_across_every_adopter_source() -> None:
     stated = {name: twelve_switches_of(values) for name, values in sources.items()}
     missing = {name: sorted(TWELVE_TLS_SWITCHES - switches.keys()) for name, switches in stated.items()}
     assert missing == {name: [] for name in sources}, missing
+    # K1 (ledger 1629, ADR-0974): `chart/ci/values.yaml` states `iam` and `iam-db`
+    # cleartext, CI ONLY, so its render survives both the older pinned modules
+    # (`"off"` over cleartext) and the K1 modules (they ignore the mode with TLS
+    # off), and D80's flip of `enabled`. The other ten switches still agree.
+    ci = dict(stated["chart/ci/values.yaml"])
+    for path in CI_CLEARTEXT_SERVERS:
+        assert ci[path] is False, (path, ci[path])
+        ci[path] = True
+    stated = dict(stated, **{"chart/ci/values.yaml": ci})
     assert len({frozenset(switches.items()) for switches in stated.values()}) == 1, stated
+
+
+# K1: the two servers `chart/ci/values.yaml` runs cleartext until the pins carry
+# the K1 modules and a later change restores TLS on and `"required"` there.
+CI_CLEARTEXT_SERVERS = ("iam.tls.enabled", "iam-db.tls.enabled")
 
 
 def nats_valkey_tls_keys_of(values: dict) -> dict[str, object]:

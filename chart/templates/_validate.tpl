@@ -905,7 +905,13 @@ presents one — so a red case for this clause names a real leaf there too, or
 the server's own refusal fires first and names nothing this clause is about.
 */}}
 {{- $iamTls := default dict (default dict (default dict .Subcharts.iam).Values).tls -}}
-{{- if and (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
+{{/*
+ADR-0974: `iam` AND `iam-db` DO NOT VALIDATE `tls.clientAuth` WITH THEIR OWN
+`tls.enabled` FALSE (a cleartext listener sees no caller name and refuses every
+call, ADR-0972), so this clause is skipped there too. It is what lets the D80
+all-off render, which flips every `enabled` key, render these two servers.
+*/}}
+{{- if and $iamTls.enabled (kindIs "string" $iamTls.clientAuth) (has $iamTls.clientAuth (list "optional" "required")) -}}
 {{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.gateway).Values).iam).tls).enabled -}}
 {{- $callerSecret := default "" (default dict (default dict (default dict .Subcharts.gateway).Values).clientCertificate).secret -}}
 {{- if or (not $callerEnabled) (not $callerSecret) -}}
@@ -913,7 +919,8 @@ the server's own refusal fires first and names nothing this clause is about.
       "iam.tls.clientAuth is %q, which verifies a client certificate on every call, and gateway — "
       "iam's only caller in this estate — presents none: gateway.iam.tls.enabled is %t and "
       "gateway.clientCertificate.secret is %q. Set gateway.iam.tls.enabled true and name "
-      "gateway.clientCertificate.secret, or set iam.tls.clientAuth back to \"off\"."))
+      "gateway.clientCertificate.secret, so that gateway presents a client certificate to iam. "
+      "iam.tls.clientAuth \"off\" is no way out: iam refuses it (ADR-0972)."))
       $iamTls.clientAuth $callerEnabled $callerSecret) -}}
 {{- end -}}
 {{- end -}}
@@ -947,7 +954,7 @@ the server's own refusal fires first and names nothing this clause is about.
 {{- end -}}
 
 {{- $iamDbTls := default dict (default dict (default dict (index .Subcharts "iam-db")).Values).tls -}}
-{{- if and (kindIs "string" $iamDbTls.clientAuth) (has $iamDbTls.clientAuth (list "optional" "required")) -}}
+{{- if and $iamDbTls.enabled (kindIs "string" $iamDbTls.clientAuth) (has $iamDbTls.clientAuth (list "optional" "required")) -}}
 {{- $callerEnabled := default false (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).enabled -}}
 {{- $callerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.iam).Values).iamDb).tls).clientCertSecret -}}
 {{- if or (not $callerEnabled) (not $callerSecret) -}}
@@ -955,7 +962,8 @@ the server's own refusal fires first and names nothing this clause is about.
       "iam-db.tls.clientAuth is %q, which verifies a client certificate on every call, and iam — "
       "iam-db's only caller in this estate — presents none: iam.iamDb.tls.enabled is %t and "
       "iam.iamDb.tls.clientCertSecret is %q. Set iam.iamDb.tls.enabled true and name "
-      "iam.iamDb.tls.clientCertSecret, or set iam-db.tls.clientAuth back to \"off\"."))
+      "iam.iamDb.tls.clientCertSecret, so that iam presents a client certificate to iam-db. "
+      "iam-db.tls.clientAuth \"off\" is no way out: iam-db refuses it (ADR-0972)."))
       $iamDbTls.clientAuth $callerEnabled $callerSecret) -}}
 {{- end -}}
 {{- end -}}

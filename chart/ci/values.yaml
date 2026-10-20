@@ -35,6 +35,20 @@
 # a verifying `clientAuth` over a cleartext listener. `"off"` is the only value
 # that survives that render. The posture moves no object, so the renders this
 # file must match (K1, every parent example) still match.
+#
+# `iam` AND `iam-db` ARE THE TWO EXCEPTIONS, AT `tls.enabled: false` (K1, ledger
+# 1629, ADR-0972, ADR-0974). From the release that carries K1 both charts refuse
+# `clientAuth: "off"` while TLS is on, and with TLS off they neither validate nor
+# render `clientAuth`. So this file states their own listeners cleartext, CI
+# ONLY: the pinned (older) modules accept `"off"` over cleartext, the K1 modules
+# ignore the mode, and D80's flip of every `enabled` key is a no-op for them.
+# `example/values.yaml` keeps both at TLS on and `"required"`. A later change
+# restores TLS on and `"required"` here once the pins carry K1.
+#
+# THE DIALS INTO THEM STAY ON (`gateway.iam.tls.enabled`, `iam.iamDb.tls.enabled`),
+# so gateway dials iam, and iam dials iam-db, with TLS into a cleartext listener.
+# That is deliberate and harmless: this file is only ever RENDERED (lint, tests,
+# D80), never deployed, so no connection is made.
 gateway:
   task:
     tls:
@@ -53,7 +67,7 @@ gateway:
       enabled: false
 iam:
   tls:
-    enabled: true
+    enabled: false
     clientAuth: "off"
   iamDb:
     tls:
@@ -63,7 +77,7 @@ iam:
       enabled: false
 iam-db:
   tls:
-    enabled: true
+    enabled: false
     clientAuth: "off"
 task:
   tls:
