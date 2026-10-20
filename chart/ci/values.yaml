@@ -44,6 +44,11 @@
 # ignore the mode, and D80's flip of every `enabled` key is a no-op for them.
 # `example/values.yaml` keeps both at TLS on and `"required"`. A later change
 # restores TLS on and `"required"` here once the pins carry K1.
+#
+# THE DIALS INTO THEM STAY ON (`gateway.iam.tls.enabled`, `iam.iamDb.tls.enabled`),
+# so gateway dials iam, and iam dials iam-db, with TLS into a cleartext listener.
+# That is deliberate and harmless: this file is only ever RENDERED (lint, tests,
+# D80), never deployed, so no connection is made.
 gateway:
   task:
     tls:

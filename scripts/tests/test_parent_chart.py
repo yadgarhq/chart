@@ -2477,7 +2477,10 @@ def test_the_no_presenter_refusal_skips_iam_and_iam_db_with_their_own_tls_off(
     still refuse for its own reason until the pin carries K1, so this asserts
     the PARENT's sentence is absent, not that the render succeeds. The
     `tls.enabled: true` rows of the same clause stay in
-    `test_a_server_enforcing_clientauth_with_no_presenter_refuses`."""
+    `test_a_server_enforcing_clientauth_with_no_presenter_refuses`.
+    DISCRIMINATES ONLY ONCE THE PINS CARRY K1: until then the pinned module
+    refuses first and this test passes with or without the gate; the
+    source-level test below is what is red without it."""
     values = overlay(tmp_path / "module-tls-off.yaml", overlay_body)
     result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(values))
     assert parent_sentence not in result.stderr, result.stderr
@@ -2648,8 +2651,16 @@ def test_a_non_boolean_certificates_create_refuses_by_name_instead_of_panicking(
 GATEWAY_PRESENTS_NOTHING = (
     'gateway:\n  clientCertificate:\n    secret: ""\n'
     + "".join(
-        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n' for server in ("iam", "task", "project")
+        f'{server}:\n  tls:\n    clientAuth: "off"\n    clientCaSecret: ""\n'
+        # K1 (below): `iam` also goes cleartext, in the SAME mapping (a second
+        # `iam:` key would silently replace this one).
+        + ("    enabled: false\n" if server == "iam" else "")
+        for server in ("iam", "task", "project")
     )
+    # K1 (ADR-0972, ADR-0974): the K1 `iam` refuses `"off"` while its own TLS is
+    # on, so `iam` goes cleartext here, as in `chart/ci/values.yaml`. The older
+    # pinned `iam` accepts `"off"` over cleartext and the K1 one ignores the
+    # mode, so this overlay renders under both.
 )
 
 
