@@ -794,9 +794,10 @@ configuration, the same false positive `.runs` already closes below for
 THE SEEDER'S CLIENT LEAF (plans/the-d35-seeder.md stage 6): the Secret its Job
 presents to `project`, defaulted by this parent's `values.yaml` to
 `seeder-client-tls`, which `platform` 0.2.6 issues. `"runs" true` like the gRPC
-callers above: `project` is a module this parent always deploys. Checked even
-while `seeder.registry` is absent and the Job does not render, so a typo is
-named before the registry that would expose it is declared.
+callers above: `project` is a module this parent always deploys. `seeder.registry`
+is required from `seeder` 0.2.0, so the Job always renders on an install that
+passes the seeder's schema. This check stays: it is not tied to the registry and
+it names a typo in the Secret key in this parent's own words.
 */}}
 {{- $seederCallerSecret := default "" (default dict (default dict (default dict (default dict .Subcharts.seeder).Values).project).tls).clientCertSecret -}}
 {{- if $seederCallerSecret -}}

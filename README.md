@@ -146,7 +146,8 @@ keys at their off posture (B-P2, K-8's "fixture" step), so you can see every
 choice, and the suite holds the two renders equal. Both also declare a
 placeholder `seeder.registry` (root `acme`, project `acme/web`), which adds the
 seeder's Job, ConfigMap and ServiceAccount; replace it with your own before the
-first sync. The examples hold all six gRPC servers at `tls.clientAuth:
+first sync. `seeder.registry` is REQUIRED (`seeder` 0.2.0, ADR-0857): an install
+that sets none refuses with "registry is required". The examples hold all six gRPC servers at `tls.clientAuth:
 "required"`, with each server's client CA and each caller's client leaf named,
 because `project` admits the seeder's sync only from a verified leaf (ADR-0936).
 `chart/ci/values.yaml` keeps those six at `"off"`, because the D80 gate renders it
