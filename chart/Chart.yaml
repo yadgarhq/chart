@@ -72,7 +72,7 @@ dependencies:
     version: 0.15.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
-    version: 0.12.0
+    version: 0.12.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
     version: 0.4.3
