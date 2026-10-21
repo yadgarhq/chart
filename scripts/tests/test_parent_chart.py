@@ -7254,16 +7254,41 @@ def test_the_adopter_values_declare_the_registry_and_render_the_seeders_three_ob
     assert seeder_objects(adopter) == SEEDER_OBJECTS
 
 
-def test_without_a_registry_the_seeder_renders_nothing(tmp_path: Path) -> None:
-    """THE RED CASE FOR THE GATE ABOVE, and the expand step's own render.
+def seeder_pin() -> tuple[int, ...]:
+    """The `seeder` dependency version in `chart/Chart.yaml`, as comparable integers. PURE."""
+    document = yaml.safe_load((CHART / "Chart.yaml").read_text())
+    (entry,) = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
+    return tuple(int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", str(entry["version"])).groups())
 
-    Removing the block drops exactly `SEEDER_OBJECTS` and nothing else, so the gate
-    above is green because of the declaration and not because the seeder always
-    renders through this parent.
+
+def test_without_a_registry_the_seeder_renders_nothing_below_0_2_0_and_refuses_from_0_2_0(
+    tmp_path: Path,
+) -> None:
+    """THE RED CASE FOR THE GATE ABOVE, IN BOTH ARMS OF ADR-0857.
+
+    ADR-0857 (ledger 1592): the seeder's `registry` key moves expand, fixture,
+    contract. The arm is chosen by the `seeder` pin in `chart/Chart.yaml`, so the
+    pin bot moving it to 0.2.0 does not turn main red.
+
+    Below 0.2.0 (expand step): removing the block drops exactly `SEEDER_OBJECTS`
+    and nothing else, so the gate above is green because of the declaration and
+    not because the seeder always renders through this parent.
+
+    From 0.2.0 (contract step): the same overlay makes the render FAIL, and the
+    failure names the key. `NO_REGISTRY` sets `registry: null`, which Helm turns
+    into an absent key. The accepted wordings are helm 3.18.4's schema message,
+    the template's own sentence, and helm 4.x's schema message.
     """
-    documents = adopter_render("-f", str(overlay(tmp_path / "no-registry.yaml", NO_REGISTRY)))
-    assert seeder_objects(documents) == set()
-    assert len(documents) == ADOPTER_OBJECTS - len(SEEDER_OBJECTS)
+    path = overlay(tmp_path / "no-registry.yaml", NO_REGISTRY)
+    if seeder_pin() < (0, 2, 0):
+        documents = adopter_render("-f", str(path))
+        assert seeder_objects(documents) == set()
+        assert len(documents) == ADOPTER_OBJECTS - len(SEEDER_OBJECTS)
+        return
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(path))
+    assert result.returncode != 0, "seeder >= 0.2.0 rendered with no `registry`; the contract step did not hold"
+    accepted = ("registry is required", "registry is required with no default", "missing property 'registry'")
+    assert any(message in result.stderr for message in accepted), result.stderr
 
 
 def test_the_seeder_job_is_a_sync_wave_object_and_not_a_hook(adopter: list[dict]) -> None:
