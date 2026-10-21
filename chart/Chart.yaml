@@ -87,10 +87,13 @@ dependencies:
     version: 0.9.7
     repository: oci://ghcr.io/yadgarhq/charts
   # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
-  # `condition`. 0.1.0 was ADR-0857's expand step (the pin bot has moved the
-  # version since): with no `seeder.registry` block it renders NOTHING, so
-  # adding it moves no object in the default render. The registry is declared by the adopter (this organisation's in
-  # `yadgarhq/argocd`, stage 7), and a later seeder release makes it required.
+  # `condition`: a toggle would be a tenth `enabled` key for D80's all-off pass
+  # to flip. ADR-0857's contract step LANDED IN seeder 0.2.0: `seeder.registry`
+  # is required with no default, so an install without it refuses at
+  # `helm template` / `helm install` (schema: "registry is required"). The
+  # registry is declared by the adopter (this organisation's in
+  # `yadgarhq/argocd`, stage 7); the parent's own fixtures declare a
+  # placeholder (`chart/ci/values.yaml`, `example/`).
   - name: seeder
     version: 0.2.0
     repository: oci://ghcr.io/yadgarhq/charts

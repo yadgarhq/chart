@@ -7165,16 +7165,16 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
     assert any("`iam.enrolment.gateway`" in failure for failure in failures), failures
 
 
-# ── the D35 seeder (plans/the-d35-seeder.md stage 6, ADR-0857's expand step) ──
+# ── the D35 seeder (plans/the-d35-seeder.md stage 6, ADR-0857) ───────────────
 #
-# `seeder` 0.1.0 WAS THE EXPAND STEP (the pin bot has moved it since): with no `seeder.registry` block it renders
-# NOTHING, and a present block is checked whole by the seeder's own render
-# checks. THIS FILE NOW CARRIES THE FIXTURE STEP: `example/values.yaml`,
+# THE CONTRACT STEP HAS LANDED (`seeder` 0.2.0): `registry` is required with no
+# default, and a present block is checked whole by the seeder's own render
+# checks. THE FIXTURE STEP IS CARRIED HERE: `example/values.yaml`,
 # `chart/ci/values.yaml` and both parent examples declare `SEEDER_DECLARATION`,
 # a placeholder `acme` organisation, so the adopter render and the default render
 # both carry the seeder's three objects. `NO_REGISTRY` removes the block again,
-# which is the expand step's render. The CONTRACT step is a seeder release that
-# makes `registry` required.
+# and the render REFUSES. The pin cannot go back below 0.2.0, so no test keeps
+# an arm for the older behaviour (render nothing without a registry).
 #
 # THE TWO TLS SECRETS ARE THE PARENT'S OWN DEFAULTS, for the reason
 # `gateway.adminBootstrap.tokenSecret` is one: `platform`, which this parent
@@ -7195,8 +7195,8 @@ SEEDER_DECLARATION = (
     "    allowMassArchive: false\n"
 )
 
-# THE EXPAND STEP'S RENDER, rebuilt over the fixture: a `null` in a later `-f`
-# deletes the key, so the seeder sees no `registry` and renders nothing.
+# THE RENDER THE CONTRACT STEP REFUSES, rebuilt over the fixture: a `null` in a
+# later `-f` deletes the key, so the seeder sees no `registry`.
 NO_REGISTRY = "seeder:\n  registry: null\n"
 
 # WHAT THE SEEDER RENDERS ONCE DECLARED, and nothing else: one Job, the
@@ -7210,6 +7210,9 @@ SEEDER_OBJECTS = {
 SEEDER_CA_SECRET = "project-tls"
 SEEDER_CLIENT_SECRET = "seeder-client-tls"
 SEEDER_CALLER = "seeder-caller"
+# The wordings of the seeder's refusal to render with no `registry`: helm 3.18.4's
+# schema message, the template's own sentence, and helm 4.x's schema message.
+REGISTRY_REQUIRED = ("registry is required", "registry is required with no default", "missing property 'registry'")
 
 
 def seeder_objects(documents: list[dict]) -> set[tuple[str, str]]:
@@ -7230,9 +7233,10 @@ def seeder_job(documents: list[dict]) -> dict:
 def test_the_seeder_is_a_dependency_with_no_condition() -> None:
     """`seeder` IS A MODULE, SO IT CARRIES NO `condition` (only `platform` does).
 
-    ADR-0857's expand step switches it off by the ABSENT `registry` block, not by a
-    toggle: a toggle would be a tenth `enabled` key for D80's all-off pass to flip,
-    turning off a chart that renders only built-in kinds. The version is not
+    ADR-0857's contract step makes the `registry` block required rather than
+    switching the chart off with a toggle: a toggle would be a tenth `enabled` key
+    for D80's all-off pass to flip, turning off a chart that renders only
+    built-in kinds. The version is not
     asserted: the pin bot bumps it.
     """
     document = yaml.safe_load((CHART / "Chart.yaml").read_text())
@@ -7254,41 +7258,18 @@ def test_the_adopter_values_declare_the_registry_and_render_the_seeders_three_ob
     assert seeder_objects(adopter) == SEEDER_OBJECTS
 
 
-def seeder_pin() -> tuple[int, ...]:
-    """The `seeder` dependency version in `chart/Chart.yaml`, as comparable integers. PURE."""
-    document = yaml.safe_load((CHART / "Chart.yaml").read_text())
-    (entry,) = [entry for entry in document["dependencies"] if entry["name"] == "seeder"]
-    return tuple(int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", str(entry["version"])).groups())
+def test_without_a_registry_the_seeder_refuses_and_names_the_key(tmp_path: Path) -> None:
+    """THE RED CASE FOR THE GATE ABOVE: ADR-0857's CONTRACT STEP (`seeder` 0.2.0).
 
-
-def test_without_a_registry_the_seeder_renders_nothing_below_0_2_0_and_refuses_from_0_2_0(
-    tmp_path: Path,
-) -> None:
-    """THE RED CASE FOR THE GATE ABOVE, IN BOTH ARMS OF ADR-0857.
-
-    ADR-0857 (ledger 1592): the seeder's `registry` key moves expand, fixture,
-    contract. The arm is chosen by the `seeder` pin in `chart/Chart.yaml`, so the
-    pin bot moving it to 0.2.0 does not turn main red.
-
-    Below 0.2.0 (expand step): removing the block drops exactly `SEEDER_OBJECTS`
-    and nothing else, so the gate above is green because of the declaration and
-    not because the seeder always renders through this parent.
-
-    From 0.2.0 (contract step): the same overlay makes the render FAIL, and the
-    failure names the key. `NO_REGISTRY` sets `registry: null`, which Helm turns
-    into an absent key. The accepted wordings are helm 3.18.4's schema message,
-    the template's own sentence, and helm 4.x's schema message.
+    Removing the block makes the render FAIL, and the failure names the key.
+    `NO_REGISTRY` sets `registry: null`, which Helm turns into an absent key. The
+    accepted wordings are helm 3.18.4's schema message, the template's own
+    sentence, and helm 4.x's schema message.
     """
     path = overlay(tmp_path / "no-registry.yaml", NO_REGISTRY)
-    if seeder_pin() < (0, 2, 0):
-        documents = adopter_render("-f", str(path))
-        assert seeder_objects(documents) == set()
-        assert len(documents) == ADOPTER_OBJECTS - len(SEEDER_OBJECTS)
-        return
     result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(ADOPTER_VALUES), "-f", str(path))
-    assert result.returncode != 0, "seeder >= 0.2.0 rendered with no `registry`; the contract step did not hold"
-    accepted = ("registry is required", "registry is required with no default", "missing property 'registry'")
-    assert any(message in result.stderr for message in accepted), result.stderr
+    assert result.returncode != 0, "seeder rendered with no `registry`; the contract step did not hold"
+    assert any(message in result.stderr for message in REGISTRY_REQUIRED), result.stderr
 
 
 def test_the_seeder_job_is_a_sync_wave_object_and_not_a_hook(adopter: list[dict]) -> None:
@@ -7371,8 +7352,8 @@ def test_the_parent_schema_declares_the_seeder_section(tmp_path: Path) -> None:
 #
 # `bootstrap/kind-up.sh` (cold-install path A) applies `example/kind/application.yaml`
 # and nothing else (`ESTATE_APP_FILE`). Without `seeder.registry` there, the
-# seeder renders nothing, no row is ever written, and the gateway loads an empty
-# registry. This gate renders that file's `valuesObject` over the PUBLISHED parent
+# seeder refuses to render (`seeder` 0.2.0), so the cold install fails before any
+# row is written, instead of loading an empty registry. This gate renders that file's `valuesObject` over the PUBLISHED parent
 # it pins (`pinned`), which is what the cold install pulls, and requires the Job
 # and a ConfigMap whose declaration names at least one root and one project.
 
@@ -7408,14 +7389,20 @@ def test_the_kind_example_seeds_a_non_empty_registry(pinned: Path, tmp_path: Pat
     assert kind_seeding_failures(kind_render(pinned, kind_values(), tmp_path / "kind")) == []
 
 
-def test_the_kind_example_without_its_registry_reddens_the_seeding_gate(pinned: Path, tmp_path: Path) -> None:
-    """THE RED CASE: the same file with `seeder.registry` removed renders neither object."""
+def test_the_kind_example_without_its_registry_refuses_to_render(pinned: Path, tmp_path: Path) -> None:
+    """THE RED CASE: the same file with `seeder.registry` removed refuses to render.
+
+    The published parent it pins carries `seeder` 0.2.0 or later (contract step,
+    ADR-0857), so the refusal names the key and no render exists to gate on.
+    """
     values_object = kind_values()
     assert "registry" in values_object["seeder"], values_object.get("seeder")
     del values_object["seeder"]["registry"]
-    failures = kind_seeding_failures(kind_render(pinned, values_object, tmp_path / "kind-no-registry"))
-    assert any("no Job `seeder`" in failure for failure in failures), failures
-    assert any("no ConfigMap `seeder-registry`" in failure for failure in failures), failures
+    destination = tmp_path / "kind-no-registry"
+    destination.mkdir(parents=True, exist_ok=True)
+    result = example_render(pinned, values_object, destination)
+    assert result.returncode != 0, "the kind example rendered with no `seeder.registry`"
+    assert any(message in result.stderr for message in REGISTRY_REQUIRED), result.stderr
 
 
 @pytest.mark.parametrize("key", ["roots", "projects"])
