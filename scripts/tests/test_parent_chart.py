@@ -269,7 +269,13 @@ API_VERSIONS = tuple(
 # 4 -> 5, ServiceAccount 10 -> 11, 84 -> 87 objects. Measured 2026-10-18 on helm
 # 4.3.0. The seeder Job is NOT a helm hook (`NOT_A_HOOK_BY_DESIGN` below), so
 # `HOOK_JOBS_AT_R5` does not move with it.
+#
+# `platform` 0.2.9 MOVED IT (ADR-1016, platform#49). `gatewayListener.create` now
+# also renders the BackendTrafficPolicy `edge-upstream-idle` on the edge Gateway,
+# which sets Envoy's upstream idle timeout below the gateway's header-read bound:
+# BackendTrafficPolicy 0 -> 1, 87 -> 88 objects. Measured on helm 4.3.0.
 ADOPTER_EXPECTED = {
+    "BackendTrafficPolicy": 1,
     "Certificate": 15,
     "ConfigMap": 5,
     "Deployment": 8,
@@ -289,7 +295,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 11,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 87
+ADOPTER_OBJECTS = 88
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -5080,6 +5086,7 @@ THE_RENDER_CHECK_REFUSAL = "this render needs the API"
 DEFAULT_CRD_BEARING = {
     ("cert-manager.io", "Certificate"),
     ("cert-manager.io", "Issuer"),
+    ("gateway.envoyproxy.io", "BackendTrafficPolicy"),
     ("gateway.envoyproxy.io", "EnvoyProxy"),
     ("gateway.networking.k8s.io", "Gateway"),
     ("gateway.networking.k8s.io", "GatewayClass"),
