@@ -303,6 +303,11 @@ gateway:
       enabled: false
 
 iam:
+  # THE WORKLOADS THAT MAY REACH iam's 50052 when its NetworkPolicy is on
+  # (`networkPolicy.enabled`, off by default): the gateway, and the seeder,
+  # which sends SyncTeams (team access stage 7, plans/team-access.md).
+  networkPolicy:
+    clients: [gateway, seeder]
   autoscaling:
     enabled: true
   # WHAT IAM SERVES, and the dial it makes to iam-db. See the block above this
@@ -418,6 +423,10 @@ seeder:
     tls:
       caSecret: project-tls
       clientCertSecret: seeder-client-tls
+  # Verifies iam, read only once `registry.teams` is declared (team access).
+  iam:
+    tls:
+      caSecret: iam-tls
   registry:
     roots:
       - path: acme

@@ -7541,3 +7541,165 @@ def test_the_release_job_passes_the_release_app_for_the_argocd_nudge() -> None:
         "RELEASE_APP_CLIENT_ID": "${{ secrets.RELEASE_APP_CLIENT_ID }}",
         "RELEASE_APP_PRIVATE_KEY": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
     }, f"`release` passes {secrets!r}; the argocd nudge needs exactly the release App."
+
+
+# ─── team access stage 7 (plans/team-access.md): the seeder reaches iam ─────────
+#
+# THE SEEDER DIALS iam FOR `SyncTeams` (team access stage 6), so iam's ingress
+# NetworkPolicy must admit pods labelled `app: seeder` on 50052. iam's own chart
+# reads `networkPolicy.clients`, default `[gateway]`; the parent and every
+# adopter source set `[gateway, seeder]`. The policy is off by default
+# (`networkPolicy.enabled`, D80's asymmetric-cost reason), so the test turns it on
+# per render: the list must already be right for the adopter who turns it on.
+IAM_INGRESS_POLICY = "iam-ingress"
+SEEDER_SELECTOR = {"podSelector": {"matchLabels": {"app": "seeder"}}}
+
+
+def adopter_value_sources() -> dict[str, dict]:
+    """Every adopter source of values: the two values files and both parent examples."""
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    return sources
+
+
+def iam_ingress_without_seeder(documents: list[dict]) -> list[str]:
+    """Why the rendered iam ingress policy does not admit the seeder, or []. PURE."""
+    policies = [
+        d for d in documents
+        if isinstance(d, dict) and d.get("kind") == "NetworkPolicy"
+        and (d.get("metadata") or {}).get("name") == IAM_INGRESS_POLICY
+    ]
+    if len(policies) != 1:
+        return [f"{len(policies)} NetworkPolicy objects named {IAM_INGRESS_POLICY}"]
+    sources = [peer for rule in policies[0]["spec"].get("ingress") or [] for peer in rule.get("from") or []]
+    if SEEDER_SELECTOR not in sources:
+        return [f"{IAM_INGRESS_POLICY} admits {sources}, not {SEEDER_SELECTOR}"]
+    return []
+
+
+def render_iam_policy(tmp_path: Path, name: str, values: dict, *extra: str) -> list[dict]:
+    source = tmp_path / (name.replace("/", "_") + ".yaml")
+    source.write_text(yaml.safe_dump(values))
+    return render(str(CHART), *API_VERSIONS, "-f", str(source), "--set", "iam.networkPolicy.enabled=true", *extra)
+
+
+@pytest.mark.parametrize("name", sorted(adopter_value_sources()))
+def test_red_02_iams_ingress_policy_admits_the_seeder_from_every_adopter_source(tmp_path: Path, name: str) -> None:
+    documents = render_iam_policy(tmp_path, name, adopter_value_sources()[name])
+    assert iam_ingress_without_seeder(documents) == []
+
+
+def test_red_02_a_render_with_the_seeder_removed_from_iams_clients_fails_the_gate(tmp_path: Path) -> None:
+    """THE RED CASE: the same render with `seeder` dropped from the list."""
+    values = adopter_value_sources()["example/values.yaml"]
+    documents = render_iam_policy(tmp_path, "no-seeder", values, "--set", "iam.networkPolicy.clients={gateway}")
+    failures = iam_ingress_without_seeder(documents)
+    assert len(failures) == 1 and "not {'podSelector'" in failures[0], failures
+
+
+def test_red_02_every_adopter_source_states_the_seeder_among_iams_clients() -> None:
+    """Stated in each source, not only inherited from the parent default (K1)."""
+    sources = adopter_value_sources()
+    # THE PARENT DEFAULT TOO: every source above overrides it, so no render test
+    # reads it, and an adopter who leaves the key out gets exactly this list.
+    sources["chart/values.yaml"] = yaml.safe_load((CHART / "values.yaml").read_text())
+    stated = {name: value_at(values, "iam.networkPolicy.clients") for name, values in sources.items()}
+    assert stated == {name: ["gateway", "seeder"] for name in stated}, stated
+
+
+# NOTHING BROADER THAN THE SEEDER JOB ON 50052 (least privilege). The membership
+# check above passes a policy that also admits a third client, another peer, or a
+# second port; this pins the whole ingress, so any widening is red.
+IAM_INGRESS_EXACT = [
+    {
+        "from": [{"podSelector": {"matchLabels": {"app": "gateway"}}}, SEEDER_SELECTOR],
+        "ports": [{"port": 50052, "protocol": "TCP"}],
+    }
+]
+
+
+def iam_ingress_rules(documents: list[dict]) -> list[dict]:
+    """The `ingress` of the one `iam-ingress` policy. PURE."""
+    (policy,) = [
+        d for d in documents
+        if isinstance(d, dict) and d.get("kind") == "NetworkPolicy"
+        and (d.get("metadata") or {}).get("name") == IAM_INGRESS_POLICY
+    ]
+    return policy["spec"].get("ingress") or []
+
+
+@pytest.mark.parametrize("name", sorted(adopter_value_sources()))
+def test_iams_ingress_admits_exactly_the_gateway_and_the_seeder_on_50052(tmp_path: Path, name: str) -> None:
+    documents = render_iam_policy(tmp_path, name, adopter_value_sources()[name])
+    assert iam_ingress_rules(documents) == IAM_INGRESS_EXACT
+
+
+def test_a_widened_iam_ingress_fails_the_exact_gate(tmp_path: Path) -> None:
+    """THE RED CASE: a third client beside the gateway and the seeder."""
+    values = adopter_value_sources()["example/values.yaml"]
+    widened = "iam.networkPolicy.clients={gateway,seeder,ns}"
+    documents = render_iam_policy(tmp_path, "widened", values, "--set", widened)
+    assert iam_ingress_rules(documents) != IAM_INGRESS_EXACT
+
+
+# ─── team access stage 7 red 1 and the iam authority (seeder 0.2.2) ─────────────
+#
+# The stage 6 seeder chart passes through the parent unchanged: the parent's
+# schema leaves `seeder` open, so the seeder chart's own rules decide. These two
+# tests prove that through the parent, from the adopter's example values.
+ADMIN_UUID = "0192f3c4-aaaa-7bbb-8ccc-0123456789ab"
+ADMIN_READ_WRITE = {"team": "administrators", "level": "readWrite"}
+
+
+def example_with_registry(**changes: object) -> dict:
+    """`example/values.yaml` with its `seeder.registry` changed. PURE but for the read."""
+    values = yaml.safe_load(ADOPTER_VALUES.read_text())
+    registry = values["seeder"]["registry"]
+    for key, value in changes.items():
+        registry[key] = value
+    return values
+
+
+def render_values(tmp_path: Path, name: str, values: dict) -> subprocess.CompletedProcess:
+    source = tmp_path / f"{name}.yaml"
+    source.write_text(yaml.safe_dump(values))
+    return helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(source))
+
+
+def test_red_01_a_parent_values_file_with_grants_and_no_teams_is_refused(tmp_path: Path) -> None:
+    """THE TRANSITION RULE THROUGH THE PARENT: a grant names a declared team."""
+    values = example_with_registry()
+    values["seeder"]["registry"]["roots"][0]["grants"] = [ADMIN_READ_WRITE]
+    result = render_values(tmp_path, "grants-no-teams", values)
+    assert result.returncode != 0, "a grant with no `teams` rendered"
+    assert "grants" in result.stderr and "teams" in result.stderr, result.stderr
+
+
+def test_the_parent_defaults_the_seeders_iam_authority_to_iam_tls() -> None:
+    """`platform` mints `iam-tls`, as it mints `project-tls`, so the parent names it."""
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    assert value_at(values, "seeder.iam.tls.caSecret") == "iam-tls"
+
+
+def test_teams_declared_through_the_parent_render_and_mount_iam_tls(tmp_path: Path) -> None:
+    """With teams declared and no `iam.tls.caSecret` stated, the parent default lets
+    the render through and the Job mounts `iam-tls`. Without the default the seeder
+    chart refuses (`iam.tls.caSecret` has no default there, ADR-0854)."""
+    values = example_with_registry(
+        teams=[{"name": "administrators", "members": [ADMIN_UUID]}],
+        allowMassRevoke=False,
+    )
+    values["seeder"]["registry"]["roots"][0]["grants"] = [ADMIN_READ_WRITE]
+    # The example states the name too (K1); drop it, so only the default is read.
+    del values["seeder"]["iam"]
+    result = render_values(tmp_path, "teams", values)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    secrets = {
+        (v.get("secret") or {}).get("secretName") for v in pod_spec(documents, "Job", "seeder").get("volumes") or []
+    }
+    assert "iam-tls" in secrets, secrets
