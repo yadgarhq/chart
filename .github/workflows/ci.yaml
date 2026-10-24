@@ -126,7 +126,19 @@ jobs:
   # re-pins a released module chart in this repository, excludes this repository
   # by name (`github.repository != 'yadgarhq/chart'`), so a release here never
   # re-pins this parent into itself. `ci-release.yaml` has no `deployment` job
-  # any more (ledger 675 stage 7), so nothing here writes to `yadgarhq/argocd`.
+  # any more (ledger 675 stage 7), so nothing here writes a file to
+  # `yadgarhq/argocd`.
+  #
+  # THE TWO SECRETS ARE FOR THE ARGOCD NUDGE, AND ONLY THAT (C7 of
+  # plans/auto-deploy-parent-chart.md, ADR-1004 item 5). `ci-release.yaml`'s
+  # `argocd-pin-nudge` job, gated to this repository by name, mints a release
+  # App token scoped to `argocd` with `contents: write` and sends
+  # `repository_dispatch` type `chart-published`, so argocd's `auto-pin.yaml`
+  # opens the pin PR in seconds. It writes no file in argocd. A failed nudge
+  # warns and the release stays green; argocd's auto-pin schedule, every 15
+  # minutes, is the backstop.
+  # `parent` skips here and `examples` reads no secret, so no other job of the
+  # release receives the key. Named, not `inherit`, for the reason `main` gives.
   #
   # ONE THING THIS REPOSITORY DEPENDS ON AND DOES NOT CONTROL: per ADR-0725 the
   # `chart` job resolves this chart's eight dependencies at package time
@@ -301,3 +313,6 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    secrets:
+      RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
