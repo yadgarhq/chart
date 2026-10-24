@@ -84,7 +84,7 @@ dependencies:
     version: 0.8.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.11.1
+    version: 0.11.2
     repository: oci://ghcr.io/yadgarhq/charts
   # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
   # `condition`: a toggle would be a tenth `enabled` key for D80's all-off pass
