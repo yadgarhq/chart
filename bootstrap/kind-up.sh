@@ -1284,6 +1284,34 @@ upgrade_enrolled_client() {
   log "[10/10] upgraded root's client $have→$pin; credential stays at $cfg"
 }
 
+# A FRESH ENROLMENT'S CLIENT FOLLOWS THE LOCK TOO (yaadgaar #277). yaadgaar_bin
+# reuses root's pipx client as it finds it, so a host that already ran an older
+# client would enrol with that one. Here no credential is at stake (there is no
+# enrolled marker), so unlike upgrade_enrolled_client nothing is copied. The
+# same rules apply otherwise: the wheel is fetched BEFORE the working client is
+# touched, because pipx removes the old venv when a forced install fails; a
+# version that is missing, unreadable or not older than the pin is kept.
+upgrade_fresh_client() {
+  local bin="$1" pin have rc=0 tmp
+  pin="$(yaadgaar_version)"
+  [[ -n "$pin" ]] || return 0
+  have="$("$bin" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
+  [[ -n "$have" ]] || return 0
+  version_older "$have" "$pin" || rc=$?
+  [[ "$rc" -eq 0 ]] || return 0
+  tmp="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
+  if ! pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched"
+    return 0
+  fi
+  rm -rf "$tmp"
+  if ! run pipx install --force "yaadgaar==$pin" >/dev/null; then
+    die "upgrading root's client $have→$pin failed, and pipx removes the old client when a forced install fails. Put one back: pipx install --force yaadgaar==$pin"
+  fi
+  log "[10/10] upgraded root's client $have→$pin before enrolling"
+}
+
 # Registers the MCP server and hooks for Claude Code (ledger 1540), ONLY when
 # `claude` is installed for this user — on PATH, or at ~/.local/bin, which
 # sudo's secure_path hides. Without it, the command to run later is printed.
@@ -1344,6 +1372,7 @@ ensure_client() {
     log "[10/10] --with-client: yaadgaar could not be installed; skipped"
     return
   }
+  upgrade_fresh_client "$bin"
   if ! "$bin" enrol --help 2>/dev/null | grep -q -- '--password-stdin'; then
     log "[10/10] --with-client: this yaadgaar has no --password-stdin; skipped. Enrol by hand as shown below"
     return
