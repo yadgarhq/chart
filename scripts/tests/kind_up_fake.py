@@ -19,7 +19,10 @@ WHAT IT DOES, per call:
 3. Writes the rule's `stdout`, writes `o_content` to the path after `-o` if both
    exist, writes `write_content` to the path after the flag `write_arg` names,
    and exits with `exit` (default 0). `stdout` and `exit` may each be a list,
-   consumed one entry per call to that rule, the last repeating.
+   consumed one entry per call to that rule, the last repeating. `o_echo_user_id`
+   in place of `o_content` writes `{"user_id": "yadgar:user:<the body's user_id>"}`
+   to the `-o` path: the gateway's F2 echo (plans/team-access.md stage 3b), for a
+   body whose uuid the script minted and the test cannot know in advance.
 
 No rule matches: exit 0 with no output. The tests assert on `calls.jsonl`, so an
 unexpected call is caught there rather than by the fake refusing it.
@@ -83,6 +86,9 @@ def main() -> int:
         out = nth(rule.get("stdout", ""))
         if "o_content" in rule and "-o" in argv:
             Path(argv[argv.index("-o") + 1]).write_text(rule["o_content"], encoding="utf-8")
+        if rule.get("o_echo_user_id") and "-o" in argv:
+            echoed = {"user_id": "yadgar:user:" + json.loads(data or "{}").get("user_id", "")}
+            Path(argv[argv.index("-o") + 1]).write_text(json.dumps(echoed), encoding="utf-8")
         # `write_arg`: write `write_content` to the path after that flag, the way
         # `kind export kubeconfig --kubeconfig <path>` writes its file.
         if "write_arg" in rule and rule["write_arg"] in argv:

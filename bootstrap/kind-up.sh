@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # kind-up.sh — the whole of yadgar on one machine, in one command (ADR-0820).
 #
-#   sudo bootstrap/kind-up.sh [--with-client]
+#   sudo bootstrap/kind-up.sh [--with-client] [--reissue-admin-enrolment [--revoke-existing]]
 #   sudo bootstrap/kind-up.sh --add-user <username> [--display-name NAME] [--out FILE] [--force]
 #
 # --with-client enrols this machine's root as the first admin with `yaadgaar`,
 # and registers yadgar with Claude Code (`yaadgaar install`) when `claude` is
-# installed. --add-user, run after that, creates one more ORDINARY user (never
+# installed. --reissue-admin-enrolment issues a new enrolment for the recorded
+# first admin with the bootstrap token, the break-glass path (ADR-0966): redeeming
+# it resets the admin's password. --revoke-existing, beside it, also revokes every
+# credential the admin holds when the enrolment is redeemed (ADR-0943). --add-user, run after that, creates one more ORDINARY user (never
 # an admin) as that admin and writes their enrolment token to a new root-only
 # file in a root-only directory; --force replaces only a regular file, links are
 # never followed, and it touches nothing else.
@@ -31,7 +34,10 @@
 #
 # THE EXAMPLE FILES ARE APPLIED AS THEY ARE, never copied into this script:
 # `example/operators-application.yaml`, `example/kind/application.yaml` and
-# `example/kind/kind-config.yaml`. Their pins are the pins, in one place.
+# `example/kind/kind-config.yaml`. Their pins are the pins, in one place. The
+# estate Application alone is applied as a per-install render of its example
+# (`render_estate_application`): the same pins and values, plus this install's
+# first administrator in `administrators` (plans/team-access.md, flow F2).
 #
 # THE ARGO APPLICATIONS MUST SUCCEED ON THEIR FIRST SYNC, which means their
 # first operation succeeds (Argo may retry within it). It waits for `Synced`, `Healthy`
@@ -297,19 +303,24 @@ ADD_USER_FORCE=0
 # asking for one on admin routes (ledger 1545).
 ADMIN_PROJECT_HEADER="yadgar/admin"
 
-# THE ONE 403 THAT MEANS "THIS ADMIN ALREADY HOLDS A CREDENTIAL", verbatim from
-# gateway v0.9.54 `src/http/authority.rs` (`admin_failure`). The gateway sends
-# no error code beside it, and answers 403 for other reasons too, so the body
-# is the only discriminator. Re-read it when the pinned gateway moves.
-ZERO_CREDENTIAL_REFUSAL="may only enrol an administrator who has never held a credential"
+# NO 403 FROM issue-enrolment MEANS "DONE" ANY MORE (plans/team-access.md stage
+# 9b, item 8). With admin derived from `administrators` membership, the bootstrap
+# token may enrol any declared administrator (ADR-0966), so a recorded admin's
+# enrolment is no longer refused for holding a credential: a 403 is a refusal,
+# and the script dies naming it.
 
-# THE SAME REFUSAL AS THE TEAM-ACCESS GATEWAY WORDS IT (plans/team-access.md,
-# stages 3a and 3b): one constant body for every failed step of the enrolment
-# predicate. A chart release can pin that gateway beside this script without a
-# human (ADR-0946), so both bodies are read as "refused by the predicate". With
-# admin derived from the column, the only refusal a recorded first admin can
-# meet is the credential conjunct, so either body still means `enrolled`.
-PREDICATE_REFUSAL="may only enrol an administrator the enrolment predicate admits"
+# THE FIRST ADMINISTRATOR'S UUID, minted once per host before the estate is
+# applied and declared as the only member of `administrators` (flow F2,
+# ADR-0963 (5)). The bootstrap create-user creates the user with exactly this id.
+# Kept across `kind delete cluster`: a new store has no user and no pending row.
+FIRST_ADMIN_UUID_FILE="$STATE_DIR/first-admin-uuid"
+# THE ESTATE APPLICATION THIS INSTALL APPLIES, rendered from the example.
+RENDERED_APP_FILE="$STATE_DIR/application.yaml"
+# The canonical lowercase uuidv7 the declaration takes (plans/team-access.md §2):
+# 8-4-4-4-12 hex, version nibble 7, RFC 4122 variant 8, 9, a or b.
+UUIDV7_RE='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+REISSUE_ADMIN_ENROLMENT=0
+REVOKE_EXISTING=0
 
 # An enrolment token lives 24 hours (ADR-0492). A file older than this is
 # re-issued rather than handed back expired.
@@ -748,6 +759,108 @@ ensure_application() {
   wait_app "$name" "$timeout" || die "Application $name did not succeed on its first sync"
 }
 
+# ─── the first administrator, declared before install (flow F2) ──────────────
+
+# A uuidv7 from the clock and /dev/urandom, with no new tool (`uuidgen
+# --time-v7` needs util-linux 2.41, which this script cannot assume): 48 bits of
+# Unix milliseconds, the version nibble 7, 12 random bits, the RFC 4122 variant
+# and 62 random bits. The caller checks the result against UUIDV7_RE.
+mint_uuidv7() {
+  local ms hex rand variant
+  ms="$(date +%s%3N)"
+  [[ "$ms" =~ ^[0-9]+$ ]] || return 1
+  printf -v hex '%012x' "$ms"
+  rand="$(od -An -N10 -tx1 /dev/urandom | tr -d ' \n')"
+  ((${#rand} == 20)) || return 1
+  [[ "$rand" =~ ^[0-9a-fA-F]+$ ]] || return 1
+  printf -v variant '%x' $((0x8 | (0x${rand:3:1} & 0x3)))
+  printf '%s-%s-7%s-%s%s-%s\n' "${hex:0:8}" "${hex:8:4}" "${rand:0:3}" "$variant" "${rand:4:3}" "${rand:7:12}"
+}
+
+# THE MINTED FIRST ADMINISTRATOR: $FIRST_ADMIN_UUID_FILE (root, 0600), minted on
+# the first run and reused on every later one. Prints the bare uuid. A value
+# that fails the declaration's member rule is refused before anything uses it.
+first_admin_uuid() {
+  local uuid
+  if [[ -s "$FIRST_ADMIN_UUID_FILE" ]]; then
+    uuid="$(tr -d '[:space:]' <"$FIRST_ADMIN_UUID_FILE")"
+    [[ "$uuid" =~ $UUIDV7_RE ]] ||
+      die "$FIRST_ADMIN_UUID_FILE holds $(printf '%s' "$uuid" | printable), not a lowercase canonical uuidv7"
+    printf '%s\n' "$uuid"
+    return
+  fi
+  uuid="$(mint_uuidv7)" || uuid=""
+  [[ "$uuid" =~ $UUIDV7_RE ]] ||
+    die "the minted first-admin uuid $(printf '%s' "${uuid:-<empty>}" | printable) is not a lowercase canonical uuidv7; nothing was applied"
+  printf '%s\n' "$uuid" >"$FIRST_ADMIN_UUID_FILE.tmp"
+  chmod 0600 "$FIRST_ADMIN_UUID_FILE.tmp"
+  mv "$FIRST_ADMIN_UUID_FILE.tmp" "$FIRST_ADMIN_UUID_FILE"
+  log "[7/10] minted the first administrator's uuid $uuid into $FIRST_ADMIN_UUID_FILE" >&2
+  printf '%s\n' "$uuid"
+}
+
+# WHO `administrators` DECLARES on this install. AN EXISTING INSTALL KEEPS ITS
+# ADMIN: when $ADMIN_RECORD belongs to this installation (an older kind-up.sh
+# created that admin with `is_admin: true`), its user is declared and nothing is
+# minted. That user is live and holds a true column, so the first sync stores a
+# live member and turning on IAM_ADMIN_FROM_TEAM keeps their admin. Otherwise the
+# minted uuid. A cluster not yet installed has no bootstrap Secret, so no uid.
+declared_admin_uuid() {
+  local uid="" recorded_uid recorded
+  if [[ -s "$ADMIN_RECORD" ]]; then
+    uid="$(install_uid 2>/dev/null)" || uid=""
+    recorded_uid="$(jq -r '.install_uid // empty' "$ADMIN_RECORD")"
+    if [[ -n "$uid" && "$recorded_uid" == "$uid" ]]; then
+      recorded="$(jq -r '.user_id // empty' "$ADMIN_RECORD")"
+      recorded="${recorded#yadgar:user:}"
+      [[ "$recorded" =~ $UUIDV7_RE ]] ||
+        die "$ADMIN_RECORD records user $(printf '%s' "$recorded" | printable), which is not a lowercase canonical uuidv7 and cannot be declared in administrators"
+      printf '%s\n' "$recorded"
+      return
+    fi
+  fi
+  first_admin_uuid
+}
+
+# THE ESTATE APPLICATION, RENDERED PER INSTALL to $RENDERED_APP_FILE from the
+# committed example, which cannot carry a per-install uuid and is never edited:
+# `seeder.registry.teams` gains `administrators` with the declared uuid as its
+# only member, every declared root gains an `administrators` `readWrite` grant,
+# and `iam.adminFromTeam` true renders IAM_ADMIN_FROM_TEAM=true (F2 needs it).
+# Declaring teams also makes the seeder chart (team access stage 6) require two
+# keys with no default, set here unless the example already states them:
+# `seeder.registry.allowMassRevoke` false (the store's mass-revoke guard stays
+# on) and `seeder.iam.tls.caSecret` `iam-tls` (the authority the seeder verifies
+# iam against when it sends SyncTeams; `platform` mints `iam-tls`).
+# Written only when its content changes, so `ensure_application`'s diff sees an
+# unchanged rerun as unchanged.
+render_estate_application() {
+  local uuid work state
+  uuid="$(declared_admin_uuid)"
+  work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
+  k create --dry-run=client -o json -f "$ESTATE_APP_FILE" >"$work/example.json" ||
+    die "kubectl could not read $ESTATE_APP_FILE"
+  jq --arg u "$uuid" '
+    .spec.source.helm.valuesObject as $v
+    | .spec.source.helm.valuesObject.seeder.registry.teams =
+        ([{name: "administrators", members: [$u]}]
+         + [($v.seeder.registry.teams // [])[] | select(.name != "administrators")])
+    | .spec.source.helm.valuesObject.seeder.registry.roots |= map(
+        .grants = ([(.grants // [])[] | select(.team != "administrators")]
+                   + [{team: "administrators", level: "readWrite"}]))
+    | .spec.source.helm.valuesObject.seeder.registry.allowMassRevoke |= (if . == null then false else . end)
+    | .spec.source.helm.valuesObject.seeder.iam.tls.caSecret |= (if . == null then "iam-tls" else . end)
+    | .spec.source.helm.valuesObject.iam.adminFromTeam = true
+  ' "$work/example.json" >"$work/application.yaml" ||
+    die "could not render $RENDERED_APP_FILE from $ESTATE_APP_FILE"
+  [[ "$(jq -r '.kind // empty' "$work/application.yaml")" == Application ]] ||
+    die "the render of $ESTATE_APP_FILE holds no Application"
+  state="$(replace_if_changed "$work/application.yaml" "$RENDERED_APP_FILE")" ||
+    die "could not write $RENDERED_APP_FILE"
+  rm -rf "$work"
+  log "[7/10] $RENDERED_APP_FILE $state: administrators = [$uuid]"
+}
+
 # ─── 8. the edge ─────────────────────────────────────────────────────────────
 
 # Adds `127.0.0.1 <host>` unless a live line already maps the host. A line
@@ -861,42 +974,44 @@ retire_spent_token() {
 }
 
 # Issues an enrolment for the recorded admin and writes the token to a 0600
-# file. Sets ENROLMENT_OUTCOME to `issued`, or to `enrolled` when the gateway
-# answers with the zero-credential refusal, in either wording. Called plainly, never under `||` or
-# `if`, so errexit holds inside it.
-ENROLMENT_OUTCOME=""
+# file. With --revoke-existing the body carries `revoke_existing_credentials:
+# true` (ADR-0943), and the 200 must echo it as applied. On 200 the record gains
+# `enrolment_issued_at`. Every other answer, a 403 included, is a refusal that
+# dies naming it (plans/team-access.md stage 9b, item 8). Called plainly, never
+# under `||` or `if`, so errexit holds inside it.
 issue_enrolment() {
   local user_id="$1" token="$2" work code
-  ENROLMENT_OUTCOME=""
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-  jq -n --arg u "$user_id" '{user_id: $u}' >"$work/body"
+  if ((REVOKE_EXISTING)); then
+    jq -n --arg u "$user_id" '{user_id: $u, revoke_existing_credentials: true}' >"$work/body"
+  else
+    jq -n --arg u "$user_id" '{user_id: $u}' >"$work/body"
+  fi
   code="$(admin_post issue-enrolment "$work/body" "$work/out" "$token")"
-  case "$code" in
-    200)
-      jq -r '.token // empty' "$work/out" >"$work/token"
-      [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
-      mkdir -p "$(dirname "$ENROLMENT_FILE")"
-      install -m 0600 "$work/token" "$ENROLMENT_FILE"
+  if [[ "$code" == 200 ]]; then
+    if ((REVOKE_EXISTING)) && [[ "$(jq -r '.revoke_existing_credentials // empty' "$work/out")" != true ]]; then
       rm -rf "$work"
-      ENROLMENT_OUTCOME=issued
-      log "[9/10] enrolment token for $ADMIN_EXTERNAL_ID written to $ENROLMENT_FILE (0600, valid 24 hours)"
-      return 0
-      ;;
-    403)
-      if grep -qF -e "$ZERO_CREDENTIAL_REFUSAL" -e "$PREDICATE_REFUSAL" "$work/out"; then
-        rm -rf "$work"
-        ENROLMENT_OUTCOME=enrolled
-        return 0
-      fi
-      ;;
-  esac
+      die "issue-enrolment answered 200 without applying revoke_existing_credentials; the gateway predates it. The token was not written"
+    fi
+    jq -r '.token // empty' "$work/out" >"$work/token"
+    [[ -s "$work/token" ]] || die "issue-enrolment answered 200 with no token"
+    mkdir -p "$(dirname "$ENROLMENT_FILE")"
+    install -m 0600 "$work/token" "$ENROLMENT_FILE"
+    jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.enrolment_issued_at = $t' "$ADMIN_RECORD" >"$ADMIN_RECORD.tmp"
+    mv "$ADMIN_RECORD.tmp" "$ADMIN_RECORD"
+    rm -rf "$work"
+    log "[9/10] enrolment token for $ADMIN_EXTERNAL_ID written to $ENROLMENT_FILE (0600, valid 24 hours)"
+    return 0
+  fi
   local answer
   answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null | printable || true)"
   rm -rf "$work"
   die "issue-enrolment answered ${code:-nothing}: ${answer:-no body}"
 }
 
-# The first admin, over the gateway's existing routes (ADR-0492, ADR-0655).
+# The first admin, over the gateway's existing routes (ADR-0492, ADR-0655), by
+# flow F2 (ADR-0963 (5)): create-user names the uuid the estate declared in
+# `administrators` before install, and the answer must echo it.
 #
 # IDEMPOTENCY IS LOCAL, because the gateway gives no other handle: a duplicate
 # `external_id` is refused inside iam and the gateway answers it with the same
@@ -907,18 +1022,26 @@ issue_enrolment() {
 #
 # THE RECORD IS TIED TO THE INSTALLATION by `install_uid`. A record, token or
 # client marker from another installation — `kind delete cluster` and a rerun —
-# is set aside, and this installation gets its own admin.
+# is set aside, and this installation gets its own admin, with the same minted
+# uuid.
 #
-#   record for this install, token younger than 23h → skip; no token is read
-#   record for this install, no fresh token         → issue-enrolment for it
-#                                                     (the bootstrap token may
-#                                                     enrol only an admin with
-#                                                     zero credentials; that
-#                                                     refusal means done)
-#   no record for this install                      → create-user, record,
-#                                                     issue-enrolment
+# NO IMPLICIT RE-ENROLMENT (ADR-0966). The bootstrap token may enrol any declared
+# administrator, so an enrolment issued for an enrolled admin is a password reset
+# nobody asked for. A recorded admin is enrolled again only on
+# --reissue-admin-enrolment, with one exception: an interrupted first run. The
+# record this script writes at create-user carries `enrolment_issued_at: null`
+# until an issue-enrolment answers 200; while it is null the enrolment is issued
+# without the flag. A record an older kind-up.sh wrote has no such key: its admin
+# may well be enrolled, so it needs the flag.
+#
+#   --reissue-admin-enrolment, record for this install → issue-enrolment for it
+#   record, enrolled here or token younger than 23h    → skip; no token is read
+#   record, `enrolment_issued_at` null                  → issue-enrolment for it
+#   record, anything else                               → nothing; name the flag
+#   no record for this install                          → create-user, record,
+#                                                         issue-enrolment
 ensure_admin() {
-  local uid recorded_uid token user_id recorded_id work code
+  local uid recorded_uid token user_id recorded_id work code uuid answered issued
   uid="$(install_uid)"
   [[ -n "$uid" ]] || die "Secret $ESTATE_NAMESPACE/admin-bootstrap-token has no uid; the estate has not minted it"
   if [[ -s "$ADMIN_RECORD" ]]; then
@@ -931,32 +1054,42 @@ ensure_admin() {
     log "[9/10] no admin record ties the enrolment token or client markers to this installation"
     set_aside "$ENROLMENT_FILE" "$CLIENT_ENROLLED_MARKER" "$CLIENT_LOGGED_IN_MARKER"
   fi
-  # ENROLLED HERE BY --with-client: the token was redeemed, so it is neither
-  # "current" — its mtime says nothing about whether it was spent (ledger 1544) —
-  # nor worth a new one, and the bootstrap token is not read.
-  if [[ -s "$ADMIN_RECORD" && -f "$CLIENT_ENROLLED_MARKER" ]]; then
-    log "[9/10] admin $ADMIN_EXTERNAL_ID is enrolled on this host's client; no enrolment token is needed"
-    retire_spent_token 9
-    return
-  fi
-  if [[ -s "$ADMIN_RECORD" && -s "$ENROLMENT_FILE" ]] &&
-    [[ -n "$(find "$ENROLMENT_FILE" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
-    log "[9/10] $ENROLMENT_FILE already holds a current enrolment token for this installation"
-    return
-  fi
   if [[ -s "$ADMIN_RECORD" ]]; then
     recorded_id="$(jq -r '.external_id' "$ADMIN_RECORD")"
     [[ "$recorded_id" == "$ADMIN_EXTERNAL_ID" ]] ||
       die "$ADMIN_RECORD records admin $recorded_id, not $ADMIN_EXTERNAL_ID; this installation's first admin already exists"
     user_id="$(jq -r '.user_id' "$ADMIN_RECORD")"
+    if ((!REISSUE_ADMIN_ENROLMENT)); then
+      # ENROLLED HERE BY --with-client: the token was redeemed, so it is neither
+      # "current" — its mtime says nothing about whether it was spent (ledger
+      # 1544) — nor worth a new one, and the bootstrap token is not read.
+      if [[ -f "$CLIENT_ENROLLED_MARKER" ]]; then
+        log "[9/10] admin $ADMIN_EXTERNAL_ID is enrolled on this host's client; no enrolment token is needed"
+        retire_spent_token 9
+        return
+      fi
+      if [[ -s "$ENROLMENT_FILE" ]] &&
+        [[ -n "$(find "$ENROLMENT_FILE" -mmin -"$ENROLMENT_MAX_AGE_MINUTES" 2>/dev/null)" ]]; then
+        log "[9/10] $ENROLMENT_FILE already holds a current enrolment token for this installation"
+        return
+      fi
+      issued="$(jq -r 'if has("enrolment_issued_at") then (.enrolment_issued_at // "null") else "absent" end' "$ADMIN_RECORD")"
+      if [[ "$issued" != null ]]; then
+        log "[9/10] admin $ADMIN_EXTERNAL_ID ($user_id) already had an enrolment issued and may already be enrolled; no enrolment is sent. To issue a new one, which resets their password, run again with --reissue-admin-enrolment (add --revoke-existing to revoke every credential they hold)"
+        return
+      fi
+      log "[9/10] admin $ADMIN_EXTERNAL_ID already created ($user_id) and no enrolment was issued yet; issuing it"
+    else
+      log "[9/10] --reissue-admin-enrolment: issuing a new enrolment for $ADMIN_EXTERNAL_ID ($user_id)"
+    fi
     token="$(read_bootstrap_token)"
-    log "[9/10] admin $ADMIN_EXTERNAL_ID already created ($user_id); issuing a new enrolment"
   else
+    uuid="$(first_admin_uuid)"
     token="$(read_bootstrap_token)"
-    log "[9/10] creating the first admin $ADMIN_EXTERNAL_ID"
+    log "[9/10] creating the first admin $ADMIN_EXTERNAL_ID as the declared administrator $uuid"
     work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-    jq -n --arg e "$ADMIN_EXTERNAL_ID" --arg d "$ADMIN_DISPLAY_NAME" \
-      '{external_id: $e, display_name: $d, is_admin: true}' >"$work/body"
+    jq -n --arg e "$ADMIN_EXTERNAL_ID" --arg d "$ADMIN_DISPLAY_NAME" --arg u "$uuid" \
+      '{external_id: $e, display_name: $d, user_id: $u}' >"$work/body"
     code="$(admin_post create-user "$work/body" "$work/out" "$token")"
     if [[ "$code" != 200 ]]; then
       local answer
@@ -964,19 +1097,20 @@ ensure_admin() {
       rm -rf "$work"
       die "create-user answered ${code:-nothing}: ${answer:-no body}. The gateway answers a duplicate username the same way as an outage. If $ADMIN_EXTERNAL_ID was created by an earlier run whose $ADMIN_RECORD is gone, it cannot be recovered with the bootstrap token: have an enrolled admin issue its enrolment, or set YADGAR_ADMIN_EXTERNAL_ID to a new username"
     fi
-    user_id="$(jq -r '.user_id // empty' "$work/out")"
+    answered="$(jq -r '.user_id // empty' "$work/out" | printable)"
     rm -rf "$work"
-    [[ -n "$user_id" ]] || die "create-user answered 200 with no user_id"
+    # THE STAGE 3b ECHO, CHECKED AGAIN BY THE CALLER: an iam that predates
+    # pre-minted ids drops the field and mints a random one.
+    [[ "$answered" == "yadgar:user:$uuid" ]] ||
+      die "create-user answered 200 for user ${answered:-<none>}, not the declared yadgar:user:$uuid; nothing was recorded"
+    user_id="$answered"
     jq -n --arg e "$ADMIN_EXTERNAL_ID" --arg u "$user_id" --arg i "$uid" \
-      '{external_id: $e, user_id: $u, install_uid: $i}' >"$ADMIN_RECORD.tmp"
+      '{external_id: $e, user_id: $u, install_uid: $i, enrolment_issued_at: null}' >"$ADMIN_RECORD.tmp"
     mv "$ADMIN_RECORD.tmp" "$ADMIN_RECORD"
     log "[9/10] created $ADMIN_EXTERNAL_ID as $user_id"
   fi
   issue_enrolment "$user_id" "$token"
   token=""
-  if [[ "$ENROLMENT_OUTCOME" == enrolled ]]; then
-    log "[9/10] $ADMIN_EXTERNAL_ID already enrolled: they hold a credential, so the bootstrap token may not enrol them again. Log in with that credential"
-  fi
 }
 
 # ─── 10. the client ──────────────────────────────────────────────────────────
@@ -1623,9 +1757,12 @@ add_user() {
   work="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
   log "[add-user] creating $ADD_USER_ID (an ordinary user, never an admin)"
   # `jq --arg` builds the JSON: no input is ever interpolated into it.
-  # `is_admin: false` is stated rather than left to the gateway's default.
+  # NO `is_admin` KEY: the gateway's default is an ordinary account, and the
+  # team-access gateway refuses any create-user body that carries one, `false`
+  # included (plans/team-access.md stage 9b, item 5). Admin is membership of the
+  # declared `administrators` team.
   jq -n --arg e "$ADD_USER_ID" --arg d "${ADD_USER_DISPLAY_NAME:-$ADD_USER_ID}" \
-    '{external_id: $e, display_name: $d, is_admin: false}' >"$work/body"
+    '{external_id: $e, display_name: $d}' >"$work/body"
   code="$(user_admin_post create-user "$work/body" "$work/out" "$bearer")"
   [[ "$code" == 200 ]] || add_user_refused create-user "$code" "$work/out"
   # THE USER THIS CALL CREATED, and only that one, is enrolled below.
@@ -1736,6 +1873,8 @@ main() {
   while (($#)); do
     case "$1" in
       --with-client) WITH_CLIENT=1 ;;
+      --reissue-admin-enrolment) REISSUE_ADMIN_ENROLMENT=1 ;;
+      --revoke-existing) REVOKE_EXISTING=1 ;;
       --add-user | --display-name | --out)
         if (($# < 2)) || [[ "$2" == --* ]]; then
           printf '%s needs a value\n' "$1" >&2
@@ -1768,6 +1907,14 @@ main() {
     printf -- '--add-user runs on an installed host, on its own; run --with-client first\n' >&2
     return 2
   fi
+  if ((ADD_USER && REISSUE_ADMIN_ENROLMENT)); then
+    printf -- '--reissue-admin-enrolment acts on the first admin, never with --add-user\n' >&2
+    return 2
+  fi
+  if ((REVOKE_EXISTING && !REISSUE_ADMIN_ENROLMENT)); then
+    printf -- '--revoke-existing belongs to --reissue-admin-enrolment\n' >&2
+    return 2
+  fi
   require_root "${args[@]}"
   pin_root_environment
   ensure_state_dir
@@ -1789,8 +1936,9 @@ main() {
   ensure_tool helm
   ensure_cluster
   ensure_argocd
+  render_estate_application
   ensure_application 6 "$OPERATORS_APP_FILE" operators "$OPERATORS_TIMEOUT"
-  ensure_application 7 "$ESTATE_APP_FILE" yadgar "$ESTATE_TIMEOUT"
+  ensure_application 7 "$RENDERED_APP_FILE" yadgar "$ESTATE_TIMEOUT"
   ensure_hosts_entry "$GATEWAY_HOST"
   ensure_edge_ca
   probe_edge
