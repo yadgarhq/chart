@@ -1183,6 +1183,58 @@ that owns it, which refuses it by name; this clause compares numbers only.
 {{- end -}}
 
 {{/*
+yaadgaar #218: THE EDGE'S REQUEST-HEADERS BOUND IS NOT LOOSER THAN THE GATEWAY'S
+HEADER-READ TIMEOUT.
+
+THE GAP. The gateway closes a connection that sends no complete request head
+within `gateway.server.limits.headerReadTimeoutSeconds` (ADR-1006). Envoy
+forwards no request until its head is complete, so through the edge the gateway
+never sees a client that stalls mid-head; Envoy holds it alone. `platform` bounds
+that wait from `platform.gatewayListener.requestHeadersTimeoutSeconds`, on a
+ClientTrafficPolicy on the edge Gateway. Measured on kind at parent 0.46.13,
+with no such policy: a half-sent head through the edge stayed open past 45 s.
+
+EQUAL IS ALLOWED. The two bounds sit on different connections, so there is no
+reuse race as in ADR-1016's idle check above. Above is refused: the edge would
+then hold a stalled client longer than the gateway allows.
+
+THE SAME THREE CASES AND THE SAME SKIPS as the idle check above, read off
+`.Subcharts`:
+  - The gateway sets no bound: nothing to compare against, so nothing is checked.
+  - The gateway sets a bound and `platform` sets no edge value (a platform older
+    than yaadgaar #218): the edge has no headers timeout at all. Refused.
+  - Both are set and the edge's is above the gateway's: refused.
+*/}}
+{{- if and (hasKey .Subcharts "platform") (hasKey .Subcharts "gateway") -}}
+{{- $edgeListener := default dict (default dict (default dict .Subcharts.platform).Values).gatewayListener -}}
+{{- $edgeLimits := default dict (default dict (default dict (default dict .Subcharts.gateway).Values).server).limits -}}
+{{- if and (kindIs "bool" $edgeListener.create) $edgeListener.create (hasKey $edgeLimits "headerReadTimeoutSeconds") -}}
+{{- $bound := $edgeLimits.headerReadTimeoutSeconds -}}
+{{- if or (kindIs "float64" $bound) (kindIs "int64" $bound) (kindIs "int" $bound) -}}
+{{- if not (hasKey $edgeListener "requestHeadersTimeoutSeconds") -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "gateway.server.limits.headerReadTimeoutSeconds is %v, and the pinned platform chart sets no "
+      "platform.gatewayListener.requestHeadersTimeoutSeconds. Envoy forwards no request until its "
+      "head is complete, so the edge then holds a client that stalls mid-head with no bound at all "
+      "(yaadgaar #218). Pin a platform chart that sets the edge's request-headers timeout."))
+      $bound) -}}
+{{- else -}}
+{{- $headers := $edgeListener.requestHeadersTimeoutSeconds -}}
+{{- if and (or (kindIs "float64" $headers) (kindIs "int64" $headers) (kindIs "int" $headers)) (gt (float64 $headers) (float64 $bound)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.gatewayListener.requestHeadersTimeoutSeconds is %v and "
+      "gateway.server.limits.headerReadTimeoutSeconds is %v. The edge's request-headers timeout "
+      "must not be above the gateway's header-read timeout: Envoy forwards no incomplete request "
+      "head, so the edge's bound is the one a stalled client meets (yaadgaar #218). Lower "
+      "platform.gatewayListener.requestHeadersTimeoutSeconds, or raise the gateway's bound."))
+      $headers $bound) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
 AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Of the refusals ABOVE
 `{{- if $creating -}}` (the admin-token and `iam-keys` pair), both are guarded
