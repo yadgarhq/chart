@@ -890,6 +890,14 @@ ZERO_CREDENTIAL_REFUSAL = (
     '{"error":"the bootstrap token may only enrol an administrator who has never held a credential"}'
 )
 
+# THE SAME REFUSAL AS GATEWAY team-access stage 3b WORDS IT (plans/team-access.md,
+# stage 3a): one constant body for every failed step of the enrolment predicate.
+# A chart release can pin the stage 3b gateway beside this script (ADR-0946), so
+# the script reads both bodies as the same refusal.
+PREDICATE_REFUSAL = (
+    '{"error":"the bootstrap token may only enrol an administrator the enrolment predicate admits"}'
+)
+
 
 def admin_rules(
     bootstrap: str,
@@ -898,12 +906,13 @@ def admin_rules(
     issue_code: str = "200",
     install_uid: str = "11111111-aaaa-4bbb-8ccc-000000000001",
     user: str = "yadgar:user:01a0f403-78c5-7464-bdf4-c534841e5178",
+    refusal: str = ZERO_CREDENTIAL_REFUSAL,
 ) -> list[dict]:
     create_body = json.dumps({"user_id": user}) if create_code == "200" else '{"error":"the administrative service is unavailable"}'
     issue_body = (
         json.dumps({"token": enrolment, "enrolment_id": "e1"})
         if issue_code == "200"
-        else ZERO_CREDENTIAL_REFUSAL
+        else refusal
     )
     return [
         # THE INSTALL IDENTITY: the uid of the Secret the PreSync Job mints once
@@ -989,12 +998,19 @@ def test_an_expired_enrolment_file_is_reissued(rig: Rig) -> None:
     assert urls == [f"{GATEWAY}/admin/issue-enrolment"]
 
 
-def test_an_admin_who_already_holds_a_credential_is_done_not_failed(rig: Rig) -> None:
+# TEAM ACCESS STAGE 3a, red 1 and red 2 (plans/team-access.md): the old body and
+# the stage 3b body both mean "refused by the predicate", read as `enrolled`.
+@pytest.mark.parametrize(
+    "refusal",
+    [ZERO_CREDENTIAL_REFUSAL, PREDICATE_REFUSAL],
+    ids=["red_01_old_body", "red_02_stage_3b_body"],
+)
+def test_an_admin_who_already_holds_a_credential_is_done_not_failed(rig: Rig, refusal: str) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
     assert rig.run("load_examples; ensure_admin").returncode == 0
     rig.enrolment_file.unlink()
-    rig.rules = admin_rules(bootstrap, enrolment, issue_code="403") + rig.rules
+    rig.rules = admin_rules(bootstrap, enrolment, issue_code="403", refusal=refusal) + rig.rules
     proc = rig.run("load_examples; ensure_admin")
     assert proc.returncode == 0, proc.stderr
     assert "already enrolled" in proc.stdout
@@ -1002,7 +1018,9 @@ def test_an_admin_who_already_holds_a_credential_is_done_not_failed(rig: Rig) ->
 
 
 def test_any_other_403_from_issue_enrolment_is_a_failure(rig: Rig) -> None:
-    """The gateway answers 403 for more than one reason; only one of them means done."""
+    """The gateway answers 403 for more than one reason; only the predicate's means done.
+
+    Team access stage 3a, red 3 (plans/team-access.md)."""
     bootstrap, enrolment = new_secrets()
     rig.rules = [
         {"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": "403",
@@ -1014,11 +1032,42 @@ def test_any_other_403_from_issue_enrolment_is_a_failure(rig: Rig) -> None:
     assert "already enrolled" not in proc.stdout
 
 
+# THE VERB-RULE 403, as team-access stages 3b and 10 reword it (plans/team-access.md
+# stage 3b). Both end in "...the enrolment predicate admits", so they pin that the
+# script matches the enrolment-refusal sentence and not its shared tail.
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":"the bootstrap token may only create an administrator, promote one, '
+        'or issue an enrolment the enrolment predicate admits"}',
+        '{"error":"the bootstrap token may only create the declared first administrator '
+        'or issue an enrolment the enrolment predicate admits"}',
+    ],
+    ids=["stage_3b_verb_rule", "stage_10_verb_rule"],
+)
+def test_a_verb_rule_403_is_a_failure_not_enrolled(rig: Rig, body: str) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
+    assert rig.run("load_examples; ensure_admin").returncode == 0
+    rig.enrolment_file.unlink()
+    rig.rules = admin_rules(bootstrap, enrolment, issue_code="403", refusal=body) + rig.rules
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode != 0
+    assert "issue an enrolment the enrolment predicate admits" in proc.stderr
+    assert "already enrolled" not in proc.stdout
+
+
 def test_the_zero_credential_match_is_the_gateway_body_the_script_names() -> None:
     text = SCRIPT.read_text()
     assert "gateway v0.9.54" in text
     phrase = "may only enrol an administrator who has never held a credential"
     assert phrase in ZERO_CREDENTIAL_REFUSAL and phrase in text
+
+
+def test_the_predicate_match_is_the_stage_3b_body_the_script_names() -> None:
+    text = SCRIPT.read_text()
+    phrase = "may only enrol an administrator the enrolment predicate admits"
+    assert phrase in PREDICATE_REFUSAL and phrase in text
 
 
 def fresh_install(rig: Rig, bootstrap: str, enrolment: str, uid: str, user: str) -> None:

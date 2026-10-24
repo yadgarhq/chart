@@ -303,6 +303,14 @@ ADMIN_PROJECT_HEADER="yadgar/admin"
 # is the only discriminator. Re-read it when the pinned gateway moves.
 ZERO_CREDENTIAL_REFUSAL="may only enrol an administrator who has never held a credential"
 
+# THE SAME REFUSAL AS THE TEAM-ACCESS GATEWAY WORDS IT (plans/team-access.md,
+# stages 3a and 3b): one constant body for every failed step of the enrolment
+# predicate. A chart release can pin that gateway beside this script without a
+# human (ADR-0946), so both bodies are read as "refused by the predicate". With
+# admin derived from the column, the only refusal a recorded first admin can
+# meet is the credential conjunct, so either body still means `enrolled`.
+PREDICATE_REFUSAL="may only enrol an administrator the enrolment predicate admits"
+
 # An enrolment token lives 24 hours (ADR-0492). A file older than this is
 # re-issued rather than handed back expired.
 ENROLMENT_MAX_AGE_MINUTES=1380
@@ -854,7 +862,7 @@ retire_spent_token() {
 
 # Issues an enrolment for the recorded admin and writes the token to a 0600
 # file. Sets ENROLMENT_OUTCOME to `issued`, or to `enrolled` when the gateway
-# answers with the zero-credential refusal. Called plainly, never under `||` or
+# answers with the zero-credential refusal, in either wording. Called plainly, never under `||` or
 # `if`, so errexit holds inside it.
 ENROLMENT_OUTCOME=""
 issue_enrolment() {
@@ -875,7 +883,7 @@ issue_enrolment() {
       return 0
       ;;
     403)
-      if grep -qF "$ZERO_CREDENTIAL_REFUSAL" "$work/out"; then
+      if grep -qF -e "$ZERO_CREDENTIAL_REFUSAL" -e "$PREDICATE_REFUSAL" "$work/out"; then
         rm -rf "$work"
         ENROLMENT_OUTCOME=enrolled
         return 0
