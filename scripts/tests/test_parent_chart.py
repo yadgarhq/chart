@@ -7525,3 +7525,19 @@ def test_a_caller_with_its_leaf_unmounted_reddens_the_admit_gate(
     spec = pod_spec(documents, kind, name)
     spec["volumes"] = [v for v in spec["volumes"] if (v.get("secret") or {}).get("secretName") != secret]
     assert admit_failures(documents) == [f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf"]
+
+
+def test_the_release_job_passes_the_release_app_for_the_argocd_nudge() -> None:
+    """C7 of plans/auto-deploy-parent-chart.md (ADR-1004 item 5): `release`
+    hands `ci-release.yaml` the release App, so its `argocd-pin-nudge` job can
+    send `chart-published` to `yadgarhq/argocd`. EXACTLY the two names, each
+    to its same-named secret: `secrets: inherit` would pass every organisation
+    secret and grow silently (zizmor `secrets-inherit`).
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    secrets = jobs["release"].get("secrets")
+    assert secrets != "inherit", "`release` must name its secrets, not inherit them."
+    assert secrets == {
+        "RELEASE_APP_CLIENT_ID": "${{ secrets.RELEASE_APP_CLIENT_ID }}",
+        "RELEASE_APP_PRIVATE_KEY": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
+    }, f"`release` passes {secrets!r}; the argocd nudge needs exactly the release App."
