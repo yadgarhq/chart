@@ -66,19 +66,19 @@ dependencies:
     version: 0.2.2
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
-    version: 0.12.31
+    version: 0.12.32
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
-    version: 0.16.0
+    version: 0.17.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
     version: 0.14.0
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.5.0
+    version: 0.5.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.0
+    version: 0.10.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.8.0
