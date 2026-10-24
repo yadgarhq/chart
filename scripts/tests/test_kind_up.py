@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "bootstrap" / "kind-up.sh"
@@ -84,6 +85,9 @@ HOST_TOOLS = (
     "bash", "python3", "jq", "awk", "sed", "grep", "base64", "sha256sum", "tar", "install",
     "mktemp", "find", "date", "tee", "head", "tail", "cat", "mv", "rm", "mkdir", "chmod",
     "touch", "dirname", "env", "sleep", "tr", "uname", "cp", "ls", "wc", "stat", "cut", "cmp",
+    # The first administrator's uuid is minted from `date` and `od` on
+    # /dev/urandom (plans/team-access.md stage 9b, item 1).
+    "od",
 )
 
 
@@ -289,6 +293,9 @@ def test_the_edge_it_probes_is_the_one_the_examples_declare(rig: Rig) -> None:
 
 
 def test_it_applies_the_example_files_rather_than_copies_of_them() -> None:
+    """The estate Application is applied as a per-install RENDER of its example
+    (team access stage 9b, item 3), never as an inline copy: the pins stay in the
+    example, and `test_red_04_...` proves the render keeps them."""
     text = SCRIPT.read_text()
     assert "example/operators-application.yaml" in text
     assert "example/kind/application.yaml" in text
@@ -883,20 +890,22 @@ def new_secrets() -> tuple[str, str]:
     return bootstrap, enrolment
 
 
-# VERBATIM FROM GATEWAY v0.9.54, `src/http/authority.rs` `admin_failure`: the one
-# 403 body that means "this admin already holds a credential". The body is the
-# only discriminator; the gateway sends no error code beside it.
+# THE TWO ENROLMENT-REFUSAL BODIES stage 3a taught the script to read as
+# `enrolled`: gateway v0.9.54's, and the team-access gateway's (stage 3b). From
+# stage 9b neither means done: with admin derived from `administrators`, the
+# bootstrap token may enrol any declared administrator (ADR-0966), so a 403 is a
+# refusal and the script dies naming it.
 ZERO_CREDENTIAL_REFUSAL = (
     '{"error":"the bootstrap token may only enrol an administrator who has never held a credential"}'
 )
-
-# THE SAME REFUSAL AS GATEWAY team-access stage 3b WORDS IT (plans/team-access.md,
-# stage 3a): one constant body for every failed step of the enrolment predicate.
-# A chart release can pin the stage 3b gateway beside this script (ADR-0946), so
-# the script reads both bodies as the same refusal.
 PREDICATE_REFUSAL = (
     '{"error":"the bootstrap token may only enrol an administrator the enrolment predicate admits"}'
 )
+
+# A lowercase canonical uuidv7: what an older kind-up.sh's admin record holds.
+OLD_ADMIN_ID = "yadgar:user:01a0f403-78c5-7464-bdf4-c534841e5178"
+UUIDV7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+EXAMPLE_KIND_APPLICATION = REPO / "example" / "kind" / "application.yaml"
 
 
 def admin_rules(
@@ -905,24 +914,44 @@ def admin_rules(
     create_code: str = "200",
     issue_code: str = "200",
     install_uid: str = "11111111-aaaa-4bbb-8ccc-000000000001",
-    user: str = "yadgar:user:01a0f403-78c5-7464-bdf4-c534841e5178",
+    user: str | None = None,
     refusal: str = ZERO_CREDENTIAL_REFUSAL,
+    revoke_echo: bool | None = None,
 ) -> list[dict]:
-    create_body = json.dumps({"user_id": user}) if create_code == "200" else '{"error":"the administrative service is unavailable"}'
-    issue_body = (
-        json.dumps({"token": enrolment, "enrolment_id": "e1"})
-        if issue_code == "200"
-        else refusal
-    )
+    """The fake estate. create-user ECHOES the body's `user_id` as the stage 3b
+    gateway does, unless `user` names a fixed answer."""
+    issued: dict = {"token": enrolment, "enrolment_id": "e1"}
+    if revoke_echo is not None:
+        issued["revoke_existing_credentials"] = revoke_echo
+    issue_body = json.dumps(issued) if issue_code == "200" else refusal
+    if create_code != "200":
+        create = {"o_content": '{"error":"the administrative service is unavailable"}'}
+    elif user is not None:
+        create = {"o_content": json.dumps({"user_id": user})}
+    else:
+        create = {"o_echo_user_id": True}
     return [
         # THE INSTALL IDENTITY: the uid of the Secret the PreSync Job mints once
         # per installation. Before the token rule, which would also match.
         {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token", "metadata.uid"], "stdout": install_uid},
         {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token"],
          "stdout": base64.b64encode(bootstrap.encode()).decode()},
-        {"cmd": "curl", "match": ["/admin/create-user"], "stdout": create_code, "o_content": create_body},
+        {"cmd": "curl", "match": ["/admin/create-user"], "stdout": create_code, **create},
         {"cmd": "curl", "match": ["/admin/issue-enrolment"], "stdout": issue_code, "o_content": issue_body},
     ]
+
+
+def minted(rig: "Rig") -> str:
+    """The first administrator's uuid this host minted."""
+    return (rig.state / "first-admin-uuid").read_text().strip()
+
+
+def admin_record(rig: "Rig") -> dict:
+    return json.loads((rig.state / "admin.json").read_text())
+
+
+def bootstrap_curls(rig: "Rig", verb: str) -> list[dict]:
+    return [c for c in rig.calls("curl") if any(f"/admin/{verb}" in a for a in c["argv"])]
 
 
 def test_the_first_admin_is_created_and_no_secret_is_printed(rig: Rig) -> None:
@@ -934,7 +963,9 @@ def test_the_first_admin_is_created_and_no_secret_is_printed(rig: Rig) -> None:
     assert rig.enrolment_file.read_text().strip() == enrolment
     assert stat.S_IMODE(rig.enrolment_file.stat().st_mode) == 0o600
     admin = json.loads((rig.state / "admin.json").read_text())
-    assert admin["user_id"].startswith("yadgar:user:")
+    assert admin["user_id"] == f"yadgar:user:{minted(rig)}"
+    assert stat.S_IMODE((rig.state / "first-admin-uuid").stat().st_mode) == 0o600
+    assert UUIDV7.match(minted(rig)), minted(rig)
 
     assert_absent(rig, proc, bootstrap, base64.b64encode(bootstrap.encode()).decode(), enrolment)
     # POSITIVE CONTROL: the token did reach the gateway, on curl's stdin.
@@ -944,7 +975,7 @@ def test_the_first_admin_is_created_and_no_secret_is_printed(rig: Rig) -> None:
         assert f"x-yadgar-bootstrap-token: {bootstrap}" in (c["stdin"] or "")
 
 
-def test_the_create_user_body_carries_the_configured_admin(rig: Rig) -> None:
+def test_red_01_the_create_user_body_carries_the_configured_admin_and_the_stored_uuid(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
     proc = rig.run(
@@ -957,7 +988,8 @@ def test_the_create_user_body_carries_the_configured_admin(rig: Rig) -> None:
     assert admin["external_id"] == "ops@example.test"
     create = next(c for c in rig.calls("curl") if any("/admin/create-user" in a for a in c["argv"]))
     body = json.loads(create["data"])
-    assert body == {"external_id": "ops@example.test", "display_name": "Ops Admin", "is_admin": True}
+    # TEAM ACCESS STAGE 9b, red 1: F2's body, the stored uuid, and no `is_admin`.
+    assert body == {"external_id": "ops@example.test", "display_name": "Ops Admin", "user_id": minted(rig)}
 
 
 def test_a_fresh_enrolment_file_skips_the_whole_ceremony(rig: Rig) -> None:
@@ -978,7 +1010,7 @@ def test_a_recorded_admin_without_an_enrolment_is_re_enrolled_not_re_created(rig
     assert rig.run("load_examples; ensure_admin").returncode == 0
     rig.enrolment_file.unlink()
     rig.reset_calls()
-    proc = rig.run("load_examples; ensure_admin")
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1; ensure_admin")
     assert proc.returncode == 0, proc.stderr
     urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
     assert urls == [f"{GATEWAY}/admin/issue-enrolment"]
@@ -992,29 +1024,35 @@ def test_an_expired_enrolment_file_is_reissued(rig: Rig) -> None:
     old = rig.enrolment_file.stat().st_mtime - 25 * 3600
     os.utime(rig.enrolment_file, (old, old))
     rig.reset_calls()
-    proc = rig.run("load_examples; ensure_admin")
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1; ensure_admin")
     assert proc.returncode == 0, proc.stderr
     urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
     assert urls == [f"{GATEWAY}/admin/issue-enrolment"]
 
 
-# TEAM ACCESS STAGE 3a, red 1 and red 2 (plans/team-access.md): the old body and
-# the stage 3b body both mean "refused by the predicate", read as `enrolled`.
+# TEAM ACCESS STAGE 9b, red 12 (plans/team-access.md): the stage 3a `enrolled`
+# arm is gone. Either enrolment-refusal body is a refusal; the script dies naming it.
 @pytest.mark.parametrize(
     "refusal",
     [ZERO_CREDENTIAL_REFUSAL, PREDICATE_REFUSAL],
-    ids=["red_01_old_body", "red_02_stage_3b_body"],
+    ids=["old_body", "stage_3b_body"],
 )
-def test_an_admin_who_already_holds_a_credential_is_done_not_failed(rig: Rig, refusal: str) -> None:
+def test_red_12_either_enrolment_refusal_body_is_a_failure_not_enrolled(rig: Rig, refusal: str) -> None:
     bootstrap, enrolment = new_secrets()
-    rig.rules = admin_rules(bootstrap, enrolment) + rig.rules
-    assert rig.run("load_examples; ensure_admin").returncode == 0
-    rig.enrolment_file.unlink()
     rig.rules = admin_rules(bootstrap, enrolment, issue_code="403", refusal=refusal) + rig.rules
     proc = rig.run("load_examples; ensure_admin")
-    assert proc.returncode == 0, proc.stderr
-    assert "already enrolled" in proc.stdout
+    assert proc.returncode != 0
+    assert json.loads(refusal)["error"] in proc.stderr
+    assert "already enrolled" not in proc.stdout
     assert not rig.enrolment_file.exists()
+    assert_absent(rig, proc, bootstrap, enrolment)
+
+
+def test_red_12_the_script_names_no_enrolment_refusal_constant() -> None:
+    text = SCRIPT.read_text()
+    assert "ZERO_CREDENTIAL_REFUSAL" not in text
+    assert "PREDICATE_REFUSAL" not in text
+    assert "ENROLMENT_OUTCOME" not in text
 
 
 def test_any_other_403_from_issue_enrolment_is_a_failure(rig: Rig) -> None:
@@ -1051,27 +1089,14 @@ def test_a_verb_rule_403_is_a_failure_not_enrolled(rig: Rig, body: str) -> None:
     assert rig.run("load_examples; ensure_admin").returncode == 0
     rig.enrolment_file.unlink()
     rig.rules = admin_rules(bootstrap, enrolment, issue_code="403", refusal=body) + rig.rules
-    proc = rig.run("load_examples; ensure_admin")
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1; ensure_admin")
     assert proc.returncode != 0
     assert "issue an enrolment the enrolment predicate admits" in proc.stderr
     assert "already enrolled" not in proc.stdout
 
 
-def test_the_zero_credential_match_is_the_gateway_body_the_script_names() -> None:
-    text = SCRIPT.read_text()
-    assert "gateway v0.9.54" in text
-    phrase = "may only enrol an administrator who has never held a credential"
-    assert phrase in ZERO_CREDENTIAL_REFUSAL and phrase in text
-
-
-def test_the_predicate_match_is_the_stage_3b_body_the_script_names() -> None:
-    text = SCRIPT.read_text()
-    phrase = "may only enrol an administrator the enrolment predicate admits"
-    assert phrase in PREDICATE_REFUSAL and phrase in text
-
-
-def fresh_install(rig: Rig, bootstrap: str, enrolment: str, uid: str, user: str) -> None:
-    rig.rules = admin_rules(bootstrap, enrolment, install_uid=uid, user=user) + [
+def fresh_install(rig: Rig, bootstrap: str, enrolment: str, uid: str) -> None:
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=uid) + [
         r for r in rig.rules if r["cmd"] not in ("curl",) and "admin-bootstrap-token" not in " ".join(r.get("match", []))
     ]
 
@@ -1079,19 +1104,21 @@ def fresh_install(rig: Rig, bootstrap: str, enrolment: str, uid: str, user: str)
 def test_a_recreated_cluster_gets_a_new_admin_within_the_token_lifetime(rig: Rig) -> None:
     """`kind delete cluster` and a rerun: the old token names a user that no longer exists."""
     bootstrap, enrolment = new_secrets()
-    fresh_install(rig, bootstrap, enrolment, "uid-first", "yadgar:user:first")
+    fresh_install(rig, bootstrap, enrolment, "uid-first")
     assert rig.run("load_examples; ensure_admin").returncode == 0
     (rig.state / "client-enrolled").touch()
 
     bootstrap2, enrolment2 = new_secrets()
-    fresh_install(rig, bootstrap2, enrolment2, "uid-second", "yadgar:user:second")
+    fresh_install(rig, bootstrap2, enrolment2, "uid-second")
     rig.reset_calls()
     proc = rig.run("load_examples; ensure_admin")
     assert proc.returncode == 0, proc.stderr
     urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
     assert urls == [f"{GATEWAY}/admin/create-user", f"{GATEWAY}/admin/issue-enrolment"]
     admin = json.loads((rig.state / "admin.json").read_text())
-    assert admin == {"external_id": "admin", "user_id": "yadgar:user:second", "install_uid": "uid-second"}
+    assert admin["external_id"] == "admin" and admin["install_uid"] == "uid-second"
+    assert admin["user_id"] == f"yadgar:user:{minted(rig)}"
+    assert admin["enrolment_issued_at"]
     assert rig.enrolment_file.read_text().strip() == enrolment2
     # The old install's record, token and client marker are kept aside, not deleted.
     aside = sorted(p.name for p in rig.state.glob("*.stale-*"))
@@ -1105,19 +1132,20 @@ def test_a_recreated_cluster_gets_a_new_admin_within_the_token_lifetime(rig: Rig
 
 def test_a_recreated_cluster_after_the_token_expired_never_enrols_the_dead_user(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
-    fresh_install(rig, bootstrap, enrolment, "uid-first", "yadgar:user:first")
+    fresh_install(rig, bootstrap, enrolment, "uid-first")
     assert rig.run("load_examples; ensure_admin").returncode == 0
     old = rig.enrolment_file.stat().st_mtime - 25 * 3600
     os.utime(rig.enrolment_file, (old, old))
 
     bootstrap2, enrolment2 = new_secrets()
-    fresh_install(rig, bootstrap2, enrolment2, "uid-second", "yadgar:user:second")
+    fresh_install(rig, bootstrap2, enrolment2, "uid-second")
     rig.reset_calls()
     proc = rig.run("load_examples; ensure_admin")
     assert proc.returncode == 0, proc.stderr
-    issued_for = [json.loads(c["data"])["user_id"] for c in rig.calls("curl")
-                  if any("/admin/issue-enrolment" in a for a in c["argv"])]
-    assert issued_for == ["yadgar:user:second"], "enrolled a user from the deleted install"
+    # F2 SENDS THE SAME UUID TO THE NEW STORE, so "the dead user" is now told
+    # apart by order: the new installation creates the user before it enrols one.
+    urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
+    assert urls == [f"{GATEWAY}/admin/create-user", f"{GATEWAY}/admin/issue-enrolment"], "enrolled without creating"
 
 
 def test_an_enrolment_file_with_no_record_is_not_trusted(rig: Rig) -> None:
@@ -1156,7 +1184,271 @@ def test_create_user_refused_fails_with_the_way_out_and_is_not_retried(rig: Rig)
     assert_absent(rig, proc, bootstrap)
 
 
+# ─── team access stage 9b: the first administrator by flow F2 ───────────────────
+
+
+def rendered(rig: Rig) -> dict:
+    return json.loads((rig.state / "application.yaml").read_text())
+
+
+def test_red_03_every_run_and_every_installation_sends_the_same_user_id(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    fresh_install(rig, bootstrap, enrolment, "uid-first")
+    rig.rules = [render_rule()] + rig.rules
+    assert rig.run("load_examples; render_estate_application; ensure_admin").returncode == 0
+    first = minted(rig)
+    sent = [json.loads(c["data"])["user_id"] for c in bootstrap_curls(rig, "create-user")]
+    assert sent == [first]
+    rig.reset_calls()
+    proc = rig.run("load_examples; render_estate_application; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert minted(rig) == first
+    assert rendered(rig)["spec"]["source"]["helm"]["valuesObject"]["seeder"]["registry"]["teams"][0]["members"] == [first]
+    assert bootstrap_curls(rig, "create-user") == [], "re-created a recorded admin"
+
+    # `kind delete cluster` and a rerun: a new installation, the same uuid.
+    bootstrap2, enrolment2 = new_secrets()
+    fresh_install(rig, bootstrap2, enrolment2, "uid-second")
+    rig.rules = [render_rule()] + rig.rules
+    rig.reset_calls()
+    proc = rig.run("load_examples; render_estate_application; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    sent = [json.loads(c["data"])["user_id"] for c in bootstrap_curls(rig, "create-user")]
+    assert sent == [first]
+    record = admin_record(rig)
+    assert record["install_uid"] == "uid-second" and record["user_id"] == f"yadgar:user:{first}"
+
+
+def test_red_04_the_rendered_application_declares_the_uuid_and_the_example_is_unchanged(rig: Rig) -> None:
+    before = EXAMPLE_KIND_APPLICATION.read_bytes()
+    rig.rules = [render_rule()] + rig.rules
+    proc = rig.run("load_examples; render_estate_application")
+    assert proc.returncode == 0, proc.stderr
+    uuid = minted(rig)
+    document = rendered(rig)
+    values = document["spec"]["source"]["helm"]["valuesObject"]
+    teams = values["seeder"]["registry"]["teams"]
+    administrators = [t for t in teams if t["name"] == "administrators"]
+    assert administrators == [{"name": "administrators", "members": [uuid]}]
+    roots = values["seeder"]["registry"]["roots"]
+    assert roots, "the example declares no root"
+    for root in roots:
+        assert {"team": "administrators", "level": "readWrite"} in root["grants"], root
+    # `iam.adminFromTeam` renders IAM_ADMIN_FROM_TEAM=true (team access stage 3, iam#118).
+    assert values["iam"]["adminFromTeam"] is True
+    # The two keys the stage 6 seeder chart requires once teams are declared (seeder#8).
+    assert values["seeder"]["registry"]["allowMassRevoke"] is False
+    assert values["seeder"]["iam"]["tls"]["caSecret"] == "iam-tls"
+    # Everything else is the example's, pins included.
+    example = yaml.safe_load(before)
+    assert document["spec"]["source"]["targetRevision"] == example["spec"]["source"]["targetRevision"]
+    assert values["seeder"]["registry"]["projects"] == example["spec"]["source"]["helm"]["valuesObject"]["seeder"]["registry"]["projects"]
+    assert EXAMPLE_KIND_APPLICATION.read_bytes() == before
+    # An unchanged rerun leaves the rendered file alone.
+    stamp = (rig.state / "application.yaml").stat()
+    proc = rig.run("load_examples; render_estate_application")
+    assert proc.returncode == 0, proc.stderr
+    after = (rig.state / "application.yaml").stat()
+    assert (after.st_ino, after.st_mtime_ns) == (stamp.st_ino, stamp.st_mtime_ns)
+
+
+def test_red_05_an_existing_install_declares_its_recorded_admin_and_mints_nothing(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    install = "11111111-aaaa-4bbb-8ccc-000000000001"
+    rig.rules = [render_rule()] + admin_rules(bootstrap, enrolment, install_uid=install) + rig.rules
+    # A RECORD AN OLDER kind-up.sh WROTE: no `enrolment_issued_at` key.
+    (rig.state / "admin.json").write_text(json.dumps(
+        {"external_id": "admin", "user_id": OLD_ADMIN_ID, "install_uid": install}))
+    proc = rig.run("load_examples; render_estate_application; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    values = rendered(rig)["spec"]["source"]["helm"]["valuesObject"]
+    assert values["seeder"]["registry"]["teams"][0]["members"] == [OLD_ADMIN_ID.removeprefix("yadgar:user:")]
+    assert not (rig.state / "first-admin-uuid").exists(), "minted a uuid for an install that has its admin"
+    assert bootstrap_curls(rig, "create-user") == []
+    # Its admin may be enrolled: no implicit re-enrolment either (item 7).
+    assert bootstrap_curls(rig, "issue-enrolment") == []
+    assert "--reissue-admin-enrolment" in proc.stdout
+
+
+def test_red_06_a_create_user_answer_naming_another_user_dies_and_records_nothing(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    other = "yadgar:user:01a0f403-78c5-7464-bdf4-000000000bad"
+    rig.rules = admin_rules(bootstrap, enrolment, user=other) + rig.rules
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode != 0
+    assert other in proc.stderr and f"yadgar:user:{minted(rig)}" in proc.stderr
+    assert not (rig.state / "admin.json").exists()
+    assert bootstrap_curls(rig, "issue-enrolment") == []
+    assert_absent(rig, proc, bootstrap, enrolment)
+
+
+def test_red_07_a_minted_value_that_fails_the_member_rule_dies_before_any_apply(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    # THE ENTROPY SOURCE FORCED: `od` answers uppercase hex, so the minted value
+    # is not lowercase canonical. fakebin comes before the host's `od` on PATH.
+    (rig.root / "fakebin" / "od").symlink_to(FAKE)
+    rig.rules = [{"cmd": "od", "stdout": " AB CD EF 01 23 45 67 89 AB CD\n"}] + full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main()
+    assert proc.returncode != 0
+    assert "not a lowercase canonical uuidv7" in proc.stderr
+    assert [c for c in rig.calls("kubectl") if "apply" in c["argv"]] == [], "applied before the uuid was checked"
+    assert not (rig.state / "first-admin-uuid").exists()
+    assert bootstrap_curls(rig, "create-user") == []
+
+
+@pytest.mark.parametrize("stored", [
+    "01A0F403-78C5-7464-BDF4-000000000001",
+    '01a0f403-78c5-7464-bdf4-000000000001", "is_admin": true, "x": "',
+    "$(touch /tmp/kind-up-injected)",
+], ids=["uppercase", "json_breakout", "command_substitution"])
+def test_red_07_a_tampered_stored_uuid_dies_before_any_apply(rig: Rig, stored: str) -> None:
+    """The stored first-admin uuid is re-checked on every read: a hand-edited
+    file never reaches the rendered Application, kubectl or create-user."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = full_rules(bootstrap, enrolment) + rig.rules
+    (rig.state / "first-admin-uuid").write_text(stored + "\n")
+    proc = rig.main()
+    assert proc.returncode != 0
+    assert "first-admin-uuid holds" in proc.stderr
+    assert "not a lowercase canonical uuidv7" in proc.stderr
+    assert [c for c in rig.calls("kubectl") if "apply" in c["argv"]] == [], "applied a tampered uuid"
+    assert not (rig.state / "application.yaml").exists()
+    assert bootstrap_curls(rig, "create-user") == []
+    assert not os.path.exists("/tmp/kind-up-injected")
+
+
+def test_red_05_a_recorded_admin_id_that_is_not_a_uuidv7_dies_before_any_apply(rig: Rig) -> None:
+    """An older record whose user id cannot be declared is refused, not
+    rendered into `administrators`."""
+    bootstrap, enrolment = new_secrets()
+    install = "11111111-aaaa-4bbb-8ccc-000000000001"
+    rig.rules = [render_rule()] + admin_rules(bootstrap, enrolment, install_uid=install) + rig.rules
+    (rig.state / "admin.json").write_text(json.dumps(
+        {"external_id": "admin", "user_id": "yadgar:user:not-a-uuid", "install_uid": install}))
+    proc = rig.run("load_examples; render_estate_application")
+    assert proc.returncode != 0
+    assert "cannot be declared in administrators" in proc.stderr
+    assert not (rig.state / "application.yaml").exists()
+    assert not (rig.state / "first-admin-uuid").exists()
+
+
+def test_red_07_the_real_mint_is_a_lowercase_canonical_uuidv7(rig: Rig) -> None:
+    proc = rig.run("for i in 1 2 3 4 5 6 7 8; do mint_uuidv7; done")
+    assert proc.returncode == 0, proc.stderr
+    values = proc.stdout.split()
+    assert len(values) == 8 and len(set(values)) == 8
+    for value in values:
+        assert UUIDV7.match(value), value
+
+
+def recorded_admin(rig: Rig, install: str, issued_at: object = "2026-10-24T00:00:00Z") -> None:
+    """A record this script wrote for `install`; `issued_at` None is an interrupted first run."""
+    (rig.state / "admin.json").write_text(json.dumps(
+        {"external_id": "admin", "user_id": OLD_ADMIN_ID, "install_uid": install, "enrolment_issued_at": issued_at}))
+
+
+INSTALL = "11111111-aaaa-4bbb-8ccc-000000000001"
+
+
+def test_red_09_a_rerun_without_the_flag_issues_no_enrolment_and_names_the_flag(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=INSTALL) + rig.rules
+    recorded_admin(rig, INSTALL)
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert bootstrap_curls(rig, "issue-enrolment") == []
+    assert "--reissue-admin-enrolment" in proc.stdout
+    assert "--reissue-admin-enrolment" in rig.log.read_text()
+    reads = [c for c in rig.calls("kubectl") if any(".data.token" in a for a in c["argv"])]
+    assert reads == [], "read the bootstrap token although nothing was sent"
+
+
+def test_red_10_the_flag_reissues_one_enrolment_without_the_revoke_key(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=INSTALL) + rig.rules
+    recorded_admin(rig, INSTALL)
+    (rig.state / "client-enrolled").touch()
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    issued = bootstrap_curls(rig, "issue-enrolment")
+    assert [json.loads(c["data"]) for c in issued] == [{"user_id": OLD_ADMIN_ID}]
+    assert f"x-yadgar-bootstrap-token: {bootstrap}" in (issued[0]["stdin"] or "")
+    assert bootstrap_curls(rig, "create-user") == []
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    assert_absent(rig, proc, bootstrap, enrolment)
+
+
+def test_red_10_revoke_existing_sends_the_key_and_checks_the_echo(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=INSTALL, revoke_echo=True) + rig.rules
+    recorded_admin(rig, INSTALL)
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1 REVOKE_EXISTING=1; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    issued = bootstrap_curls(rig, "issue-enrolment")
+    assert [json.loads(c["data"]) for c in issued] == [{"user_id": OLD_ADMIN_ID, "revoke_existing_credentials": True}]
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    assert_absent(rig, proc, bootstrap, enrolment)
+
+
+@pytest.mark.parametrize("echo", [False, None], ids=["echoed_false", "not_echoed"])
+def test_red_10_revoke_existing_not_echoed_as_applied_dies_and_writes_no_token(rig: Rig, echo: bool | None) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=INSTALL, revoke_echo=echo) + rig.rules
+    recorded_admin(rig, INSTALL)
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1 REVOKE_EXISTING=1; ensure_admin")
+    assert proc.returncode != 0
+    assert "revoke_existing_credentials" in proc.stderr
+    assert not rig.enrolment_file.exists()
+    assert_absent(rig, proc, bootstrap, enrolment)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--revoke-existing",), ("--add-user", "dave", "--reissue-admin-enrolment")],
+    ids=["revoke_alone", "with_add_user"],
+)
+def test_red_10_the_reissue_flags_are_refused_out_of_place(rig: Rig, args: tuple[str, ...]) -> None:
+    proc = rig.main(*args)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert rig.calls("curl") == []
+
+
+def test_red_11_an_interrupted_first_run_issues_the_enrolment_once_without_the_flag(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, install_uid=INSTALL) + rig.rules
+    recorded_admin(rig, INSTALL, issued_at=None)
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert [json.loads(c["data"]) for c in bootstrap_curls(rig, "issue-enrolment")] == [{"user_id": OLD_ADMIN_ID}]
+    assert admin_record(rig)["enrolment_issued_at"], "the record did not gain enrolment_issued_at"
+    assert_absent(rig, proc, bootstrap, enrolment)
+    rig.enrolment_file.unlink()
+    rig.reset_calls()
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert bootstrap_curls(rig, "issue-enrolment") == []
+
+
+def test_red_11_create_user_records_a_null_enrolment_issued_at_until_issue_succeeds(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, issue_code="503", refusal='{"error":"unavailable"}') + rig.rules
+    proc = rig.run("load_examples; ensure_admin")
+    assert proc.returncode != 0
+    record = admin_record(rig)
+    assert "enrolment_issued_at" in record and record["enrolment_issued_at"] is None
+
+
 # ─── the whole script, twice ────────────────────────────────────────────────────
+
+
+def example_application_json() -> str:
+    """What `kubectl create --dry-run=client -o json` prints for the kind example."""
+    return json.dumps(yaml.safe_load(EXAMPLE_KIND_APPLICATION.read_text()))
+
+
+def render_rule() -> dict:
+    return {"cmd": "kubectl", "match": ["create", "--dry-run=client", "kind/application.yaml"],
+            "stdout": example_application_json()}
 
 
 def full_rules(bootstrap: str, enrolment: str) -> list[dict]:
@@ -1169,7 +1461,8 @@ def full_rules(bootstrap: str, enrolment: str) -> list[dict]:
         # `kubectl diff` exits 1 when the live object differs (first run: absent)
         # and 0 when it matches (every later run).
         {"cmd": "kubectl", "match": [" diff -f ", "operators-application.yaml"], "exit": [1, 0]},
-        {"cmd": "kubectl", "match": [" diff -f ", "kind/application.yaml"], "exit": [1, 0]},
+        {"cmd": "kubectl", "match": [" diff -f ", "state/application.yaml"], "exit": [1, 0]},
+        render_rule(),
         {"cmd": "kubectl", "match": ["get", "--raw", "/readyz"], "stdout": "ok"},
         {"cmd": "kubectl", "match": ["get", "nodes"],
          "stdout": json.dumps({"items": [{"status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})},
@@ -1219,7 +1512,7 @@ def test_the_whole_run_is_idempotent_and_touches_only_the_kind_cluster(rig: Rig)
     applied = [c["argv"][c["argv"].index("-f") + 1] for c in rig.calls("kubectl") if "apply" in c["argv"]]
     assert applied == [
         str(REPO / "example" / "operators-application.yaml"),
-        str(REPO / "example" / "kind" / "application.yaml"),
+        str(rig.state / "application.yaml"),
     ]
     assert_absent(rig, first, bootstrap, base64.b64encode(bootstrap.encode()).decode(), enrolment)
 
@@ -1723,7 +2016,8 @@ def test_add_user_creates_and_enrols_a_second_user_without_printing_a_secret(rig
     urls = [a for c in rig.calls("curl") for a in c["argv"] if a.startswith("https://")]
     assert urls == [f"{GATEWAY}/admin/create-user", f"{GATEWAY}/admin/issue-enrolment"]
     curls = rig.calls("curl")
-    assert json.loads(curls[0]["data"]) == {"external_id": "dave@example.com", "display_name": "Dave", "is_admin": False}
+    # TEAM ACCESS STAGE 9b, red 2: no `is_admin` key at all.
+    assert json.loads(curls[0]["data"]) == {"external_id": "dave@example.com", "display_name": "Dave"}
     assert json.loads(curls[1]["data"]) == {"user_id": DAVE_ID}
     for c in curls:
         # POSITIVE CONTROL: the admin's bearer reached the gateway, on curl's stdin.
@@ -1822,7 +2116,8 @@ def test_add_user_never_reads_the_bootstrap_token_and_creates_no_admin(rig: Rig)
         assert "x-yadgar-bootstrap-token" not in (c["stdin"] or "")
         assert not any("set-user-admin" in a for a in c["argv"])
         if c["data"] and "external_id" in c["data"]:
-            assert json.loads(c["data"])["is_admin"] is False
+            # TEAM ACCESS STAGE 9b, red 2.
+            assert "is_admin" not in json.loads(c["data"])
 
 
 def test_add_user_ignores_a_home_or_xdg_config_and_reads_only_roots(rig: Rig) -> None:
