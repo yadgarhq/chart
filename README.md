@@ -82,7 +82,26 @@ installs Argo CD, applies `example/operators-application.yaml` and then
 `example/kind/application.yaml`, waits for each to succeed on its first sync, adds
 the gateway hostname to `/etc/hosts`, and checks the edge answers. Then it creates
 the first admin and writes their enrolment token to `/root/yadgar-enrolment.token`
-(0600). Each step checks before it acts, so running it again changes nothing and
+(0600).
+
+The first admin is declared before install (flow F2, `plans/team-access.md` in
+`yadgarhq/docs`). On its first run the script mints a uuidv7 into
+`/var/lib/yadgar-bootstrap/first-admin-uuid` (0600) and reuses it on every later
+run, also after `kind delete cluster`. It applies the estate as
+`/var/lib/yadgar-bootstrap/application.yaml`, a render of
+`example/kind/application.yaml` that declares that uuid as the only member of the
+`administrators` team, grants `administrators` read-write on each root, and sets
+`iam.adminFromTeam: true`. The committed example is never edited. The bootstrap
+`create-user` then names that uuid, and the script checks that the answer echoes
+it. An install that an older kind-up.sh made keeps its recorded admin: that user
+is declared, and nothing is minted.
+
+A rerun does not issue a new enrolment for a recorded admin: under ADR-0966 it
+would succeed for an enrolled admin and reset their password. The one exception
+is a first run that stopped after `create-user` and before its enrolment.
+`--reissue-admin-enrolment` issues one on purpose, the break-glass path;
+`--revoke-existing` beside it also revokes every credential the admin holds when
+the new enrolment is redeemed. Each step checks before it acts, so running it again changes nothing and
 resumes a run that stopped. The one exception is a failed Argo sync: Argo does not
 retry it on its own, so the script prints the failed resources and the command that
 starts one sync once the cause is fixed. It never forces a sync, it never prints a
