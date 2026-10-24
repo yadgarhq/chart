@@ -1121,6 +1121,68 @@ true.
 {{- end -}}
 
 {{/*
+ADR-1016: ENVOY'S UPSTREAM IDLE TIMEOUT STAYS BELOW THE GATEWAY'S HEADER-READ
+TIMEOUT.
+
+THE RACE. The gateway edge closes a kept-alive connection that sends no request
+head within `gateway.server.limits.headerReadTimeoutSeconds`. Envoy pools its
+upstream connections, and Envoy Gateway's default idle timeout is about 1 h. If
+Envoy keeps an idle connection longer than the gateway does, it can reuse one at
+the moment the gateway closes it, and the client gets a 503 UC. `platform` sets
+Envoy's value from `platform.gatewayListener.upstreamIdleTimeoutSeconds`, on a
+BackendTrafficPolicy on the edge Gateway.
+
+WHY HERE. Neither chart sees the other's value, and this chart renders both. So
+this is the one place the order can be checked, and it is checked strictly:
+equal is refused, because both sides then close at the same instant.
+
+THREE CASES, read off `.Subcharts` so each side's own default counts:
+  - The gateway sets no bound (a gateway older than ADR-1016). Nothing to keep
+    below, so nothing is checked.
+  - The gateway sets a bound and `platform` sets no Envoy value (a platform older
+    than ADR-1016). Envoy stays at its 1 h default: refused. This is the pin of
+    one change without the other that ADR-1016 forbids.
+  - Both are set and Envoy's is not below the gateway's: refused.
+
+SKIPPED when `platform` does not render the edge: `platform` absent from
+`.Subcharts` (`platform.enabled` false), or `platform.gatewayListener.create` not
+exactly `true`. An adopter who brings their own ingress owns its idle timeout,
+and this chart cannot see it. A value that is not a number is left to the chart
+that owns it, which refuses it by name; this clause compares numbers only.
+*/}}
+{{- if and (hasKey .Subcharts "platform") (hasKey .Subcharts "gateway") -}}
+{{- $edgeListener := default dict (default dict (default dict .Subcharts.platform).Values).gatewayListener -}}
+{{- $edgeLimits := default dict (default dict (default dict (default dict .Subcharts.gateway).Values).server).limits -}}
+{{- if and (kindIs "bool" $edgeListener.create) $edgeListener.create (hasKey $edgeLimits "headerReadTimeoutSeconds") -}}
+{{- $bound := $edgeLimits.headerReadTimeoutSeconds -}}
+{{- $boundIsNumber := or (kindIs "float64" $bound) (kindIs "int64" $bound) (kindIs "int" $bound) -}}
+{{- if $boundIsNumber -}}
+{{- if not (hasKey $edgeListener "upstreamIdleTimeoutSeconds") -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "gateway.server.limits.headerReadTimeoutSeconds is %v, so the gateway closes an idle "
+      "kept-alive connection after %v s, and the pinned platform chart sets no "
+      "platform.gatewayListener.upstreamIdleTimeoutSeconds. Envoy then keeps an idle upstream "
+      "connection for its default of about 1 h, and can reuse one as the gateway closes it, "
+      "which answers 503 UC (ADR-1016). Pin a platform chart that sets the Envoy idle timeout "
+      "together with this gateway, or pin a gateway without the bound."))
+      $bound $bound) -}}
+{{- else -}}
+{{- $idle := $edgeListener.upstreamIdleTimeoutSeconds -}}
+{{- if and (or (kindIs "float64" $idle) (kindIs "int64" $idle) (kindIs "int" $idle)) (ge (float64 $idle) (float64 $bound)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.gatewayListener.upstreamIdleTimeoutSeconds is %v and "
+      "gateway.server.limits.headerReadTimeoutSeconds is %v. Envoy's upstream idle timeout must "
+      "be strictly below the gateway's header-read timeout: otherwise Envoy can reuse an idle "
+      "connection as the gateway closes it, which answers 503 UC (ADR-1016). Lower "
+      "platform.gatewayListener.upstreamIdleTimeoutSeconds, or raise the gateway's bound."))
+      $idle $bound) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
 AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Of the refusals ABOVE
 `{{- if $creating -}}` (the admin-token and `iam-keys` pair), both are guarded
