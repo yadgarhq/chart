@@ -56,7 +56,9 @@ def parent_with(destination: Path, bound, idle) -> Path:
     gateway: dict = {}
     if bound is not ABSENT:
         gateway = {"server": {"limits": {"headerReadTimeoutSeconds": bound}}}
-    platform: dict = {"gatewayListener": {"create": True}}
+    # `requestHeadersTimeoutSeconds` at 1 s is below every bound here, so the
+    # yaadgaar #218 clause beside this one never fires in this file.
+    platform: dict = {"gatewayListener": {"create": True, "requestHeadersTimeoutSeconds": 1}}
     if idle is not ABSENT:
         platform["gatewayListener"]["upstreamIdleTimeoutSeconds"] = idle
 

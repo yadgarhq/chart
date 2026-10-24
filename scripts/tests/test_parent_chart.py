@@ -274,8 +274,14 @@ API_VERSIONS = tuple(
 # also renders the BackendTrafficPolicy `edge-upstream-idle` on the edge Gateway,
 # which sets Envoy's upstream idle timeout below the gateway's header-read bound:
 # BackendTrafficPolicy 0 -> 1, 87 -> 88 objects. Measured on helm 4.3.0.
+#
+# `platform` 0.2.10 MOVED IT (yaadgaar #218, platform#50). `gatewayListener.create`
+# now also renders the ClientTrafficPolicy `edge-request-headers` on the edge
+# Gateway, which bounds how long the edge waits for a client's request headers:
+# ClientTrafficPolicy 0 -> 1, 88 -> 89 objects. Measured on helm 4.3.0.
 ADOPTER_EXPECTED = {
     "BackendTrafficPolicy": 1,
+    "ClientTrafficPolicy": 1,
     "Certificate": 15,
     "ConfigMap": 5,
     "Deployment": 8,
@@ -295,7 +301,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 11,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 88
+ADOPTER_OBJECTS = 89
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -5087,6 +5093,7 @@ DEFAULT_CRD_BEARING = {
     ("cert-manager.io", "Certificate"),
     ("cert-manager.io", "Issuer"),
     ("gateway.envoyproxy.io", "BackendTrafficPolicy"),
+    ("gateway.envoyproxy.io", "ClientTrafficPolicy"),
     ("gateway.envoyproxy.io", "EnvoyProxy"),
     ("gateway.networking.k8s.io", "Gateway"),
     ("gateway.networking.k8s.io", "GatewayClass"),
