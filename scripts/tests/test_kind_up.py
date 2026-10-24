@@ -1445,6 +1445,74 @@ def test_changed_argocd_values_are_applied(rig: Rig) -> None:
     assert [c for c in rig.calls("helm") if "upgrade" in c["argv"]], "values changed but no upgrade ran"
 
 
+def fresh_enrolment_with_root_client(rig: Rig, version: str) -> tuple[str, str]:
+    """A host with no enrolled marker whose root pipx already holds a client
+    answering *version* (yaadgar-chart yaadgaar #277)."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [
+        {"cmd": "yaadgaar", "match": ["--version"], "stdout": f"yaadgaar {version}\n"},
+        password_stdin_rule(),
+    ] + full_rules(bootstrap, enrolment) + rig.rules
+    return bootstrap, enrolment
+
+
+def test_a_fresh_enrolment_upgrades_an_older_root_client_before_enrolling(rig: Rig) -> None:
+    """yaadgaar_bin reused whatever client root's pipx held, so a 0.1.5 client
+    could enrol a host that the lock pins to a newer one. The marker path already
+    upgrades; the fresh path does the same, pre-flight first (yaadgaar #277)."""
+    fresh_enrolment_with_root_client(rig, "0.1.5")
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pipx = [c["argv"] for c in rig.calls("pipx")]
+    assert pipx[0][:4] == ["runpip", "yaadgaar", "download", "--no-deps"], pipx
+    installs = [a for a in pipx if "install" in a]
+    assert installs == [["install", "--force", f"yaadgaar=={client_version()}"]]
+    assert f"upgraded root's client 0.1.5\u2192{client_version()} before enrolling" in proc.stdout
+    calls = [c["argv"][:1] for c in rig.calls("yaadgaar") + rig.calls("pipx")]
+    enrol = [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"] and "--password-stdin" in c["argv"]]
+    assert len(enrol) == 1, calls
+
+
+def test_a_fresh_enrolment_keeps_a_root_client_at_or_above_the_pin(rig: Rig) -> None:
+    for version in (client_version(), "9.9.9"):
+        rig.reset_calls()
+        (rig.state / "client-enrolled").unlink(missing_ok=True)
+        fresh_enrolment_with_root_client(rig, version)
+        proc = rig.main("--with-client")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert [c for c in rig.calls("pipx") if "install" in c["argv"]] == [], version
+
+
+def test_a_fresh_enrolment_never_forces_an_install_it_could_not_fetch(rig: Rig) -> None:
+    fresh_enrolment_with_root_client(rig, "0.1.5")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1}] + rig.rules
+    proc = rig.main("--with-client")
+    assert not [c for c in rig.calls("pipx") if "--force" in c["argv"]], "forced an install it could not fetch"
+    assert f"yaadgaar=={client_version()} could not be fetched; root's client yaadgaar 0.1.5 kept" in proc.stdout
+
+
+def test_a_fresh_enrolment_stops_when_the_forced_install_fails(rig: Rig) -> None:
+    """pipx removes the old venv when a forced install fails: the run stops
+    before it enrols, and names the command that puts a client back."""
+    fresh_enrolment_with_root_client(rig, "0.1.5")
+    rig.rules = [{"cmd": "pipx", "match": ["install", "--force"], "exit": 1}] + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode != 0, "a failed forced install was reported as success"
+    assert f"pipx install --force yaadgaar=={client_version()}" in proc.stderr
+    assert "before enrolling" not in proc.stdout
+    assert not [c for c in rig.calls("yaadgaar") if c["argv"][:1] == ["enrol"]], "enrolled after a failed upgrade"
+
+
+def test_a_fresh_enrolment_keeps_a_root_client_whose_version_cannot_be_compared(rig: Rig) -> None:
+    for version in ("0.1.5;", "0.1.5.post1", "garbage"):
+        rig.reset_calls()
+        (rig.state / "client-enrolled").unlink(missing_ok=True)
+        fresh_enrolment_with_root_client(rig, version)
+        proc = rig.main("--with-client")
+        assert [c for c in rig.calls("pipx") if "install" in c["argv"] or "download" in c["argv"]] == [], version
+        assert "before enrolling" not in proc.stdout, version
+
+
 def test_an_inherited_xtrace_prints_no_secret(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = [
