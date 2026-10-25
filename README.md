@@ -314,6 +314,7 @@ suite needs the registry reachable rather than running offline.
 | it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                                                                                                |
 | Envoy closes an idle connection first (ADR-1016)       | with only a minimal `gateway` and `platform` below the parent, `platform.gatewayListener.upstreamIdleTimeoutSeconds` not below `gateway.server.limits.headerReadTimeoutSeconds` is refused, and so is a gateway bound with no Envoy value |
 | the edge bounds a stalled request head (yaadgaar #218) | with only a minimal `gateway` and `platform` below the parent, `platform.gatewayListener.requestHeadersTimeoutSeconds` above `gateway.server.limits.headerReadTimeoutSeconds` is refused, and so is a gateway bound with no edge value    |
+| the edge bounds a client that sends no byte (ADR-1022) | with only a minimal `gateway` and `platform` below the parent, a gateway bound with no `platform.gatewayListener.idleTimeoutSeconds` is refused, and so is that value below `platform.gatewayListener.requestHeadersTimeoutSeconds`       |
 
 The object count is an equality rather than a ceiling on purpose. A module release
 that adds or drops an object changes what an adopter of the parent receives, and
