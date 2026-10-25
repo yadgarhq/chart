@@ -1177,11 +1177,39 @@ def test_create_user_refused_fails_with_the_way_out_and_is_not_retried(rig: Rig)
     rig.rules = admin_rules(bootstrap, enrolment, create_code="503") + rig.rules
     proc = rig.run("load_examples; ensure_admin")
     assert proc.returncode != 0
-    assert "YADGAR_ADMIN_EXTERNAL_ID" in proc.stderr
     creates = [c for c in rig.calls("curl") if any("/admin/create-user" in a for a in c["argv"])]
     assert len(creates) == 1, "create-user was retried; a lost 200 then reads as an outage"
     assert not (rig.state / "admin.json").exists()
     assert_absent(rig, proc, bootstrap)
+    # THE WAY OUT IS THE REAL ONE (chart#66 review F1). Under gateway v0.14.0 iam-db
+    # refuses a second create-user at `administrator_exists` whatever the
+    # username, so a new YADGAR_ADMIN_EXTERNAL_ID recovers nothing. The hint names
+    # the record to restore, with the declared uuid and this install's uid, and
+    # the flag that then reissues the enrolment.
+    assert "new username" not in proc.stderr
+    assert "--reissue-admin-enrolment" in proc.stderr
+    assert str(rig.state / "admin.json") in proc.stderr
+    assert f"yadgar:user:{minted(rig)}" in proc.stderr
+    assert "11111111-aaaa-4bbb-8ccc-000000000001" in proc.stderr
+
+
+def test_the_record_the_create_user_hint_names_recovers_the_admin_with_the_flag(rig: Rig) -> None:
+    """THE HINT'S RECOVERY, RUN (chart#66 review F1): the record restored with the
+    declared uuid and this install's uid, then --reissue-admin-enrolment. One
+    bootstrap issue-enrolment for the declared uuid, and no create-user."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = admin_rules(bootstrap, enrolment, create_code="503", install_uid=INSTALL) + rig.rules
+    assert rig.run("load_examples; ensure_admin").returncode != 0
+    declared = f"yadgar:user:{minted(rig)}"
+    (rig.state / "admin.json").write_text(json.dumps(
+        {"external_id": "admin", "user_id": declared, "install_uid": INSTALL}))
+    rig.reset_calls()
+    proc = rig.run("load_examples; REISSUE_ADMIN_ENROLMENT=1; ensure_admin")
+    assert proc.returncode == 0, proc.stderr
+    assert bootstrap_curls(rig, "create-user") == []
+    assert [json.loads(c["data"]) for c in bootstrap_curls(rig, "issue-enrolment")] == [{"user_id": declared}]
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    assert_absent(rig, proc, bootstrap, enrolment)
 
 
 # ─── team access stage 9b: the first administrator by flow F2 ───────────────────
@@ -1268,6 +1296,43 @@ def test_red_05_an_existing_install_declares_its_recorded_admin_and_mints_nothin
     # Its admin may be enrolled: no implicit re-enrolment either (item 7).
     assert bootstrap_curls(rig, "issue-enrolment") == []
     assert "--reissue-admin-enrolment" in proc.stdout
+
+
+@pytest.mark.parametrize("stderr", [
+    "The connection to the server 127.0.0.1:6443 was refused - did you specify the right host or port?\n",
+    "Error from server (Forbidden): secrets \"admin-bootstrap-token\" is forbidden\n",
+    "Unable to connect to the server: net/http: TLS handshake timeout\n",
+], ids=["refused", "forbidden", "timeout"])
+def test_a_kubectl_error_reading_the_install_uid_dies_rather_than_minting(rig: Rig, stderr: str) -> None:
+    """chart#66 review F2. Only an ABSENT bootstrap Secret means "not installed
+    yet". Any other kubectl failure read as absent would, on an older install,
+    declare a fresh pending uuid in `administrators` with adminFromTeam true, and
+    the recorded admin would lose /admin. So it dies, before anything is minted,
+    rendered or applied."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [render_rule(), {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token", "metadata.uid"],
+                                 "exit": 1, "stderr": stderr}] + admin_rules(bootstrap, enrolment, install_uid=INSTALL) + rig.rules
+    recorded_admin(rig, INSTALL)
+    proc = rig.run("load_examples; render_estate_application")
+    assert proc.returncode != 0
+    assert "admin-bootstrap-token" in proc.stderr
+    assert not (rig.state / "first-admin-uuid").exists(), "minted a uuid for an install that has its admin"
+    assert not (rig.state / "application.yaml").exists()
+    assert [c for c in rig.calls("kubectl") if "apply" in c["argv"]] == []
+
+
+def test_an_absent_bootstrap_secret_is_a_new_install_and_mints(rig: Rig) -> None:
+    """The other side of F2: NotFound (kubectl --ignore-not-found answers it as an
+    empty uid and exit 0) still means a cluster not yet installed."""
+    bootstrap, enrolment = new_secrets()
+    rig.rules = [render_rule(), {"cmd": "kubectl", "match": ["secret", "admin-bootstrap-token", "metadata.uid"],
+                                 "stdout": ""}] + admin_rules(bootstrap, enrolment, install_uid=INSTALL) + rig.rules
+    recorded_admin(rig, INSTALL)
+    proc = rig.run("load_examples; render_estate_application")
+    assert proc.returncode == 0, proc.stderr
+    uid_reads = [c for c in rig.calls("kubectl") if "metadata.uid" in " ".join(c["argv"])]
+    assert uid_reads and all("--ignore-not-found" in c["argv"] for c in uid_reads), uid_reads
+    assert rendered(rig)["spec"]["source"]["helm"]["valuesObject"]["seeder"]["registry"]["teams"][0]["members"] == [minted(rig)]
 
 
 def test_red_06_a_create_user_answer_naming_another_user_dies_and_records_nothing(rig: Rig) -> None:

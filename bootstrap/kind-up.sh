@@ -805,10 +805,16 @@ first_admin_uuid() {
 # minted. That user is live and holds a true column, so the first sync stores a
 # live member and turning on IAM_ADMIN_FROM_TEAM keeps their admin. Otherwise the
 # minted uuid. A cluster not yet installed has no bootstrap Secret, so no uid.
+# ONLY AN ABSENT SECRET MEANS THAT: `--ignore-not-found` answers NotFound (the
+# Secret's or its namespace's) as an empty uid and exit 0, and any other kubectl
+# failure dies. Read as "not installed", a transient API error on an older
+# install would declare a fresh pending uuid alone in `administrators` while
+# `iam.adminFromTeam` is true, and the recorded admin would lose /admin.
 declared_admin_uuid() {
   local uid="" recorded_uid recorded
   if [[ -s "$ADMIN_RECORD" ]]; then
-    uid="$(install_uid 2>/dev/null)" || uid=""
+    uid="$(k -n "$ESTATE_NAMESPACE" get secret admin-bootstrap-token --ignore-not-found -o 'jsonpath={.metadata.uid}')" ||
+      die "kubectl could not read Secret $ESTATE_NAMESPACE/admin-bootstrap-token, so whether $ADMIN_RECORD belongs to this installation is unknown; nothing was declared. Run again once the cluster answers"
     recorded_uid="$(jq -r '.install_uid // empty' "$ADMIN_RECORD")"
     if [[ -n "$uid" && "$recorded_uid" == "$uid" ]]; then
       recorded="$(jq -r '.user_id // empty' "$ADMIN_RECORD")"
@@ -1095,7 +1101,7 @@ ensure_admin() {
       local answer
       answer="$(jq -r '.error // empty' "$work/out" 2>/dev/null | printable || true)"
       rm -rf "$work"
-      die "create-user answered ${code:-nothing}: ${answer:-no body}. The gateway answers a duplicate username the same way as an outage. If $ADMIN_EXTERNAL_ID was created by an earlier run whose $ADMIN_RECORD is gone, it cannot be recovered with the bootstrap token: have an enrolled admin issue its enrolment, or set YADGAR_ADMIN_EXTERNAL_ID to a new username"
+      die "create-user answered ${code:-nothing}: ${answer:-no body}. The gateway answers a refused first admin the same way as an outage. Once \`administrators\` has a live member, iam-db refuses every bootstrap create-user whatever the username, so a new YADGAR_ADMIN_EXTERNAL_ID does not help. If an earlier run created the declared administrator yadgar:user:$uuid and $ADMIN_RECORD is gone, restore $ADMIN_RECORD as {\"external_id\": \"$ADMIN_EXTERNAL_ID\", \"user_id\": \"yadgar:user:$uuid\", \"install_uid\": \"$uid\"} (root, 0600) and run again with --reissue-admin-enrolment, which issues a new enrolment for that uuid. Otherwise have an enrolled admin issue the first admin's enrolment"
     fi
     answered="$(jq -r '.user_id // empty' "$work/out" | printable)"
     rm -rf "$work"
@@ -1688,7 +1694,7 @@ except OSError as e:
 #
 # ITS ONLY AUTHORITY IS ROOT'S OWN ENROLLED CLIENT CREDENTIAL. The bootstrap
 # token may create and enrol only the first admin (ADR-0655) and is never read
-# here; no admin flag other than `is_admin: false` is ever sent, and
+# here; no admin flag is ever sent (the body carries no `is_admin`), and
 # set-user-admin is never called. The gateway and CA are the installation's own
 # — the example's enrolment gateway and $CA_FILE — and a client config enrolled
 # with any other gateway is refused.
