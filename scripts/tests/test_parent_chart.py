@@ -80,8 +80,10 @@ import json
 import os
 import re
 import shutil
+import atexit
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -181,7 +183,41 @@ BUILTIN_GROUPS = {
 # `database.create` true in the three `-db` modules. Since ADR-0803 step B6 those
 # are also the chart's DEFAULTS, and K1 in section 8 holds the two renders equal;
 # the example adds only the edge issuer an adopter must name.
-ADOPTER_VALUES = REPO / "example" / "values.yaml"
+COMMITTED_ADOPTER_VALUES = REPO / "example" / "values.yaml"
+
+# THE FIRST ADMINISTRATOR THE EXAMPLES DECLARE (team access stage 9b item 6). The
+# two adopter examples carry `PLACEHOLDER_ADMINISTRATOR` as the only
+# `administrators` member. It is not a uuid, so the seeder chart refuses the
+# committed examples at render until an adopter mints their own uuidv7
+# (`test_the_committed_adopter_examples_refuse_their_placeholder_administrator`).
+# `chart/ci/values.yaml` carries `CI_ADMINISTRATOR`, a fixed test uuidv7. Every
+# OTHER render in this suite stands in for an adopter who did replace it: the
+# examples are rendered with `CI_ADMINISTRATOR` in its place, through
+# `ADOPTER_VALUES` (a copy of the committed file) and `example_render`.
+PLACEHOLDER_ADMINISTRATOR = "REPLACE-WITH-A-UUIDV7-YOU-MINT"
+CI_ADMINISTRATOR = "01900000-0000-7000-8000-000000000001"
+
+
+def _adopter_values_as_replaced() -> Path:
+    text = COMMITTED_ADOPTER_VALUES.read_text()
+    assert text.count(PLACEHOLDER_ADMINISTRATOR) == 1, "example/values.yaml must carry the placeholder administrator once"
+    directory = tempfile.mkdtemp(prefix="adopter-values-")
+    atexit.register(shutil.rmtree, directory, True)
+    copy = Path(directory) / "values.yaml"
+    copy.write_text(text.replace(PLACEHOLDER_ADMINISTRATOR, CI_ADMINISTRATOR))
+    return copy
+
+
+def with_placeholder_replaced(node):
+    """`node` with every `PLACEHOLDER_ADMINISTRATOR` leaf replaced by `CI_ADMINISTRATOR`. PURE."""
+    if isinstance(node, dict):
+        return {key: with_placeholder_replaced(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [with_placeholder_replaced(value) for value in node]
+    return CI_ADMINISTRATOR if node == PLACEHOLDER_ADMINISTRATOR else node
+
+
+ADOPTER_VALUES = _adopter_values_as_replaced()
 
 # `chart/ci/values.yaml` (ruling 11, ADR-0845, K-8's "fixture" step): the twelve
 # `tls.enabled` read switches, explicit, because the parent's OWN defaults do not
@@ -5043,6 +5079,11 @@ ADOPTER_ONLY_KEYS = {
     "seeder.registry.roots",
     "seeder.registry.projects",
     "seeder.registry.allowMassArchive",
+    # TEAM ACCESS STAGE 9b ITEM 6: the adopter's teams and the mass-revoke switch,
+    # which has no default once `teams` is declared (ADR-0963 (6)). The parent
+    # states neither, for the registry's reason.
+    "seeder.registry.teams",
+    "seeder.registry.allowMassRevoke",
     # THE mTLS POSTURE THE SEEDER'S SYNC NEEDS (plans/the-d35-seeder.md stage 8,
     # ledger 1616). `project` admits `SyncProjects` only from a verified leaf
     # whose common name is `seeder-caller`, and `project-db` only from
@@ -5415,7 +5456,8 @@ def pulled(version: str, destination: Path) -> Path:
 
 
 def example_render(tarball: Path, values_object: dict, destination: Path) -> subprocess.CompletedProcess[str]:
-    values = overlay(destination / "values-object.yaml", yaml.safe_dump(values_object))
+    """`values_object` rendered over `tarball`, as an adopter who replaced the placeholder administrator."""
+    values = overlay(destination / "values-object.yaml", yaml.safe_dump(with_placeholder_replaced(values_object)))
     return helm("template", "yadgar", str(tarball), *API_VERSIONS, "-f", str(values))
 
 
@@ -6309,13 +6351,14 @@ SIX_TLS_CLIENT_AUTH_KEYS = {
 assert len(SIX_TLS_CLIENT_AUTH_KEYS) == 6, sorted(SIX_TLS_CLIENT_AUTH_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ADR-0857's fixture
-# step for the seeder): the three `seeder.registry` leaves. Defined BEFORE
+# step for the seeder): the five `seeder.registry` leaves (three until team
+# access stage 9b item 6 added `teams` and `allowMassRevoke`). Defined BEFORE
 # `TWELVE_TLS_SWITCHES` so that set can subtract them out. Without the
-# subtraction the three join the "twelve" (fifteen), and the twelve-switch
+# subtraction the five join the "twelve" (seventeen), and the twelve-switch
 # gate below then demands `seeder.registry.roots` in every source as if it were
 # a TLS switch: the leak ledger 1592 names.
 SEEDER_REGISTRY_KEYS = {key for key in ADOPTER_ONLY_KEYS if key.startswith("seeder.registry.")}
-assert len(SEEDER_REGISTRY_KEYS) == 3, sorted(SEEDER_REGISTRY_KEYS)
+assert len(SEEDER_REGISTRY_KEYS) == 5, sorted(SEEDER_REGISTRY_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ledger 1616): the six
 # servers' verifying authority and the four callers' client leaves. Subtracted
@@ -6329,7 +6372,7 @@ assert len(MTLS_POSTURE_KEYS) == 16, sorted(MTLS_POSTURE_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
 # exception list `default_disagreements` walks past (the two edge-issuer keys,
-# the eight NATS/valkey keys above, the six `clientAuth` keys above, the three
+# the eight NATS/valkey keys above, the six `clientAuth` keys above, the five
 # seeder registry keys above, plus these twelve), and copying the twelve out
 # by hand would be a second place for the list to drift from the one
 # `ADOPTER_ONLY_KEYS` already names.
@@ -6607,9 +6650,9 @@ def test_every_adopter_source_states_every_grpc_server_at_required() -> None:
 
 
 def seeder_registries_by_source() -> dict[str, object]:
-    """`seeder.registry` as each adopter source states it, `_ABSENT` where it does not."""
+    """`seeder.registry` as each adopter source COMMITS it, `_ABSENT` where it does not."""
     sources = {
-        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "example/values.yaml": yaml.safe_load(COMMITTED_ADOPTER_VALUES.read_text()),
         "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
     }
     for name, document in parent_examples().items():
@@ -6617,13 +6660,88 @@ def seeder_registries_by_source() -> dict[str, object]:
     return {name: value_at(values, "seeder.registry") for name, values in sources.items()}
 
 
+# WHO DECLARES `teams`, AND WITH WHICH `administrators` MEMBER (team access stage
+# 9b item 6). The two adopter examples carry the placeholder an adopter replaces;
+# the ci file carries a fixed test uuid; the kind example carries no `teams` at
+# all, because `bootstrap/kind-up.sh` renders them per install with the uuid it
+# mints (stage 9b item 3) and never edits the committed file.
+KIND_EXAMPLE = "example/kind/application.yaml"
+ADMINISTRATORS_BY_SOURCE = {
+    "example/values.yaml": [PLACEHOLDER_ADMINISTRATOR],
+    "example/application.yaml": [PLACEHOLDER_ADMINISTRATOR],
+    "chart/ci/values.yaml": [CI_ADMINISTRATOR],
+}
+TEAM_KEYS = ("teams", "allowMassRevoke")
+UUIDV7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+def without_teams(registry: dict) -> dict:
+    """`registry` with `teams`, `allowMassRevoke` and every row's `grants` removed. PURE."""
+    stripped = {key: value for key, value in registry.items() if key not in TEAM_KEYS}
+    for key in ("roots", "projects"):
+        if isinstance(stripped.get(key), list):
+            stripped[key] = [
+                {k: v for k, v in row.items() if k != "grants"} if isinstance(row, dict) else row
+                for row in stripped[key]
+            ]
+    return stripped
+
+
+def administrators_of(registry: dict) -> object:
+    """The `administrators` members `registry` declares, `_ABSENT` without the team. PURE."""
+    teams = [t for t in registry.get("teams") or [] if isinstance(t, dict) and t.get("name") == "administrators"]
+    return teams[0].get("members") if len(teams) == 1 else _ABSENT
+
+
+def team_part(registry: dict) -> dict:
+    """What `without_teams` sets aside, with the `administrators` members replaced
+    by one marker: `teams`, `allowMassRevoke`, and each row's `grants` by position. PURE."""
+    teams = copied({"teams": registry.get("teams") or []})["teams"]
+    for team in teams:
+        if isinstance(team, dict) and team.get("name") == "administrators":
+            team["members"] = ["<administrator>"]
+    return {
+        "teams": teams,
+        "allowMassRevoke": registry.get("allowMassRevoke"),
+        **{key: [row.get("grants") for row in registry.get(key) or [] if isinstance(row, dict)] for key in ("roots", "projects")},
+    }
+
+
 def registry_disagreements(registries: dict[str, object]) -> list[str]:
-    """Every source missing `seeder.registry`, and any two that state it differently. PURE."""
+    """Every source missing `seeder.registry`, and every way two sources disagree. PURE.
+
+    1. Every source states the same registry once `teams`, `allowMassRevoke` and
+       the rows' `grants` are set aside.
+    2. Every source but the kind example states the same `teams`, grants and
+       `allowMassRevoke` too, `administrators` members aside.
+    3. Each of those states exactly its `ADMINISTRATORS_BY_SOURCE` members.
+    4. The kind example states no `teams`, `allowMassRevoke` or `grants`.
+    """
     failures = [f"`{name}` states no `seeder.registry`" for name, value in registries.items() if value is _ABSENT]
     stated = {name: value for name, value in registries.items() if value is not _ABSENT}
-    if len({json.dumps(value, sort_keys=True) for value in stated.values()}) > 1:
+    if len({json.dumps(without_teams(value), sort_keys=True) for value in stated.values()}) > 1:
         failures.append(f"the sources state different registries: {stated}")
+    declaring = {name: value for name, value in stated.items() if name != KIND_EXAMPLE}
+    if len({json.dumps(team_part(value), sort_keys=True) for value in declaring.values()}) > 1:
+        failures.append(f"the sources state different teams or grants: {declaring}")
+    for name, value in declaring.items():
+        members = administrators_of(value)
+        expected = ADMINISTRATORS_BY_SOURCE.get(name)
+        if members != expected:
+            failures.append(
+                f"`{name}` declares `administrators` members {'none' if members is _ABSENT else members}, not {expected}"
+            )
+    kind = stated.get(KIND_EXAMPLE)
+    if kind is not None and without_teams(kind) != kind:
+        failures.append(
+            f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"
+        )
     return failures
+
+
+def test_the_ci_administrator_is_a_lowercase_canonical_uuidv7_and_the_placeholder_is_not() -> None:
+    assert UUIDV7.match(CI_ADMINISTRATOR), CI_ADMINISTRATOR
+    assert not UUIDV7.match(PLACEHOLDER_ADMINISTRATOR), PLACEHOLDER_ADMINISTRATOR
 
 
 def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
@@ -6637,6 +6755,13 @@ def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
     K1 holds the ci render equal to `example/values.yaml`'s, which forces that
     one. Object identity alone cannot see two registries that differ in content,
     so this gate compares the declarations themselves.
+
+    AMENDED FOR TEAM ACCESS STAGE 9b ITEM 6. `teams` differs by source on
+    purpose: the placeholder administrator in the two adopter examples, a fixed
+    test uuid in the ci file, none in the kind example (`registry_disagreements`
+    says which part each must agree on). Stage 12's tightened seeder refuses a
+    declaration without `teams`, so every source but the kind example must carry
+    them before that pin.
     """
     assert registry_disagreements(seeder_registries_by_source()) == []
 
@@ -6646,10 +6771,52 @@ def test_a_source_that_drops_or_changes_the_registry_reddens_the_agreement_gate(
     registries = seeder_registries_by_source()
     dropped = dict(registries, **{"example/kind/application.yaml": _ABSENT})
     assert registry_disagreements(dropped) == ["`example/kind/application.yaml` states no `seeder.registry`"]
-    changed = copied(registries["example/values.yaml"])
+    changed = copied(registries["chart/ci/values.yaml"])
     changed["roots"][0]["path"] = "other"
     failures = registry_disagreements(dict(registries, **{"chart/ci/values.yaml": changed}))
     assert len(failures) == 1 and "different registries" in failures[0], failures
+
+
+def test_a_source_that_drops_or_changes_its_teams_reddens_the_agreement_gate() -> None:
+    """THE RED CASES FOR STAGE 9b ITEM 6, one per rule of `registry_disagreements`."""
+    registries = seeder_registries_by_source()
+
+    no_teams = without_teams(registries["chart/ci/values.yaml"])
+    failures = registry_disagreements(dict(registries, **{"chart/ci/values.yaml": no_teams}))
+    assert any("different teams or grants" in f for f in failures), failures
+    assert any("`chart/ci/values.yaml` declares `administrators` members none" in f for f in failures), failures
+
+    replaced = copied(registries["example/application.yaml"])
+    replaced["teams"][0]["members"] = [CI_ADMINISTRATOR]
+    failures = registry_disagreements(dict(registries, **{"example/application.yaml": replaced}))
+    assert failures == [
+        f"`example/application.yaml` declares `administrators` members {[CI_ADMINISTRATOR]}, not {[PLACEHOLDER_ADMINISTRATOR]}"
+    ], failures
+
+    revoking = copied(registries["example/values.yaml"])
+    revoking["allowMassRevoke"] = True
+    failures = registry_disagreements(dict(registries, **{"example/values.yaml": revoking}))
+    assert len(failures) == 1 and "different teams or grants" in failures[0], failures
+
+    kind = copied(registries["chart/ci/values.yaml"])
+    failures = registry_disagreements(dict(registries, **{KIND_EXAMPLE: kind}))
+    assert failures == [f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"], failures
+
+
+@pytest.mark.parametrize("name", ["example/values.yaml", "example/application.yaml"])
+def test_the_committed_adopter_examples_refuse_their_placeholder_administrator(tmp_path: Path, name: str) -> None:
+    """STAGE 9b ITEM 6: "the render check refuses the documented placeholder value".
+    The committed file, NOT the replaced copy every other render uses, is refused
+    by the seeder chart's member check, which names the key."""
+    if name == "example/values.yaml":
+        source = COMMITTED_ADOPTER_VALUES
+    else:
+        source = tmp_path / "values-object.yaml"
+        source.write_text(yaml.safe_dump(parent_examples()[name]["spec"]["source"]["helm"]["valuesObject"]))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(source))
+    assert result.returncode != 0, f"`{name}` rendered with the placeholder administrator"
+    assert "registry.teams[0].members[0]" in result.stderr, result.stderr
+    assert PLACEHOLDER_ADMINISTRATOR in result.stderr, result.stderr
 
 
 def defaulted_registry_keys(defaults: dict) -> list[str]:
@@ -7196,17 +7363,30 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
 # `ca.crt` verifies `project` (the gateway's own `project.tls.caSecret` names the
 # same Secret); `seeder-client-tls` is the seeder's client leaf, common name
 # `seeder-caller`, which `project` alone admits to `SyncProjects` (ADR-0936).
+#
+# WITH `teams` SINCE TEAM ACCESS STAGE 9b ITEM 6: one `administrators` member
+# (`CI_ADMINISTRATOR`, standing in for the uuid an adopter mints in place of
+# `PLACEHOLDER_ADMINISTRATOR`), its `readWrite` grant on the root, and
+# `allowMassRevoke`, which has no default once `teams` is declared.
 SEEDER_DECLARATION = (
     "seeder:\n"
     "  registry:\n"
+    "    teams:\n"
+    "      - name: administrators\n"
+    "        members:\n"
+    f"          - {CI_ADMINISTRATOR}\n"
     "    roots:\n"
     "      - path: acme\n"
     "        sourceRepo: acme/gitops\n"
+    "        grants:\n"
+    "          - team: administrators\n"
+    "            level: readWrite\n"
     "    projects:\n"
     "      - path: acme/web\n"
     "        displayName: web\n"
     "        sourceRepo: acme/web\n"
     "    allowMassArchive: false\n"
+    "    allowMassRevoke: false\n"
 )
 
 # THE RENDER THE CONTRACT STEP REFUSES, rebuilt over the fixture: a `null` in a
@@ -7597,7 +7777,7 @@ def iam_ingress_without_seeder(documents: list[dict]) -> list[str]:
 
 def render_iam_policy(tmp_path: Path, name: str, values: dict, *extra: str) -> list[dict]:
     source = tmp_path / (name.replace("/", "_") + ".yaml")
-    source.write_text(yaml.safe_dump(values))
+    source.write_text(yaml.safe_dump(with_placeholder_replaced(values)))
     return render(str(CHART), *API_VERSIONS, "-f", str(source), "--set", "iam.networkPolicy.enabled=true", *extra)
 
 
@@ -7685,9 +7865,13 @@ def render_values(tmp_path: Path, name: str, values: dict) -> subprocess.Complet
 
 
 def test_red_01_a_parent_values_file_with_grants_and_no_teams_is_refused(tmp_path: Path) -> None:
-    """THE TRANSITION RULE THROUGH THE PARENT: a grant names a declared team."""
+    """THE TRANSITION RULE THROUGH THE PARENT: a grant names a declared team.
+
+    The example declares `teams` since stage 9b item 6, so the red case removes
+    it and keeps the root's `administrators` grant."""
     values = example_with_registry()
-    values["seeder"]["registry"]["roots"][0]["grants"] = [ADMIN_READ_WRITE]
+    del values["seeder"]["registry"]["teams"]
+    assert values["seeder"]["registry"]["roots"][0]["grants"] == [ADMIN_READ_WRITE]
     result = render_values(tmp_path, "grants-no-teams", values)
     assert result.returncode != 0, "a grant with no `teams` rendered"
     assert "grants" in result.stderr and "teams" in result.stderr, result.stderr
