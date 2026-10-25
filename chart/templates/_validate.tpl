@@ -1235,6 +1235,66 @@ THE SAME THREE CASES AND THE SAME SKIPS as the idle check above, read off
 {{- end -}}
 
 {{/*
+ADR-1022 FOLLOW-UP: THE EDGE BOUNDS A CLIENT THAT SENDS NO BYTE.
+
+THE GAP. The request-headers bound above starts at the first byte of a request
+head. A client that completes TLS and then sends no byte never starts it, so
+Envoy's `idleTimeout` holds that client, and its default is about 1 h. The
+gateway's own header-read timer starts at accept, so behind Envoy the gap is the
+edge's alone. `platform` closes it from
+`platform.gatewayListener.idleTimeoutSeconds`, on the same ClientTrafficPolicy
+(Max 2026-10-25: "Set idleTimeout ~10-30 s"). Measured on kind at parent
+0.47.5, with no such value: a TLS connection that sent nothing was still open
+at 150 s.
+
+TWO REFUSALS, with the same skips as the two clauses above, read off
+`.Subcharts`:
+  - The gateway sets a bound and `platform` sets no idle value (a platform older
+    than this change): the edge holds a zero-byte client for about 1 h.
+  - Both edge values are numbers and the idle value is below the request-headers
+    value. A policy choice, not an Envoy constraint: the idle timer stops at a
+    request's first byte, where the headers timer starts, so they never run
+    together. It keeps the edge from being stricter with a client that has sent
+    nothing than with one that has started a head. `platform` refuses this
+    too; the parent states it again because it is the one render that holds the
+    values an adopter installs. Equal is allowed.
+There is no comparison with the gateway's bound: Max ruled a value above it.
+*/}}
+{{- if and (hasKey .Subcharts "platform") (hasKey .Subcharts "gateway") -}}
+{{- $edgeListener := default dict (default dict (default dict .Subcharts.platform).Values).gatewayListener -}}
+{{- $edgeLimits := default dict (default dict (default dict (default dict .Subcharts.gateway).Values).server).limits -}}
+{{- if and (kindIs "bool" $edgeListener.create) $edgeListener.create (hasKey $edgeLimits "headerReadTimeoutSeconds") -}}
+{{- $bound := $edgeLimits.headerReadTimeoutSeconds -}}
+{{- if or (kindIs "float64" $bound) (kindIs "int64" $bound) (kindIs "int" $bound) -}}
+{{- if not (hasKey $edgeListener "idleTimeoutSeconds") -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "gateway.server.limits.headerReadTimeoutSeconds is %v, and the pinned platform chart sets no "
+      "platform.gatewayListener.idleTimeoutSeconds. The edge then holds a client that completes "
+      "TLS and sends no byte for Envoy's default idle timeout of about 1 h, because the "
+      "request-headers bound starts only at the first byte (ADR-1022). Pin a platform chart that "
+      "sets the edge's idle timeout."))
+      $bound) -}}
+{{- else -}}
+{{- $clientIdle := $edgeListener.idleTimeoutSeconds -}}
+{{- $headers := $edgeListener.requestHeadersTimeoutSeconds -}}
+{{- $clientIdleIsNumber := or (kindIs "float64" $clientIdle) (kindIs "int64" $clientIdle) (kindIs "int" $clientIdle) -}}
+{{- $headersIsNumber := or (kindIs "float64" $headers) (kindIs "int64" $headers) (kindIs "int" $headers) -}}
+{{- if and $clientIdleIsNumber $headersIsNumber (lt (float64 $clientIdle) (float64 $headers)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.gatewayListener.idleTimeoutSeconds is %v and "
+      "platform.gatewayListener.requestHeadersTimeoutSeconds is %v. The edge's idle timeout "
+      "must not be below the edge's request-headers timeout, so that the edge is not stricter "
+      "with a client that has sent nothing than with one that has started a request head "
+      "(ADR-1022). Raise "
+      "platform.gatewayListener.idleTimeoutSeconds, or lower the request-headers timeout."))
+      $clientIdle $headers) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 THE ONE `fail`, AND IT SITS OUTSIDE THE `$creating` GUARD SO THE ADR-0787 CLAUSE
 AND THE `platform.enabled` SHAPE CLAUSE CAN REACH IT. Of the refusals ABOVE
 `{{- if $creating -}}` (the admin-token and `iam-keys` pair), both are guarded

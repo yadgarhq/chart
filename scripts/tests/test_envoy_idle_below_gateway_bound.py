@@ -57,8 +57,15 @@ def parent_with(destination: Path, bound, idle) -> Path:
     if bound is not ABSENT:
         gateway = {"server": {"limits": {"headerReadTimeoutSeconds": bound}}}
     # `requestHeadersTimeoutSeconds` at 1 s is below every bound here, so the
-    # yaadgaar #218 clause beside this one never fires in this file.
-    platform: dict = {"gatewayListener": {"create": True, "requestHeadersTimeoutSeconds": 1}}
+    # yaadgaar #218 clause beside this one never fires in this file. An
+    # `idleTimeoutSeconds` at or above it keeps the ADR-1022 clause quiet too.
+    platform: dict = {
+        "gatewayListener": {
+            "create": True,
+            "requestHeadersTimeoutSeconds": 1,
+            "idleTimeoutSeconds": 30,
+        }
+    }
     if idle is not ABSENT:
         platform["gatewayListener"]["upstreamIdleTimeoutSeconds"] = idle
 

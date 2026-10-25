@@ -57,8 +57,14 @@ def parent_with(destination: Path, bound, headers) -> Path:
     gateway: dict = {}
     if bound is not ABSENT:
         gateway = {"server": {"limits": {"headerReadTimeoutSeconds": bound}}}
+    # `idleTimeoutSeconds` above every headers value here keeps the ADR-1022
+    # clause beside this one quiet in this file.
     platform: dict = {
-        "gatewayListener": {"create": True, "upstreamIdleTimeoutSeconds": ENVOY_IDLE}
+        "gatewayListener": {
+            "create": True,
+            "upstreamIdleTimeoutSeconds": ENVOY_IDLE,
+            "idleTimeoutSeconds": 60,
+        }
     }
     if headers is not ABSENT:
         platform["gatewayListener"]["requestHeadersTimeoutSeconds"] = headers
