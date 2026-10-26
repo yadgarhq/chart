@@ -303,6 +303,11 @@ gateway:
       enabled: false
 
 iam:
+  # THE WORKLOADS THAT MAY REACH iam's 50052 when its NetworkPolicy is on
+  # (`networkPolicy.enabled`, off by default): the gateway, and the seeder,
+  # which sends SyncTeams (team access stage 7, plans/team-access.md).
+  networkPolicy:
+    clients: [gateway, seeder]
   autoscaling:
     enabled: true
   # WHAT IAM SERVES, and the dial it makes to iam-db. See the block above this
@@ -418,12 +423,39 @@ seeder:
     tls:
       caSecret: project-tls
       clientCertSecret: seeder-client-tls
+  # Verifies iam, read only once `registry.teams` is declared (team access).
+  iam:
+    tls:
+      caSecret: iam-tls
   registry:
+    # YOUR FIRST ADMINISTRATOR, DECLARED BEFORE THEY EXIST (team access, ADR-0963
+    # (5), flow F2). `administrators` holds the uuid your first administrator
+    # will have. Mint a lowercase uuidv7 before the first sync (`uuidgen
+    # --time-v7` from util-linux 2.41, or Python 3.14's `uuid.uuid7()`), write
+    # it here in place of the placeholder, and send the same value as `user_id`
+    # in the bootstrap `create-user` body. A cold install also sets
+    # `iam.adminFromTeam: true` from the start: while it is false, iam refuses a
+    # `create-user` that carries `user_id`, and the gateway answers that with the
+    # same opaque 503 as an outage. An install that already has its first
+    # administrator leaves it false until team access stage 10 switches it.
+    # `bootstrap/kind-up.sh` does all three on kind. THE PLACEHOLDER IS NOT A UUID, SO THE SEEDER CHART REFUSES TO RENDER
+    # UNTIL YOU REPLACE IT (`registry.teams[0].members[0]`). With `teams`
+    # declared every root grants `administrators` `readWrite`, and
+    # `allowMassRevoke` has no default (false keeps the store's guard on, so one
+    # sync cannot delete more than half of the stored grants).
+    teams:
+      - name: administrators
+        members:
+          - REPLACE-WITH-A-UUIDV7-YOU-MINT
     roots:
       - path: acme
         sourceRepo: acme/gitops
+        grants:
+          - team: administrators
+            level: readWrite
     projects:
       - path: acme/web
         displayName: web
         sourceRepo: acme/web
     allowMassArchive: false
+    allowMassRevoke: false

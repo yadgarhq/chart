@@ -47,7 +47,7 @@ repository: per ADR-0725 the release pipeline resolves the ten pins at
 package time (`helm package chart -u`), so nothing here is ever committed.
 `chart/charts/` is git-ignored the same way `yadgarhq/config`'s is.
 
-**It renders no objects of its own.** Every one of the 87 objects a default
+**It renders no objects of its own.** Every one of the 89 objects a default
 install produces comes from one of the module charts or the platform layer, each reviewed, gated
 and released in its own repository. A parent that rendered a Deployment or a
 ConfigMap of its own would be a ninth module nobody declared, and ADR-0723 names
@@ -82,13 +82,42 @@ installs Argo CD, applies `example/operators-application.yaml` and then
 `example/kind/application.yaml`, waits for each to succeed on its first sync, adds
 the gateway hostname to `/etc/hosts`, and checks the edge answers. Then it creates
 the first admin and writes their enrolment token to `/root/yadgar-enrolment.token`
-(0600). Each step checks before it acts, so running it again changes nothing and
+(0600).
+
+The first admin is declared before install (flow F2, `plans/team-access.md` in
+`yadgarhq/docs`). On its first run the script mints a uuidv7 into
+`/var/lib/yadgar-bootstrap/first-admin-uuid` (0600) and reuses it on every later
+run, also after `kind delete cluster`. It applies the estate as
+`/var/lib/yadgar-bootstrap/application.yaml`, a render of
+`example/kind/application.yaml` that declares that uuid as the only member of the
+`administrators` team, grants `administrators` read-write on each root, and sets
+`iam.adminFromTeam: true`. The committed example is never edited. The bootstrap
+`create-user` then names that uuid, and the script checks that the answer echoes
+it. An install that an older kind-up.sh made keeps its recorded admin: that user
+is declared, and nothing is minted.
+
+A rerun does not issue a new enrolment for a recorded admin: under ADR-0966 it
+would succeed for an enrolled admin and reset their password. The one exception
+is a first run that stopped after `create-user` and before its enrolment.
+`--reissue-admin-enrolment` issues one on purpose, the break-glass path;
+`--revoke-existing` beside it also revokes every credential the admin holds when
+the new enrolment is redeemed. Each step checks before it acts, so running it again changes nothing and
 resumes a run that stopped. The one exception is a failed Argo sync: Argo does not
 retry it on its own, so the script prints the failed resources and the command that
 starts one sync once the cause is fixed. It never forces a sync, it never prints a
 secret, and it only addresses the kind cluster, through a kubeconfig of its own in
 `/var/lib/yadgar-bootstrap`. The header of the script lists the environment
 variables that change its defaults.
+
+`--stop-before-admin` runs every step up to and including the edge probe, then
+stops with exit 0 before the first admin. It sends no `create-user` and no
+`issue-enrolment`, does not read the bootstrap token, and enrols no client. The
+estate then declares the minted uuid in `administrators` while no such user
+exists: the pre-admin state that the team-access VM gates observe. Run the
+script again without the flag to create the admin. The rerun reuses the same
+uuid, and every earlier step finds its work done. The flag refuses
+`--with-client`, `--add-user` and `--reissue-admin-enrolment`, because each of
+them acts on an admin.
 
 With `--with-client` it also installs `yaadgaar` at the version in
 `bootstrap/tools.lock` and enrols root as that admin. `enrol` stores the
@@ -138,7 +167,7 @@ enrol an admin who already holds a credential (ADR-0655).
 **The whole estate** (ADR-0803 step B6): every module, the platform layer
 (`yadgarhq/platform` — internal CA and its leaves, the edge leaf, the Gateway
 listener, Valkey, NATS and the bootstrap Jobs), autoscaling in all seven modules
-and a database in each of the three `-db` modules. 87 objects with
+and a database in each of the three `-db` modules. 89 objects with
 `chart/ci/values.yaml`. `example/values.yaml` restates the same defaults, plus
 `chart/ci/values.yaml`'s twelve `tls.enabled` switches (ruling 11, ADR-0845 — the
 parent's own `values.yaml` states none of them) and its eight NATS/valkey TLS
@@ -279,20 +308,23 @@ runs on every commit. The packaged-chart fixture resolves dependencies with
 `helm package chart -u`, the same command `ci-release.yaml` runs, so this
 suite needs the registry reachable rather than running offline.
 
-| what                                                   | asserted as                                                                                                                                                                          |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                                                          |
-| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 87-object set; every example leaf equals its default |
-| the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                                                         |
-| the modules alone are 35 objects                       | 4 ConfigMap, 7 Deployment, 1 Job, 7 Service, 8 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                    |
-| the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                                                |
-| the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                                                                                                          |
-| an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300                                                                               |
-| a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only                                                                                  |
-| no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path                                                                                          |
-| a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`                                                                                     |
-| a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                                                                                               |
-| it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                                           |
+| what                                                   | asserted as                                                                                                                                                                                                                               |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                                                                                                               |
+| a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 89-object set; every example leaf equals its default                                                      |
+| the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                                                                                                              |
+| the modules alone are 35 objects                       | 4 ConfigMap, 7 Deployment, 1 Job, 7 Service, 8 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                                                                         |
+| the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                                                                                                     |
+| the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                                                                                                                                                               |
+| an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300                                                                                                                                    |
+| a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only                                                                                                                                       |
+| no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path                                                                                                                                               |
+| a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`                                                                                                                                          |
+| a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                                                                                                                                                    |
+| it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                                                                                                |
+| Envoy closes an idle connection first (ADR-1016)       | with only a minimal `gateway` and `platform` below the parent, `platform.gatewayListener.upstreamIdleTimeoutSeconds` not below `gateway.server.limits.headerReadTimeoutSeconds` is refused, and so is a gateway bound with no Envoy value |
+| the edge bounds a stalled request head (yaadgaar #218) | with only a minimal `gateway` and `platform` below the parent, `platform.gatewayListener.requestHeadersTimeoutSeconds` above `gateway.server.limits.headerReadTimeoutSeconds` is refused, and so is a gateway bound with no edge value    |
+| the edge bounds a client that sends no byte (ADR-1022) | with only a minimal `gateway` and `platform` below the parent, a gateway bound with no `platform.gatewayListener.idleTimeoutSeconds` is refused, and so is that value below `platform.gatewayListener.requestHeadersTimeoutSeconds`       |
 
 The object count is an equality rather than a ceiling on purpose. A module release
 that adds or drops an object changes what an adopter of the parent receives, and

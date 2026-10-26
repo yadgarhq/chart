@@ -167,6 +167,11 @@ platform:
       prometheus: true
 
 iam:
+  # THE WORKLOADS THAT MAY REACH iam's 50052 when its NetworkPolicy is on
+  # (`networkPolicy.enabled`, off by default): the gateway, and the seeder,
+  # which sends SyncTeams (team access stage 7, plans/team-access.md).
+  networkPolicy:
+    clients: [gateway, seeder]
   autoscaling:
     enabled: true
 iam-db:
@@ -216,3 +221,11 @@ seeder:
     tls:
       caSecret: project-tls
       clientCertSecret: seeder-client-tls
+  # THE THIRD NAME, read only once `seeder.registry.teams` is declared (team
+  # access stage 6): the seeder then sends `SyncTeams` to iam first, and
+  # `iam-tls`'s `ca.crt` is the authority it verifies iam against. `platform`
+  # mints it, as it mints `project-tls`. With `teams` absent the seeder chart
+  # renders no iam wiring and this name is unused.
+  iam:
+    tls:
+      caSecret: iam-tls

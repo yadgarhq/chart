@@ -80,8 +80,10 @@ import json
 import os
 import re
 import shutil
+import atexit
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -181,7 +183,41 @@ BUILTIN_GROUPS = {
 # `database.create` true in the three `-db` modules. Since ADR-0803 step B6 those
 # are also the chart's DEFAULTS, and K1 in section 8 holds the two renders equal;
 # the example adds only the edge issuer an adopter must name.
-ADOPTER_VALUES = REPO / "example" / "values.yaml"
+COMMITTED_ADOPTER_VALUES = REPO / "example" / "values.yaml"
+
+# THE FIRST ADMINISTRATOR THE EXAMPLES DECLARE (team access stage 9b item 6). The
+# two adopter examples carry `PLACEHOLDER_ADMINISTRATOR` as the only
+# `administrators` member. It is not a uuid, so the seeder chart refuses the
+# committed examples at render until an adopter mints their own uuidv7
+# (`test_the_committed_adopter_examples_refuse_their_placeholder_administrator`).
+# `chart/ci/values.yaml` carries `CI_ADMINISTRATOR`, a fixed test uuidv7. Every
+# OTHER render in this suite stands in for an adopter who did replace it: the
+# examples are rendered with `CI_ADMINISTRATOR` in its place, through
+# `ADOPTER_VALUES` (a copy of the committed file) and `example_render`.
+PLACEHOLDER_ADMINISTRATOR = "REPLACE-WITH-A-UUIDV7-YOU-MINT"
+CI_ADMINISTRATOR = "01900000-0000-7000-8000-000000000001"
+
+
+def _adopter_values_as_replaced() -> Path:
+    text = COMMITTED_ADOPTER_VALUES.read_text()
+    assert text.count(PLACEHOLDER_ADMINISTRATOR) == 1, "example/values.yaml must carry the placeholder administrator once"
+    directory = tempfile.mkdtemp(prefix="adopter-values-")
+    atexit.register(shutil.rmtree, directory, True)
+    copy = Path(directory) / "values.yaml"
+    copy.write_text(text.replace(PLACEHOLDER_ADMINISTRATOR, CI_ADMINISTRATOR))
+    return copy
+
+
+def with_placeholder_replaced(node):
+    """`node` with every `PLACEHOLDER_ADMINISTRATOR` leaf replaced by `CI_ADMINISTRATOR`. PURE."""
+    if isinstance(node, dict):
+        return {key: with_placeholder_replaced(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [with_placeholder_replaced(value) for value in node]
+    return CI_ADMINISTRATOR if node == PLACEHOLDER_ADMINISTRATOR else node
+
+
+ADOPTER_VALUES = _adopter_values_as_replaced()
 
 # `chart/ci/values.yaml` (ruling 11, ADR-0845, K-8's "fixture" step): the twelve
 # `tls.enabled` read switches, explicit, because the parent's OWN defaults do not
@@ -269,7 +305,19 @@ API_VERSIONS = tuple(
 # 4 -> 5, ServiceAccount 10 -> 11, 84 -> 87 objects. Measured 2026-10-18 on helm
 # 4.3.0. The seeder Job is NOT a helm hook (`NOT_A_HOOK_BY_DESIGN` below), so
 # `HOOK_JOBS_AT_R5` does not move with it.
+#
+# `platform` 0.2.9 MOVED IT (ADR-1016, platform#49). `gatewayListener.create` now
+# also renders the BackendTrafficPolicy `edge-upstream-idle` on the edge Gateway,
+# which sets Envoy's upstream idle timeout below the gateway's header-read bound:
+# BackendTrafficPolicy 0 -> 1, 87 -> 88 objects. Measured on helm 4.3.0.
+#
+# `platform` 0.2.10 MOVED IT (yaadgaar #218, platform#50). `gatewayListener.create`
+# now also renders the ClientTrafficPolicy `edge-request-headers` on the edge
+# Gateway, which bounds how long the edge waits for a client's request headers:
+# ClientTrafficPolicy 0 -> 1, 88 -> 89 objects. Measured on helm 4.3.0.
 ADOPTER_EXPECTED = {
+    "BackendTrafficPolicy": 1,
+    "ClientTrafficPolicy": 1,
     "Certificate": 15,
     "ConfigMap": 5,
     "Deployment": 8,
@@ -289,7 +337,7 @@ ADOPTER_EXPECTED = {
     "ServiceAccount": 11,
     "StatefulSet": 1,
 }
-ADOPTER_OBJECTS = 87
+ADOPTER_OBJECTS = 89
 
 # THE RBAC TRIPLES, AND THE COUNT IS NOT ONE PER JOB. Four hook Jobs render and
 # THREE triples serve them: `preflight` holds its own, with `create`, `get` and
@@ -5031,6 +5079,11 @@ ADOPTER_ONLY_KEYS = {
     "seeder.registry.roots",
     "seeder.registry.projects",
     "seeder.registry.allowMassArchive",
+    # TEAM ACCESS STAGE 9b ITEM 6: the adopter's teams and the mass-revoke switch,
+    # which has no default once `teams` is declared (ADR-0963 (6)). The parent
+    # states neither, for the registry's reason.
+    "seeder.registry.teams",
+    "seeder.registry.allowMassRevoke",
     # THE mTLS POSTURE THE SEEDER'S SYNC NEEDS (plans/the-d35-seeder.md stage 8,
     # ledger 1616). `project` admits `SyncProjects` only from a verified leaf
     # whose common name is `seeder-caller`, and `project-db` only from
@@ -5080,6 +5133,8 @@ THE_RENDER_CHECK_REFUSAL = "this render needs the API"
 DEFAULT_CRD_BEARING = {
     ("cert-manager.io", "Certificate"),
     ("cert-manager.io", "Issuer"),
+    ("gateway.envoyproxy.io", "BackendTrafficPolicy"),
+    ("gateway.envoyproxy.io", "ClientTrafficPolicy"),
     ("gateway.envoyproxy.io", "EnvoyProxy"),
     ("gateway.networking.k8s.io", "Gateway"),
     ("gateway.networking.k8s.io", "GatewayClass"),
@@ -5401,7 +5456,8 @@ def pulled(version: str, destination: Path) -> Path:
 
 
 def example_render(tarball: Path, values_object: dict, destination: Path) -> subprocess.CompletedProcess[str]:
-    values = overlay(destination / "values-object.yaml", yaml.safe_dump(values_object))
+    """`values_object` rendered over `tarball`, as an adopter who replaced the placeholder administrator."""
+    values = overlay(destination / "values-object.yaml", yaml.safe_dump(with_placeholder_replaced(values_object)))
     return helm("template", "yadgar", str(tarball), *API_VERSIONS, "-f", str(values))
 
 
@@ -6295,13 +6351,14 @@ SIX_TLS_CLIENT_AUTH_KEYS = {
 assert len(SIX_TLS_CLIENT_AUTH_KEYS) == 6, sorted(SIX_TLS_CLIENT_AUTH_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ADR-0857's fixture
-# step for the seeder): the three `seeder.registry` leaves. Defined BEFORE
+# step for the seeder): the five `seeder.registry` leaves (three until team
+# access stage 9b item 6 added `teams` and `allowMassRevoke`). Defined BEFORE
 # `TWELVE_TLS_SWITCHES` so that set can subtract them out. Without the
-# subtraction the three join the "twelve" (fifteen), and the twelve-switch
+# subtraction the five join the "twelve" (seventeen), and the twelve-switch
 # gate below then demands `seeder.registry.roots` in every source as if it were
 # a TLS switch: the leak ledger 1592 names.
 SEEDER_REGISTRY_KEYS = {key for key in ADOPTER_ONLY_KEYS if key.startswith("seeder.registry.")}
-assert len(SEEDER_REGISTRY_KEYS) == 3, sorted(SEEDER_REGISTRY_KEYS)
+assert len(SEEDER_REGISTRY_KEYS) == 5, sorted(SEEDER_REGISTRY_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL (ledger 1616): the six
 # servers' verifying authority and the four callers' client leaves. Subtracted
@@ -6315,7 +6372,7 @@ assert len(MTLS_POSTURE_KEYS) == 16, sorted(MTLS_POSTURE_KEYS)
 
 # DERIVED FROM `ADOPTER_ONLY_KEYS`, NOT A SECOND LITERAL: that set is the whole
 # exception list `default_disagreements` walks past (the two edge-issuer keys,
-# the eight NATS/valkey keys above, the six `clientAuth` keys above, the three
+# the eight NATS/valkey keys above, the six `clientAuth` keys above, the five
 # seeder registry keys above, plus these twelve), and copying the twelve out
 # by hand would be a second place for the list to drift from the one
 # `ADOPTER_ONLY_KEYS` already names.
@@ -6593,9 +6650,9 @@ def test_every_adopter_source_states_every_grpc_server_at_required() -> None:
 
 
 def seeder_registries_by_source() -> dict[str, object]:
-    """`seeder.registry` as each adopter source states it, `_ABSENT` where it does not."""
+    """`seeder.registry` as each adopter source COMMITS it, `_ABSENT` where it does not."""
     sources = {
-        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "example/values.yaml": yaml.safe_load(COMMITTED_ADOPTER_VALUES.read_text()),
         "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
     }
     for name, document in parent_examples().items():
@@ -6603,13 +6660,88 @@ def seeder_registries_by_source() -> dict[str, object]:
     return {name: value_at(values, "seeder.registry") for name, values in sources.items()}
 
 
+# WHO DECLARES `teams`, AND WITH WHICH `administrators` MEMBER (team access stage
+# 9b item 6). The two adopter examples carry the placeholder an adopter replaces;
+# the ci file carries a fixed test uuid; the kind example carries no `teams` at
+# all, because `bootstrap/kind-up.sh` renders them per install with the uuid it
+# mints (stage 9b item 3) and never edits the committed file.
+KIND_EXAMPLE = "example/kind/application.yaml"
+ADMINISTRATORS_BY_SOURCE = {
+    "example/values.yaml": [PLACEHOLDER_ADMINISTRATOR],
+    "example/application.yaml": [PLACEHOLDER_ADMINISTRATOR],
+    "chart/ci/values.yaml": [CI_ADMINISTRATOR],
+}
+TEAM_KEYS = ("teams", "allowMassRevoke")
+UUIDV7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+def without_teams(registry: dict) -> dict:
+    """`registry` with `teams`, `allowMassRevoke` and every row's `grants` removed. PURE."""
+    stripped = {key: value for key, value in registry.items() if key not in TEAM_KEYS}
+    for key in ("roots", "projects"):
+        if isinstance(stripped.get(key), list):
+            stripped[key] = [
+                {k: v for k, v in row.items() if k != "grants"} if isinstance(row, dict) else row
+                for row in stripped[key]
+            ]
+    return stripped
+
+
+def administrators_of(registry: dict) -> object:
+    """The `administrators` members `registry` declares, `_ABSENT` without the team. PURE."""
+    teams = [t for t in registry.get("teams") or [] if isinstance(t, dict) and t.get("name") == "administrators"]
+    return teams[0].get("members") if len(teams) == 1 else _ABSENT
+
+
+def team_part(registry: dict) -> dict:
+    """What `without_teams` sets aside, with the `administrators` members replaced
+    by one marker: `teams`, `allowMassRevoke`, and each row's `grants` by position. PURE."""
+    teams = copied({"teams": registry.get("teams") or []})["teams"]
+    for team in teams:
+        if isinstance(team, dict) and team.get("name") == "administrators":
+            team["members"] = ["<administrator>"]
+    return {
+        "teams": teams,
+        "allowMassRevoke": registry.get("allowMassRevoke"),
+        **{key: [row.get("grants") for row in registry.get(key) or [] if isinstance(row, dict)] for key in ("roots", "projects")},
+    }
+
+
 def registry_disagreements(registries: dict[str, object]) -> list[str]:
-    """Every source missing `seeder.registry`, and any two that state it differently. PURE."""
+    """Every source missing `seeder.registry`, and every way two sources disagree. PURE.
+
+    1. Every source states the same registry once `teams`, `allowMassRevoke` and
+       the rows' `grants` are set aside.
+    2. Every source but the kind example states the same `teams`, grants and
+       `allowMassRevoke` too, `administrators` members aside.
+    3. Each of those states exactly its `ADMINISTRATORS_BY_SOURCE` members.
+    4. The kind example states no `teams`, `allowMassRevoke` or `grants`.
+    """
     failures = [f"`{name}` states no `seeder.registry`" for name, value in registries.items() if value is _ABSENT]
     stated = {name: value for name, value in registries.items() if value is not _ABSENT}
-    if len({json.dumps(value, sort_keys=True) for value in stated.values()}) > 1:
+    if len({json.dumps(without_teams(value), sort_keys=True) for value in stated.values()}) > 1:
         failures.append(f"the sources state different registries: {stated}")
+    declaring = {name: value for name, value in stated.items() if name != KIND_EXAMPLE}
+    if len({json.dumps(team_part(value), sort_keys=True) for value in declaring.values()}) > 1:
+        failures.append(f"the sources state different teams or grants: {declaring}")
+    for name, value in declaring.items():
+        members = administrators_of(value)
+        expected = ADMINISTRATORS_BY_SOURCE.get(name)
+        if members != expected:
+            failures.append(
+                f"`{name}` declares `administrators` members {'none' if members is _ABSENT else members}, not {expected}"
+            )
+    kind = stated.get(KIND_EXAMPLE)
+    if kind is not None and without_teams(kind) != kind:
+        failures.append(
+            f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"
+        )
     return failures
+
+
+def test_the_ci_administrator_is_a_lowercase_canonical_uuidv7_and_the_placeholder_is_not() -> None:
+    assert UUIDV7.match(CI_ADMINISTRATOR), CI_ADMINISTRATOR
+    assert not UUIDV7.match(PLACEHOLDER_ADMINISTRATOR), PLACEHOLDER_ADMINISTRATOR
 
 
 def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
@@ -6623,6 +6755,13 @@ def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
     K1 holds the ci render equal to `example/values.yaml`'s, which forces that
     one. Object identity alone cannot see two registries that differ in content,
     so this gate compares the declarations themselves.
+
+    AMENDED FOR TEAM ACCESS STAGE 9b ITEM 6. `teams` differs by source on
+    purpose: the placeholder administrator in the two adopter examples, a fixed
+    test uuid in the ci file, none in the kind example (`registry_disagreements`
+    says which part each must agree on). Stage 12's tightened seeder refuses a
+    declaration without `teams`, so every source but the kind example must carry
+    them before that pin.
     """
     assert registry_disagreements(seeder_registries_by_source()) == []
 
@@ -6632,10 +6771,52 @@ def test_a_source_that_drops_or_changes_the_registry_reddens_the_agreement_gate(
     registries = seeder_registries_by_source()
     dropped = dict(registries, **{"example/kind/application.yaml": _ABSENT})
     assert registry_disagreements(dropped) == ["`example/kind/application.yaml` states no `seeder.registry`"]
-    changed = copied(registries["example/values.yaml"])
+    changed = copied(registries["chart/ci/values.yaml"])
     changed["roots"][0]["path"] = "other"
     failures = registry_disagreements(dict(registries, **{"chart/ci/values.yaml": changed}))
     assert len(failures) == 1 and "different registries" in failures[0], failures
+
+
+def test_a_source_that_drops_or_changes_its_teams_reddens_the_agreement_gate() -> None:
+    """THE RED CASES FOR STAGE 9b ITEM 6, one per rule of `registry_disagreements`."""
+    registries = seeder_registries_by_source()
+
+    no_teams = without_teams(registries["chart/ci/values.yaml"])
+    failures = registry_disagreements(dict(registries, **{"chart/ci/values.yaml": no_teams}))
+    assert any("different teams or grants" in f for f in failures), failures
+    assert any("`chart/ci/values.yaml` declares `administrators` members none" in f for f in failures), failures
+
+    replaced = copied(registries["example/application.yaml"])
+    replaced["teams"][0]["members"] = [CI_ADMINISTRATOR]
+    failures = registry_disagreements(dict(registries, **{"example/application.yaml": replaced}))
+    assert failures == [
+        f"`example/application.yaml` declares `administrators` members {[CI_ADMINISTRATOR]}, not {[PLACEHOLDER_ADMINISTRATOR]}"
+    ], failures
+
+    revoking = copied(registries["example/values.yaml"])
+    revoking["allowMassRevoke"] = True
+    failures = registry_disagreements(dict(registries, **{"example/values.yaml": revoking}))
+    assert len(failures) == 1 and "different teams or grants" in failures[0], failures
+
+    kind = copied(registries["chart/ci/values.yaml"])
+    failures = registry_disagreements(dict(registries, **{KIND_EXAMPLE: kind}))
+    assert failures == [f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"], failures
+
+
+@pytest.mark.parametrize("name", ["example/values.yaml", "example/application.yaml"])
+def test_the_committed_adopter_examples_refuse_their_placeholder_administrator(tmp_path: Path, name: str) -> None:
+    """STAGE 9b ITEM 6: "the render check refuses the documented placeholder value".
+    The committed file, NOT the replaced copy every other render uses, is refused
+    by the seeder chart's member check, which names the key."""
+    if name == "example/values.yaml":
+        source = COMMITTED_ADOPTER_VALUES
+    else:
+        source = tmp_path / "values-object.yaml"
+        source.write_text(yaml.safe_dump(parent_examples()[name]["spec"]["source"]["helm"]["valuesObject"]))
+    result = helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(source))
+    assert result.returncode != 0, f"`{name}` rendered with the placeholder administrator"
+    assert "registry.teams[0].members[0]" in result.stderr, result.stderr
+    assert PLACEHOLDER_ADMINISTRATOR in result.stderr, result.stderr
 
 
 def defaulted_registry_keys(defaults: dict) -> list[str]:
@@ -7182,17 +7363,30 @@ def test_the_load_balancer_example_reddens_the_kind_edge_gate(pinned: Path, tmp_
 # `ca.crt` verifies `project` (the gateway's own `project.tls.caSecret` names the
 # same Secret); `seeder-client-tls` is the seeder's client leaf, common name
 # `seeder-caller`, which `project` alone admits to `SyncProjects` (ADR-0936).
+#
+# WITH `teams` SINCE TEAM ACCESS STAGE 9b ITEM 6: one `administrators` member
+# (`CI_ADMINISTRATOR`, standing in for the uuid an adopter mints in place of
+# `PLACEHOLDER_ADMINISTRATOR`), its `readWrite` grant on the root, and
+# `allowMassRevoke`, which has no default once `teams` is declared.
 SEEDER_DECLARATION = (
     "seeder:\n"
     "  registry:\n"
+    "    teams:\n"
+    "      - name: administrators\n"
+    "        members:\n"
+    f"          - {CI_ADMINISTRATOR}\n"
     "    roots:\n"
     "      - path: acme\n"
     "        sourceRepo: acme/gitops\n"
+    "        grants:\n"
+    "          - team: administrators\n"
+    "            level: readWrite\n"
     "    projects:\n"
     "      - path: acme/web\n"
     "        displayName: web\n"
     "        sourceRepo: acme/web\n"
     "    allowMassArchive: false\n"
+    "    allowMassRevoke: false\n"
 )
 
 # THE RENDER THE CONTRACT STEP REFUSES, rebuilt over the fixture: a `null` in a
@@ -7525,3 +7719,185 @@ def test_a_caller_with_its_leaf_unmounted_reddens_the_admit_gate(
     spec = pod_spec(documents, kind, name)
     spec["volumes"] = [v for v in spec["volumes"] if (v.get("secret") or {}).get("secretName") != secret]
     assert admit_failures(documents) == [f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf"]
+
+
+def test_the_release_job_passes_the_release_app_for_the_argocd_nudge() -> None:
+    """C7 of plans/auto-deploy-parent-chart.md (ADR-1004 item 5): `release`
+    hands `ci-release.yaml` the release App, so its `argocd-pin-nudge` job can
+    send `chart-published` to `yadgarhq/argocd`. EXACTLY the two names, each
+    to its same-named secret: `secrets: inherit` would pass every organisation
+    secret and grow silently (zizmor `secrets-inherit`).
+    """
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    secrets = jobs["release"].get("secrets")
+    assert secrets != "inherit", "`release` must name its secrets, not inherit them."
+    assert secrets == {
+        "RELEASE_APP_CLIENT_ID": "${{ secrets.RELEASE_APP_CLIENT_ID }}",
+        "RELEASE_APP_PRIVATE_KEY": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
+    }, f"`release` passes {secrets!r}; the argocd nudge needs exactly the release App."
+
+
+# ─── team access stage 7 (plans/team-access.md): the seeder reaches iam ─────────
+#
+# THE SEEDER DIALS iam FOR `SyncTeams` (team access stage 6), so iam's ingress
+# NetworkPolicy must admit pods labelled `app: seeder` on 50052. iam's own chart
+# reads `networkPolicy.clients`, default `[gateway]`; the parent and every
+# adopter source set `[gateway, seeder]`. The policy is off by default
+# (`networkPolicy.enabled`, D80's asymmetric-cost reason), so the test turns it on
+# per render: the list must already be right for the adopter who turns it on.
+IAM_INGRESS_POLICY = "iam-ingress"
+SEEDER_SELECTOR = {"podSelector": {"matchLabels": {"app": "seeder"}}}
+
+
+def adopter_value_sources() -> dict[str, dict]:
+    """Every adopter source of values: the two values files and both parent examples."""
+    sources = {
+        "example/values.yaml": yaml.safe_load(ADOPTER_VALUES.read_text()),
+        "chart/ci/values.yaml": yaml.safe_load(EXPLICIT_TLS.read_text()),
+    }
+    for name, document in parent_examples().items():
+        sources[name] = document["spec"]["source"]["helm"]["valuesObject"]
+    return sources
+
+
+def iam_ingress_without_seeder(documents: list[dict]) -> list[str]:
+    """Why the rendered iam ingress policy does not admit the seeder, or []. PURE."""
+    policies = [
+        d for d in documents
+        if isinstance(d, dict) and d.get("kind") == "NetworkPolicy"
+        and (d.get("metadata") or {}).get("name") == IAM_INGRESS_POLICY
+    ]
+    if len(policies) != 1:
+        return [f"{len(policies)} NetworkPolicy objects named {IAM_INGRESS_POLICY}"]
+    sources = [peer for rule in policies[0]["spec"].get("ingress") or [] for peer in rule.get("from") or []]
+    if SEEDER_SELECTOR not in sources:
+        return [f"{IAM_INGRESS_POLICY} admits {sources}, not {SEEDER_SELECTOR}"]
+    return []
+
+
+def render_iam_policy(tmp_path: Path, name: str, values: dict, *extra: str) -> list[dict]:
+    source = tmp_path / (name.replace("/", "_") + ".yaml")
+    source.write_text(yaml.safe_dump(with_placeholder_replaced(values)))
+    return render(str(CHART), *API_VERSIONS, "-f", str(source), "--set", "iam.networkPolicy.enabled=true", *extra)
+
+
+@pytest.mark.parametrize("name", sorted(adopter_value_sources()))
+def test_red_02_iams_ingress_policy_admits_the_seeder_from_every_adopter_source(tmp_path: Path, name: str) -> None:
+    documents = render_iam_policy(tmp_path, name, adopter_value_sources()[name])
+    assert iam_ingress_without_seeder(documents) == []
+
+
+def test_red_02_a_render_with_the_seeder_removed_from_iams_clients_fails_the_gate(tmp_path: Path) -> None:
+    """THE RED CASE: the same render with `seeder` dropped from the list."""
+    values = adopter_value_sources()["example/values.yaml"]
+    documents = render_iam_policy(tmp_path, "no-seeder", values, "--set", "iam.networkPolicy.clients={gateway}")
+    failures = iam_ingress_without_seeder(documents)
+    assert len(failures) == 1 and "not {'podSelector'" in failures[0], failures
+
+
+def test_red_02_every_adopter_source_states_the_seeder_among_iams_clients() -> None:
+    """Stated in each source, not only inherited from the parent default (K1)."""
+    sources = adopter_value_sources()
+    # THE PARENT DEFAULT TOO: every source above overrides it, so no render test
+    # reads it, and an adopter who leaves the key out gets exactly this list.
+    sources["chart/values.yaml"] = yaml.safe_load((CHART / "values.yaml").read_text())
+    stated = {name: value_at(values, "iam.networkPolicy.clients") for name, values in sources.items()}
+    assert stated == {name: ["gateway", "seeder"] for name in stated}, stated
+
+
+# NOTHING BROADER THAN THE SEEDER JOB ON 50052 (least privilege). The membership
+# check above passes a policy that also admits a third client, another peer, or a
+# second port; this pins the whole ingress, so any widening is red.
+IAM_INGRESS_EXACT = [
+    {
+        "from": [{"podSelector": {"matchLabels": {"app": "gateway"}}}, SEEDER_SELECTOR],
+        "ports": [{"port": 50052, "protocol": "TCP"}],
+    }
+]
+
+
+def iam_ingress_rules(documents: list[dict]) -> list[dict]:
+    """The `ingress` of the one `iam-ingress` policy. PURE."""
+    (policy,) = [
+        d for d in documents
+        if isinstance(d, dict) and d.get("kind") == "NetworkPolicy"
+        and (d.get("metadata") or {}).get("name") == IAM_INGRESS_POLICY
+    ]
+    return policy["spec"].get("ingress") or []
+
+
+@pytest.mark.parametrize("name", sorted(adopter_value_sources()))
+def test_iams_ingress_admits_exactly_the_gateway_and_the_seeder_on_50052(tmp_path: Path, name: str) -> None:
+    documents = render_iam_policy(tmp_path, name, adopter_value_sources()[name])
+    assert iam_ingress_rules(documents) == IAM_INGRESS_EXACT
+
+
+def test_a_widened_iam_ingress_fails_the_exact_gate(tmp_path: Path) -> None:
+    """THE RED CASE: a third client beside the gateway and the seeder."""
+    values = adopter_value_sources()["example/values.yaml"]
+    widened = "iam.networkPolicy.clients={gateway,seeder,ns}"
+    documents = render_iam_policy(tmp_path, "widened", values, "--set", widened)
+    assert iam_ingress_rules(documents) != IAM_INGRESS_EXACT
+
+
+# ─── team access stage 7 red 1 and the iam authority (seeder 0.2.2) ─────────────
+#
+# The stage 6 seeder chart passes through the parent unchanged: the parent's
+# schema leaves `seeder` open, so the seeder chart's own rules decide. These two
+# tests prove that through the parent, from the adopter's example values.
+ADMIN_UUID = "0192f3c4-aaaa-7bbb-8ccc-0123456789ab"
+ADMIN_READ_WRITE = {"team": "administrators", "level": "readWrite"}
+
+
+def example_with_registry(**changes: object) -> dict:
+    """`example/values.yaml` with its `seeder.registry` changed. PURE but for the read."""
+    values = yaml.safe_load(ADOPTER_VALUES.read_text())
+    registry = values["seeder"]["registry"]
+    for key, value in changes.items():
+        registry[key] = value
+    return values
+
+
+def render_values(tmp_path: Path, name: str, values: dict) -> subprocess.CompletedProcess:
+    source = tmp_path / f"{name}.yaml"
+    source.write_text(yaml.safe_dump(values))
+    return helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(source))
+
+
+def test_red_01_a_parent_values_file_with_grants_and_no_teams_is_refused(tmp_path: Path) -> None:
+    """THE TRANSITION RULE THROUGH THE PARENT: a grant names a declared team.
+
+    The example declares `teams` since stage 9b item 6, so the red case removes
+    it and keeps the root's `administrators` grant."""
+    values = example_with_registry()
+    del values["seeder"]["registry"]["teams"]
+    assert values["seeder"]["registry"]["roots"][0]["grants"] == [ADMIN_READ_WRITE]
+    result = render_values(tmp_path, "grants-no-teams", values)
+    assert result.returncode != 0, "a grant with no `teams` rendered"
+    assert "grants" in result.stderr and "teams" in result.stderr, result.stderr
+
+
+def test_the_parent_defaults_the_seeders_iam_authority_to_iam_tls() -> None:
+    """`platform` mints `iam-tls`, as it mints `project-tls`, so the parent names it."""
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    assert value_at(values, "seeder.iam.tls.caSecret") == "iam-tls"
+
+
+def test_teams_declared_through_the_parent_render_and_mount_iam_tls(tmp_path: Path) -> None:
+    """With teams declared and no `iam.tls.caSecret` stated, the parent default lets
+    the render through and the Job mounts `iam-tls`. Without the default the seeder
+    chart refuses (`iam.tls.caSecret` has no default there, ADR-0854)."""
+    values = example_with_registry(
+        teams=[{"name": "administrators", "members": [ADMIN_UUID]}],
+        allowMassRevoke=False,
+    )
+    values["seeder"]["registry"]["roots"][0]["grants"] = [ADMIN_READ_WRITE]
+    # The example states the name too (K1); drop it, so only the default is read.
+    del values["seeder"]["iam"]
+    result = render_values(tmp_path, "teams", values)
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    secrets = {
+        (v.get("secret") or {}).get("secretName") for v in pod_spec(documents, "Job", "seeder").get("volumes") or []
+    }
+    assert "iam-tls" in secrets, secrets

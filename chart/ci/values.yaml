@@ -67,6 +67,11 @@ gateway:
     tls:
       enabled: false
 iam:
+  # THE WORKLOADS THAT MAY REACH iam's 50052 when its NetworkPolicy is on
+  # (`networkPolicy.enabled`, off by default): the gateway, and the seeder,
+  # which sends SyncTeams (team access stage 7, plans/team-access.md).
+  networkPolicy:
+    clients: [gateway, seeder]
   tls:
     enabled: true
     clientAuth: "required"
@@ -123,13 +128,26 @@ platform:
 # default an organisation's registry (ADR-0705). Stated here so every render
 # over this file carries the seeder's Job, ConfigMap and ServiceAccount, the
 # set an adopter who copies `example/values.yaml` receives.
+#
+# `teams` (team access, plans/team-access.md stage 9b item 6) differs from the
+# adopter examples in one value only: the `administrators` member is a fixed
+# test uuidv7 here, where the examples carry a placeholder an adopter must
+# replace (it is not a uuid, so it refuses to render).
 seeder:
   registry:
+    teams:
+      - name: administrators
+        members:
+          - 01900000-0000-7000-8000-000000000001
     roots:
       - path: acme
         sourceRepo: acme/gitops
+        grants:
+          - team: administrators
+            level: readWrite
     projects:
       - path: acme/web
         displayName: web
         sourceRepo: acme/web
     allowMassArchive: false
+    allowMassRevoke: false
