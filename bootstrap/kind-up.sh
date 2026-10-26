@@ -2,6 +2,7 @@
 # kind-up.sh — the whole of yadgar on one machine, in one command (ADR-0820).
 #
 #   sudo bootstrap/kind-up.sh [--with-client] [--reissue-admin-enrolment [--revoke-existing]]
+#   sudo bootstrap/kind-up.sh --stop-before-admin
 #   sudo bootstrap/kind-up.sh --add-user <username> [--display-name NAME] [--out FILE] [--force]
 #
 # --with-client enrols this machine's root as the first admin with `yaadgaar`,
@@ -13,6 +14,14 @@
 # an admin) as that admin and writes their enrolment token to a new root-only
 # file in a root-only directory; --force replaces only a regular file, links are
 # never followed, and it touches nothing else.
+#
+# --stop-before-admin runs every step up to the edge probe, then stops with exit
+# 0 before step 9: no create-user, no issue-enrolment, no bootstrap token read,
+# no client enrolment. The estate then declares its first administrator in
+# `administrators` and no such user exists yet, the state the team-access VM
+# gates observe. Run again without the flag to create the administrator. It
+# refuses --with-client, --add-user and --reissue-admin-enrolment, which each
+# act on an administrator.
 #
 # Run it from this repository at a release tag — a clone, or the release
 # tarball, which needs no git:
@@ -321,6 +330,7 @@ RENDERED_APP_FILE="$STATE_DIR/application.yaml"
 UUIDV7_RE='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 REISSUE_ADMIN_ENROLMENT=0
 REVOKE_EXISTING=0
+STOP_BEFORE_ADMIN=0
 
 # An enrolment token lives 24 hours (ADR-0492). A file older than this is
 # re-issued rather than handed back expired.
@@ -1881,6 +1891,7 @@ main() {
       --with-client) WITH_CLIENT=1 ;;
       --reissue-admin-enrolment) REISSUE_ADMIN_ENROLMENT=1 ;;
       --revoke-existing) REVOKE_EXISTING=1 ;;
+      --stop-before-admin) STOP_BEFORE_ADMIN=1 ;;
       --add-user | --display-name | --out)
         if (($# < 2)) || [[ "$2" == --* ]]; then
           printf '%s needs a value\n' "$1" >&2
@@ -1907,6 +1918,10 @@ main() {
   done
   if ((!ADD_USER && (display_set || out_set))); then
     printf -- '--display-name, --out and --force belong to --add-user\n' >&2
+    return 2
+  fi
+  if ((STOP_BEFORE_ADMIN && (ADD_USER || REISSUE_ADMIN_ENROLMENT || WITH_CLIENT))); then
+    printf -- '--stop-before-admin stops before the first administrator, so --with-client, --add-user and --reissue-admin-enrolment cannot run with it; run again without it for those\n' >&2
     return 2
   fi
   if ((ADD_USER && WITH_CLIENT)); then
@@ -1948,6 +1963,10 @@ main() {
   ensure_hosts_entry "$GATEWAY_HOST"
   ensure_edge_ca
   probe_edge
+  if ((STOP_BEFORE_ADMIN)); then
+    log "[9/10] --stop-before-admin: stopped before the first administrator. No create-user, issue-enrolment or client enrolment was sent, and the bootstrap token was not read. Run kind-up.sh again without --stop-before-admin to create the administrator"
+    return 0
+  fi
   ensure_admin
   if ((WITH_CLIENT)); then ensure_client; fi
   print_next_steps
