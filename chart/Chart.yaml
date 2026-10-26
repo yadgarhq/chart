@@ -66,19 +66,19 @@ dependencies:
     version: 0.2.3
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
-    version: 0.15.0
+    version: 0.15.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
     version: 0.17.3
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
-    version: 0.15.3
+    version: 0.15.4
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.5.3
+    version: 0.5.4
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.5
+    version: 0.10.6
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.8.2
@@ -95,7 +95,7 @@ dependencies:
   # `yadgarhq/argocd`, stage 7); the parent's own fixtures declare a
   # placeholder (`chart/ci/values.yaml`, `example/`).
   - name: seeder
-    version: 0.2.2
+    version: 0.2.3
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.
@@ -112,6 +112,6 @@ dependencies:
   # no path its `condition` names resolves. The key in `chart/values.yaml` is what
   # makes this line mean `false`, and it is not a restatement of a child default.
   - name: platform
-    version: 0.2.11
+    version: 0.2.12
     repository: oci://ghcr.io/yadgarhq/charts
     condition: platform.enabled
