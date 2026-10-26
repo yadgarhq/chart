@@ -75,16 +75,16 @@ dependencies:
     version: 0.15.4
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.5.4
+    version: 0.5.5
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.6
+    version: 0.10.7
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.8.3
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.11.5
+    version: 0.11.6
     repository: oci://ghcr.io/yadgarhq/charts
   # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
   # `condition`: a toggle would be a tenth `enabled` key for D80's all-off pass
@@ -95,7 +95,7 @@ dependencies:
   # `yadgarhq/argocd`, stage 7); the parent's own fixtures declare a
   # placeholder (`chart/ci/values.yaml`, `example/`).
   - name: seeder
-    version: 0.2.3
+    version: 0.2.4
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.
