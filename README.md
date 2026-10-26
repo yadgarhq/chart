@@ -109,6 +109,16 @@ secret, and it only addresses the kind cluster, through a kubeconfig of its own 
 `/var/lib/yadgar-bootstrap`. The header of the script lists the environment
 variables that change its defaults.
 
+`--stop-before-admin` runs every step up to and including the edge probe, then
+stops with exit 0 before the first admin. It sends no `create-user` and no
+`issue-enrolment`, does not read the bootstrap token, and enrols no client. The
+estate then declares the minted uuid in `administrators` while no such user
+exists: the pre-admin state that the team-access VM gates observe. Run the
+script again without the flag to create the admin. The rerun reuses the same
+uuid, and every earlier step finds its work done. The flag refuses
+`--with-client`, `--add-user` and `--reissue-admin-enrolment`, because each of
+them acts on an admin.
+
 With `--with-client` it also installs `yaadgaar` at the version in
 `bootstrap/tools.lock` and enrols root as that admin. `enrol` stores the
 credential, so no `login` follows. The redeemed token is renamed to

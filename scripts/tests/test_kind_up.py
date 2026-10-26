@@ -1624,6 +1624,96 @@ def test_the_estate_application_is_not_applied_while_the_operators_fail(rig: Rig
     assert not [c for c in rig.calls("curl") if "/admin/" in " ".join(c["argv"])]
 
 
+# ─── --stop-before-admin: the pre-admin state, held for the VM gates ────────────
+#
+# Team access stage 10, VM gates 1, 2 and 8 observe the estate BEFORE its first
+# administrator exists: the seeder's pending administrator, and the bootstrap
+# create-user refused while no administrator is declared live. A run that goes
+# straight on to ensure_admin leaves no moment to observe it, so the flag stops
+# after the edge probe and a rerun without it resumes (yaadgaar 433).
+
+STOP_MESSAGE = "--stop-before-admin: stopped before the first administrator"
+
+
+def test_stop_before_admin_installs_the_estate_and_sends_no_admin_request(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = full_rules(bootstrap, enrolment) + rig.rules
+    proc = rig.main("--stop-before-admin")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert STOP_MESSAGE in proc.stdout
+    assert "again without --stop-before-admin" in proc.stdout
+    assert STOP_MESSAGE in rig.log.read_text()
+    # POSITIVE CONTROL: every step up to the edge ran, both Applications included.
+    applied = [c["argv"][c["argv"].index("-f") + 1] for c in rig.calls("kubectl") if "apply" in c["argv"]]
+    assert applied == [str(REPO / "example" / "operators-application.yaml"), str(rig.state / "application.yaml")]
+    assert [c for c in rig.calls("curl") if "--cacert" in c["argv"]], "the edge was never probed"
+    members = rendered(rig)["spec"]["source"]["helm"]["valuesObject"]["seeder"]["registry"]["teams"][0]["members"]
+    assert members == [minted(rig)], "the administrator is not declared pending"
+    # Nothing of step 9 or 10: no admin request, no bootstrap token read, no client.
+    assert not [c for c in rig.calls("curl") if "/admin/" in " ".join(c["argv"])], "sent an admin request"
+    assert not [c for c in rig.calls("kubectl") if "admin-bootstrap-token" in " ".join(c["argv"])
+                and "metadata.uid" not in " ".join(c["argv"])], "read the bootstrap token"
+    assert rig.calls("yaadgaar") == [] and rig.calls("pipx") == []
+    assert not (rig.state / "admin.json").exists()
+    assert not rig.enrolment_file.exists()
+    assert "[10/10] done" not in proc.stdout, "printed next steps for an admin that does not exist"
+    assert_absent(rig, proc, bootstrap, base64.b64encode(bootstrap.encode()).decode())
+
+
+def test_a_rerun_without_stop_before_admin_creates_the_declared_admin_once(rig: Rig) -> None:
+    bootstrap, enrolment = new_secrets()
+    rig.rules = full_rules(bootstrap, enrolment) + rig.rules
+    stopped = rig.main("--stop-before-admin")
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    declared = minted(rig)
+
+    rig.reset_calls()
+    resumed = rig.main()
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert STOP_MESSAGE not in resumed.stdout
+    assert [json.loads(c["data"])["user_id"] for c in bootstrap_curls(rig, "create-user")] == [declared]
+    assert len(bootstrap_curls(rig, "issue-enrolment")) == 1
+    assert admin_record(rig)["user_id"] == f"yadgar:user:{declared}"
+    assert rig.enrolment_file.read_text().strip() == enrolment
+    assert minted(rig) == declared, "the rerun minted a second administrator"
+    # The resume re-does no finished work: no cluster created, nothing applied again.
+    assert not [c for c in rig.calls("kind") if "create" in c["argv"]]
+    assert not [c for c in rig.calls("kubectl") if "apply" in c["argv"]]
+    assert "[10/10] done" in resumed.stdout
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--stop-before-admin", "--add-user", "dave"),
+        ("--add-user", "dave", "--stop-before-admin"),
+        ("--stop-before-admin", "--reissue-admin-enrolment"),
+        ("--stop-before-admin", "--reissue-admin-enrolment", "--revoke-existing"),
+        ("--stop-before-admin", "--with-client"),
+    ],
+    ids=["add_user", "add_user_first", "reissue", "reissue_revoke", "with_client"],
+)
+def test_stop_before_admin_refuses_a_flag_that_acts_on_the_admin(rig: Rig, args: tuple[str, ...]) -> None:
+    proc = rig.main(*args)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--stop-before-admin" in proc.stderr
+    assert "unknown argument" not in proc.stderr, "refused as unknown, not for the combination"
+    assert rig.calls() == [], "acted before refusing the arguments"
+
+
+def test_stop_before_admin_is_in_the_help(rig: Rig) -> None:
+    proc = rig.main("--help")
+    assert proc.returncode == 0, proc.stderr
+    assert "--stop-before-admin" in proc.stdout
+
+
+def test_stop_before_admin_survives_the_root_reexec(rig: Rig) -> None:
+    stub = 'reexec_with_clean_environment() { shift; echo "REEXEC $*"; exit 77; }'
+    proc = as_root(rig, f"{stub}; main --stop-before-admin", root=True)
+    assert proc.returncode == 77, proc.stdout + proc.stderr
+    assert "REEXEC --stop-before-admin" in proc.stdout
+
+
 def test_an_existing_cluster_without_the_edge_mapping_is_refused(rig: Rig) -> None:
     bootstrap, enrolment = new_secrets()
     rig.rules = [
