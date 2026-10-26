@@ -159,14 +159,27 @@ spec:
         # synced, see the `allowMassArchive` note in `../values.yaml`.
         seeder:
           registry:
+            # THE SAME PLACEHOLDER `teams` AS `../application.yaml`, because the
+            # seeder refuses a declaration without them. `bootstrap/kind-up.sh`
+            # never edits this file: it renders a per-install copy in which
+            # `administrators` holds the uuid it mints, and the root's
+            # `administrators` grant and `allowMassRevoke` are set again.
+            teams:
+              - name: administrators
+                members:
+                  - REPLACE-WITH-A-UUIDV7-YOU-MINT
             roots:
               - path: acme
                 sourceRepo: acme/gitops
+                grants:
+                  - team: administrators
+                    level: readWrite
             projects:
               - path: acme/web
                 displayName: web
                 sourceRepo: acme/web
             allowMassArchive: false
+            allowMassRevoke: false
         platform:
           gatewayListener:
             envoyProxy:

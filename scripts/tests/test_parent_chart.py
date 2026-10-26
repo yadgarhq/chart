@@ -6661,14 +6661,15 @@ def seeder_registries_by_source() -> dict[str, object]:
 
 
 # WHO DECLARES `teams`, AND WITH WHICH `administrators` MEMBER (team access stage
-# 9b item 6). The two adopter examples carry the placeholder an adopter replaces;
-# the ci file carries a fixed test uuid; the kind example carries no `teams` at
-# all, because `bootstrap/kind-up.sh` renders them per install with the uuid it
-# mints (stage 9b item 3) and never edits the committed file.
+# 9b item 6). The two adopter examples and the kind example carry the placeholder
+# an adopter replaces; the ci file carries a fixed test uuid. `bootstrap/kind-up.sh`
+# replaces the kind example's placeholder per install with the uuid it mints
+# (stage 9b item 3) and never edits the committed file.
 KIND_EXAMPLE = "example/kind/application.yaml"
 ADMINISTRATORS_BY_SOURCE = {
     "example/values.yaml": [PLACEHOLDER_ADMINISTRATOR],
     "example/application.yaml": [PLACEHOLDER_ADMINISTRATOR],
+    KIND_EXAMPLE: [PLACEHOLDER_ADMINISTRATOR],
     "chart/ci/values.yaml": [CI_ADMINISTRATOR],
 }
 TEAM_KEYS = ("teams", "allowMassRevoke")
@@ -6712,16 +6713,15 @@ def registry_disagreements(registries: dict[str, object]) -> list[str]:
 
     1. Every source states the same registry once `teams`, `allowMassRevoke` and
        the rows' `grants` are set aside.
-    2. Every source but the kind example states the same `teams`, grants and
-       `allowMassRevoke` too, `administrators` members aside.
+    2. Every source states the same `teams`, grants and `allowMassRevoke` too,
+       `administrators` members aside.
     3. Each of those states exactly its `ADMINISTRATORS_BY_SOURCE` members.
-    4. The kind example states no `teams`, `allowMassRevoke` or `grants`.
     """
     failures = [f"`{name}` states no `seeder.registry`" for name, value in registries.items() if value is _ABSENT]
     stated = {name: value for name, value in registries.items() if value is not _ABSENT}
     if len({json.dumps(without_teams(value), sort_keys=True) for value in stated.values()}) > 1:
         failures.append(f"the sources state different registries: {stated}")
-    declaring = {name: value for name, value in stated.items() if name != KIND_EXAMPLE}
+    declaring = stated
     if len({json.dumps(team_part(value), sort_keys=True) for value in declaring.values()}) > 1:
         failures.append(f"the sources state different teams or grants: {declaring}")
     for name, value in declaring.items():
@@ -6731,11 +6731,6 @@ def registry_disagreements(registries: dict[str, object]) -> list[str]:
             failures.append(
                 f"`{name}` declares `administrators` members {'none' if members is _ABSENT else members}, not {expected}"
             )
-    kind = stated.get(KIND_EXAMPLE)
-    if kind is not None and without_teams(kind) != kind:
-        failures.append(
-            f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"
-        )
     return failures
 
 
@@ -6757,11 +6752,10 @@ def test_the_seeder_registry_agrees_across_every_adopter_source() -> None:
     so this gate compares the declarations themselves.
 
     AMENDED FOR TEAM ACCESS STAGE 9b ITEM 6. `teams` differs by source on
-    purpose: the placeholder administrator in the two adopter examples, a fixed
-    test uuid in the ci file, none in the kind example (`registry_disagreements`
+    purpose: the placeholder administrator in the two adopter examples and the
+    kind example, a fixed test uuid in the ci file (`registry_disagreements`
     says which part each must agree on). Stage 12's tightened seeder refuses a
-    declaration without `teams`, so every source but the kind example must carry
-    them before that pin.
+    declaration without `teams`, so every source must carry them before that pin.
     """
     assert registry_disagreements(seeder_registries_by_source()) == []
 
@@ -6798,12 +6792,19 @@ def test_a_source_that_drops_or_changes_its_teams_reddens_the_agreement_gate() -
     failures = registry_disagreements(dict(registries, **{"example/values.yaml": revoking}))
     assert len(failures) == 1 and "different teams or grants" in failures[0], failures
 
-    kind = copied(registries["chart/ci/values.yaml"])
+    kind = copied(registries[KIND_EXAMPLE])
+    kind["teams"][0]["members"] = [CI_ADMINISTRATOR]
     failures = registry_disagreements(dict(registries, **{KIND_EXAMPLE: kind}))
-    assert failures == [f"`{KIND_EXAMPLE}` states teams or grants; `bootstrap/kind-up.sh` renders them per install"], failures
+    assert failures == [
+        f"`{KIND_EXAMPLE}` declares `administrators` members {[CI_ADMINISTRATOR]}, not {[PLACEHOLDER_ADMINISTRATOR]}"
+    ], failures
+
+    no_kind_teams = without_teams(registries[KIND_EXAMPLE])
+    failures = registry_disagreements(dict(registries, **{KIND_EXAMPLE: no_kind_teams}))
+    assert any("different teams or grants" in f for f in failures), failures
 
 
-@pytest.mark.parametrize("name", ["example/values.yaml", "example/application.yaml"])
+@pytest.mark.parametrize("name", ["example/values.yaml", "example/application.yaml", KIND_EXAMPLE])
 def test_the_committed_adopter_examples_refuse_their_placeholder_administrator(tmp_path: Path, name: str) -> None:
     """STAGE 9b ITEM 6: "the render check refuses the documented placeholder value".
     The committed file, NOT the replaced copy every other render uses, is refused
@@ -7864,17 +7865,19 @@ def render_values(tmp_path: Path, name: str, values: dict) -> subprocess.Complet
     return helm("template", "yadgar", str(CHART), *API_VERSIONS, "-f", str(source))
 
 
-def test_red_01_a_parent_values_file_with_grants_and_no_teams_is_refused(tmp_path: Path) -> None:
-    """THE TRANSITION RULE THROUGH THE PARENT: a grant names a declared team.
+def test_red_01_a_parent_values_file_with_no_teams_is_refused(tmp_path: Path) -> None:
+    """A DECLARATION WITHOUT `teams` IS REFUSED THROUGH THE PARENT.
 
     The example declares `teams` since stage 9b item 6, so the red case removes
-    it and keeps the root's `administrators` grant."""
+    it and keeps the root's `administrators` grant. Seeder 0.2.2 refuses the
+    grant with no team (the transition rule); seeder#11 refuses the missing
+    teams outright. Both messages hold `registry.teams is absent or empty`."""
     values = example_with_registry()
     del values["seeder"]["registry"]["teams"]
     assert values["seeder"]["registry"]["roots"][0]["grants"] == [ADMIN_READ_WRITE]
     result = render_values(tmp_path, "grants-no-teams", values)
     assert result.returncode != 0, "a grant with no `teams` rendered"
-    assert "grants" in result.stderr and "teams" in result.stderr, result.stderr
+    assert "registry.teams is absent or empty" in result.stderr, result.stderr
 
 
 def test_the_parent_defaults_the_seeders_iam_authority_to_iam_tls() -> None:
