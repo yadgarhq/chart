@@ -1261,7 +1261,8 @@ def test_red_04_the_rendered_application_declares_the_uuid_and_the_example_is_un
     roots = values["seeder"]["registry"]["roots"]
     assert roots, "the example declares no root"
     for root in roots:
-        assert {"team": "administrators", "level": "readWrite"} in root["grants"], root
+        assert root["grants"] == [{"team": "administrators", "level": "readWrite"}], root
+    assert "REPLACE-WITH" not in (rig.state / "application.yaml").read_text()
     # `iam.adminFromTeam` renders IAM_ADMIN_FROM_TEAM=true (team access stage 3, iam#118).
     assert values["iam"]["adminFromTeam"] is True
     # The two keys the stage 6 seeder chart requires once teams are declared (seeder#8).
