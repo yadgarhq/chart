@@ -69,16 +69,16 @@ dependencies:
     version: 0.15.1
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
-    version: 0.17.4
+    version: 0.17.5
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
-    version: 0.15.4
+    version: 0.15.5
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.5.5
+    version: 0.5.6
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.7
+    version: 0.10.8
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.8.3
@@ -95,7 +95,7 @@ dependencies:
   # `yadgarhq/argocd`, stage 7); the parent's own fixtures declare a
   # placeholder (`chart/ci/values.yaml`, `example/`).
   - name: seeder
-    version: 0.3.0
+    version: 0.3.1
     repository: oci://ghcr.io/yadgarhq/charts
   # THE PLATFORM LAYER, AND IT IS THE ONE DEPENDENCY WITH A `condition`. Every
   # module above is part of what an adopter installs when they install yadgar.
