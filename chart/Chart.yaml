@@ -63,7 +63,7 @@ sources:
 # written for a chart missing from this block is what `parent_bump.py` refuses.
 dependencies:
   - name: config
-    version: 0.2.3
+    version: 0.2.4
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
     version: 0.15.1
