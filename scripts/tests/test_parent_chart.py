@@ -83,6 +83,7 @@ import shutil
 import atexit
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -5349,6 +5350,84 @@ def test_k2_every_declared_group_is_required_by_the_defaults() -> None:
             dropped,
             result.stderr,
         )
+
+
+REQUIRE_API_DEFINE = re.compile(r'\{\{-?\s*define\s+"([^"]+\.require-api)"')
+
+
+def declared_require_api_names() -> list[tuple[str, str]]:
+    """Every `*.require-api` template the vendored subcharts declare, as (name, where).
+
+    Read out of the `.tgz` files `helm dependency update` put under `chart/charts/`,
+    so a new subchart's partial is counted without anyone editing this list. A
+    subchart of a subchart is counted too: helm template names are global across the
+    whole tree.
+    """
+    found: list[tuple[str, str]] = []
+    for archive in sorted((CHART / "charts").glob("*.tgz")):
+        with tarfile.open(archive) as bundle:
+            for member in bundle.getmembers():
+                if not member.isfile() or not member.name.endswith((".tpl", ".yaml")):
+                    continue
+                text = bundle.extractfile(member).read().decode()
+                for name in REQUIRE_API_DEFINE.findall(text):
+                    found.append((name, f"{archive.name}:{member.name}"))
+    return found
+
+
+def duplicated_names(declared: list[tuple[str, str]]) -> dict[str, list[str]]:
+    places: dict[str, list[str]] = collections.defaultdict(list)
+    for name, where in declared:
+        places[name].append(where)
+    return {name: where for name, where in places.items() if len(where) > 1}
+
+
+@pytest.mark.parametrize("module", ["task-db", "iam-db", "project-db"])
+def test_one_modules_create_toggle_aborts_the_whole_parent_render_and_names_the_module(
+    module: str, tmp_path: Path
+) -> None:
+    """yaadgaar #386. ABORTING THE WHOLE PARENT RENDER IS DELIBERATE, and this is its proof.
+
+    Helm's `fail` ends the entire render, not the subchart that raised it. With every
+    `enabled` and `create` off, a bare baseline renders; turning on ONE module's
+    `database.create` with no `--api-versions` then renders NOTHING, for all nine
+    subcharts. A `-db` suite cannot see this: standalone, that chart IS the whole
+    render. What the adopter needs is to learn WHICH of nine subcharts asked for what,
+    so the refusal must name the module and the operator API.
+    """
+    off, _, _ = all_off()
+    values = tmp_path / "all-off.yaml"
+    values.write_text(yaml.safe_dump(off))
+    baseline = helm("template", "yadgar", str(CHART), "-f", str(EXPLICIT_TLS), "-f", str(values))
+    assert baseline.returncode == 0, baseline.stderr
+
+    result = helm(
+        "template", "yadgar", str(CHART), "-f", str(EXPLICIT_TLS), "-f", str(values),
+        "--set", f"{module}.database.create=true",
+    )
+    assert result.returncode != 0, f"{module}.database.create=true rendered with no --api-versions"
+    assert result.stdout.strip() == "", "a refused render emitted manifests"
+    assert THE_RENDER_CHECK_REFUSAL in result.stderr, result.stderr
+    assert f"{module}: this render needs the API k8s.mariadb.com/v1alpha1" in result.stderr, result.stderr
+    assert "mariadb-operator" in result.stderr, result.stderr
+
+
+def test_every_require_api_template_name_is_distinct_across_the_tree() -> None:
+    """yaadgaar #386. Helm template names are GLOBAL across a chart tree.
+
+    Two subcharts defining the same name render ONE body for BOTH callers, exit 0,
+    no warning. Each chart therefore prefixes its partial with its own name. Which
+    definition wins is deliberately not asserted.
+    """
+    declared = declared_require_api_names()
+    assert len(declared) >= 8, declared
+    assert duplicated_names(declared) == {}, duplicated_names(declared)
+
+
+def test_a_repeated_require_api_name_reddens_the_distinctness_gate() -> None:
+    declared = declared_require_api_names()
+    clash = declared + [(declared[0][0], "charts/another.tgz:templates/_require_api.tpl")]
+    assert set(duplicated_names(clash)) == {declared[0][0]}
 
 
 def test_the_default_edge_leaf_is_issued_by_the_internal_ca() -> None:
