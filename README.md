@@ -259,6 +259,17 @@ whose operators predate platform 0.1.21 fails its next sync on the probe. Sync
 `example/operators-application.yaml` at platform 0.1.21 or later first, then the
 estate; or set `platform.preflight.probes.prometheus` false.
 
+## A refused render stops the whole render
+
+Helm's `fail` ends the entire render, not only the subchart that raised it. Turn on
+one module's `database.create` (or any toggle that needs an operator) on a cluster
+that lacks the operator, and `helm template` or the sync emits no manifest for any
+subchart. This is deliberate: a partial estate is worse than none. Each refusal
+names its module and the API it needs, so you can tell which subchart asked for
+what. Helm template names are global across the tree, so each subchart that ships a
+`require-api` partial prefixes it with its own name; the suite asserts they stay
+distinct.
+
 ## The subcharts are resolved at release time, not committed
 
 `ci-release.yaml`'s `chart` job in `yadgarhq/actions` runs
@@ -313,6 +324,8 @@ suite needs the registry reachable rather than running offline.
 | the parent renders nothing of its own                  | an empty render with every subchart removed                                                                                                                                                                                               |
 | a default install is the whole estate (K1)             | the defaults, with `chart/ci/values.yaml`'s twelve switches and eight NATS/valkey keys riding along, render the adopter values' 89-object set; every example leaf equals its default                                                      |
 | the defaults refuse offline without the operators (K2) | a bare render refuses; dropping any one of the four declared API versions refuses, naming it                                                                                                                                              |
+| one module's `create` toggle refuses the whole render  | with every toggle off, `<db>.database.create=true` and no `--api-versions` renders nothing and the refusal names the module and `k8s.mariadb.com/v1alpha1` (yaadgaar #386)                                                                |
+| the `*.require-api` template names are distinct        | read off the vendored subcharts, no name is declared twice, because helm template names are global across the tree (yaadgaar #386)                                                                                                        |
 | the modules alone are 35 objects                       | 4 ConfigMap, 7 Deployment, 1 Job, 7 Service, 8 ServiceAccount, 7 PodDisruptionBudget, 1 HTTPRoute                                                                                                                                         |
 | the PACKAGED chart renders what the directory renders  | the same `(apiVersion, kind, name)` set from `helm package`'s output as from `chart/`                                                                                                                                                     |
 | the package is self-contained                          | `yadgar/charts/<module>/Chart.yaml` present inside the `.tgz` for all eight                                                                                                                                                               |
