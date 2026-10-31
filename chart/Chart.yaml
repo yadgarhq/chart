@@ -78,7 +78,7 @@ dependencies:
     version: 0.5.12
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.14
+    version: 0.10.15
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
     version: 0.8.13
