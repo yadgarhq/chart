@@ -66,25 +66,25 @@ dependencies:
     version: 0.2.6
     repository: oci://ghcr.io/yadgarhq/charts
   - name: gateway
-    version: 0.15.9
+    version: 0.15.10
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam
-    version: 0.17.10
+    version: 0.17.11
     repository: oci://ghcr.io/yadgarhq/charts
   - name: iam-db
     version: 0.15.13
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project
-    version: 0.5.11
+    version: 0.5.12
     repository: oci://ghcr.io/yadgarhq/charts
   - name: project-db
-    version: 0.10.14
+    version: 0.10.15
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task
-    version: 0.8.12
+    version: 0.8.13
     repository: oci://ghcr.io/yadgarhq/charts
   - name: task-db
-    version: 0.11.16
+    version: 0.11.17
     repository: oci://ghcr.io/yadgarhq/charts
   # THE D35 SEEDER (plans/the-d35-seeder.md stage 6), A MODULE AND SO WITH NO
   # `condition`: a toggle would be a tenth `enabled` key for D80's all-off pass
