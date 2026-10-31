@@ -4461,14 +4461,19 @@ THE_PRESENT_NIL_ARM = '{{- else if hasKey $block "create" -}}'
 THE_PRESENT_NIL_ARM_OFF = '{{- else if not (kindIs "invalid" $block.create) -}}'
 
 
-def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
+def test_excluding_a_nil_create_lets_the_broker_in_with_its_policy(tmp_path: Path) -> None:
     """THE `nats.create: null` ROW'S RED CASE, and it renders exit 0 with a broker.
 
     Put the `invalid` exclusion back and `platform.nats.create:` with no value
     renders at exit 0: helm resolved `condition: nats.create` against a value it
     could not read and left the dependency ENABLED, while this clause read the same
-    value as false. The broker goes in and `platform`'s own `nats-ingress`
-    NetworkPolicy — which reads the value the same way this clause did — does not.
+    value as false. The broker goes in, and since `platform` 0.2.17
+    (yadgarhq/platform#62, task 359, ADR-0873) `platform`'s own `nats-ingress`
+    NetworkPolicy goes in WITH it: that policy renders unless `nats.create` is the
+    bool false, the same resolution helm applies to the dependency. Before #62 the
+    policy was guarded on truthiness and a nil left the broker with nothing in front
+    of it; this test held `"nats-ingress" not in policies` for that harm and went
+    red on the pin that fixed it.
 
     THE COUNT IS AN INEQUALITY against the render that asks for nothing, for the
     reason every count in this file is: the property is that the broker ARRIVED,
@@ -4537,9 +4542,10 @@ def test_excluding_a_nil_create_lets_the_broker_in(tmp_path: Path) -> None:
         for document in yaml.safe_load_all(nulled.stdout)
         if isinstance(document, dict) and document.get("kind") == "NetworkPolicy"
     ]
-    assert "nats-ingress" not in policies, (
-        f"the nats-ingress NetworkPolicy rendered, so the harm is not the one "
-        f"described: {sorted(name for name in policies if name)}"
+    assert "nats-ingress" in policies, (
+        f"the broker rendered with a nil `nats.create` but its `nats-ingress` "
+        f"NetworkPolicy did not, so 4222/8222 are open (platform#62 regressed): "
+        f"{sorted(name for name in policies if name)}"
     )
 
 
