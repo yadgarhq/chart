@@ -104,8 +104,8 @@ the point: the install does not half-happen.
 
 {{/*
 ADR-0787, AND THE ONE REFUSAL IN THIS FILE THAT SITS OUTSIDE THE `$creating`
-GUARD. ADR-0787 rules that `platform` MAY install the five third-party operators
-— cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD — cluster-wide
+GUARD. ADR-0787 rules that `platform` MAY install the third-party operators
+— cert-manager, KEDA, mariadb-operator, Envoy Gateway, Argo CD and Prometheus — cluster-wide
 behind `operators.create`, DEFAULT FALSE, in a release of its own. It is not a
 path this parent chart offers, and this clause is what says so at render time
 instead of letting an adopter find out half-way through an apply.
@@ -150,18 +150,26 @@ render that aborts either way. The refusals are accumulated, so this one is in t
 same message.
 
 THE OPERATOR BLOCKS ARE RANGED OVER, NEVER ENUMERATED, for the reason the
-`$creating` block below gives: a literal list goes stale in silence the day a sixth
-operator arrives. Ranging also means the message names the key the ADOPTER wrote,
-so it cannot name a key that does not exist.
+`$creating` block below gives: a literal list goes stale in silence the day `platform`
+adds an operator. Ranging also means the message names the key the ADOPTER wrote,
+so it cannot name a key that does not exist. ONE NAME IS EXCLUDED, `create`, and
+it is not an operator: it is the register key that sits in the same block. A
+present entry other than `create` that is not a mapping is refused by name
+(yaadgaar #334), because `platform` skips such an entry in silence and the
+register key then decides, so `certManager: true` with `create: false` installs
+nothing and tells nobody.
 
-THE FIVE NAMES ARE `certManager`, `keda`, `mariadbOperator`, `envoyGateway` and
-`argoCd`, VERIFIED AGAINST `yadgarhq/platform` AT `origin/feat/operators-toggle-step1`
-AND NOT AGAINST THE PIN. `platform` 0.1.8 — the version `Chart.yaml` pins today —
-carries no `operators` key at all, so no gate here can read those names off the
-vendored tarball the way `test_the_minted_iam_keys_name_is_the_literal_this_refusal_assumes`
-reads the minted Secret name. A gate that tried would be red today. The names are
-carried by the TEST rather than by this template, which ranges: the assertion
-therefore reads `platform`'s list and not a copy of this file's.
+THE SIX NAMES ARE `certManager`, `keda`, `mariadbOperator`, `envoyGateway`, `argoCd`
+and `prometheus` (`prometheus` joined the other five at `platform` 0.1.21), AND THEY
+ARE READ OFF THE PIN. `platform` 0.2.18 — the version `Chart.yaml` pins today —
+declares one `condition: operators.<name>.create,operators.create` per operator in
+its own `Chart.yaml`, and `test_the_operator_sub_keys_are_the_ones_the_pinned_platform_declares`
+reads that set off the vendored tarball and holds `THE_OPERATOR_SUB_KEYS` equal to
+it. Its `values.yaml` declares `operators.create: false` and NO per-operator block,
+so an adopter's `platform.operators.certManager: null` is not deleted the way the
+null arm below describes: it reaches this range, and `invalid` is reported as `null`.
+The names are carried by the TEST rather than by this template, which ranges: the
+assertion therefore reads `platform`'s list and not a copy of this file's.
 
 A PRESENT NON-MAP `platform.operators` IS REFUSED RATHER THAN READ, and the type
 is tested on the RAW value because testing it after a `default` covers only half
@@ -213,9 +221,9 @@ IT IS A REAL TYPO RATHER THAN A HYPOTHETICAL, and refusing it is not the same
 choice the `$creating` block below makes. That block SKIPS a non-map, which is
 right there: it is looking for blocks and a scalar is simply not one. Here the key
 itself is the thing the parent does not offer, so a scalar under that name is an
-adopter asking for the operators path in a shape no key can be read out of — and
-what `platform` would do with a bool where it expects a mapping is NOT measurable
-from here, because `platform` 0.1.8 has no `operators` key at all. The refusal
+adopter asking for the operators path in a shape no key can be read out of. What
+`platform` does with a bool where it expects a mapping is `platform`'s to say, and
+0.2.18 says it by name in its own `templates/render-checks.yaml`. The refusal here
 says what is wrong and claims nothing about that.
 */}}
 {{- $operatorKeys := list -}}
@@ -234,7 +242,7 @@ says what is wrong and claims nothing about that.
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.operators is a %s rather than a mapping, so no operators key can be read out of it. "
       "This parent chart offers no operators path at all: ADR-0787 rules that `platform` installs "
-      "cert-manager, KEDA, mariadb-operator, Envoy Gateway and Argo CD behind operators.create, "
+      "cert-manager, KEDA, mariadb-operator, Envoy Gateway, Argo CD and Prometheus behind operators.create, "
       "default false, in a release of its own. Remove platform.operators from this values file."))
       $operatorsShape) -}}
 {{- else -}}
@@ -258,6 +266,17 @@ says what is wrong and claims nothing about that.
       "false unquoted, or remove the key."))
       $name (kindOf $block.create)) -}}
 {{- end -}}
+{{- else if ne $name "create" -}}
+{{- $blockShape := kindOf $block -}}
+{{- if eq $blockShape "invalid" -}}
+{{- $blockShape = "null" -}}
+{{- end -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "platform.operators.%s is a %s rather than a mapping, so no create key can be read out of it. "
+      "Write platform.operators.%s as a mapping with a create key, or remove it. `create` alone is "
+      "the register key and is not an operator block; every other entry under platform.operators "
+      "is one, and `platform` skips a block that is not a mapping without a word."))
+      $name $blockShape $name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -266,7 +285,7 @@ says what is wrong and claims nothing about that.
 {{- $refusals = append $refusals (printf (join "" (list
       "%s asks this parent chart to install third-party operators, and the parent offers no such "
       "path. ADR-0787 rules that `platform` MAY install cert-manager, KEDA, mariadb-operator, Envoy "
-      "Gateway and Argo CD cluster-wide behind operators.create, default false, in a RELEASE OF ITS "
+      "Gateway, Argo CD and Prometheus cluster-wide behind operators.create, default false, in a RELEASE OF ITS "
       "OWN installed before this one. One release cannot do both: an operator's CRDs and the objects "
       "that need them land in a single apply, so the objects are applied against definitions that do "
       "not exist yet and the install fails half-way. Set %s false here, and install the operators "
@@ -1290,6 +1309,52 @@ There is no comparison with the gateway's bound: Max ruled a value above it.
       $clientIdle $headers) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+THE CALLER'S REQUEST TIMEOUT MUST EXCEED ITS DATABASE MODULE'S POOL WAIT (yaadgaar
+#343, ADR-1006, ADR-1019). `task`, `project` and `iam` each dial their `-db` module
+over `yadgar-dial` with `<dial>.requestTimeoutSeconds`, a value in the CALLER's
+chart. The `-db` module bounds its pool wait with
+`database.acquireTimeoutSeconds`, a value in ITS chart, and cannot read the
+caller's. The timeout chain shrinks inward, each hop strictly below its caller. An
+acquire wait equal to or longer than the request timeout can never surface as the
+pool's own error: the caller's timeout always lands first, one hop further from
+the cause. Only the parent sees both charts' values, so only the parent can hold
+the relation.
+
+THE `-db` SCHEMAS BOUND THE TWO TODAY (acquire at most 13, request at least 14),
+SO AT THE PINNED CHARTS NO VALUES FILE CAN REACH THIS REFUSAL: the schema refuses
+first, in its own words. This clause is the net under that bound. It is the check
+that stays true the day a child chart widens either bound, which a schema in a
+chart that cannot see the other chart cannot promise. The tests reach it by
+loosening a COPY of the vendored `-db` schema.
+
+READ OFF `.Subcharts`, so the child's own defaults count, and SKIPPED when either
+chart is not a key of `.Subcharts` or either value is not a number: the child's
+schema and render checks own the type, and a refusal here must never be the first
+word on a shape they would name better. EQUAL IS REFUSED. Compared as numbers,
+never as strings.
+*/}}
+{{- range $pair := list (list "task" "taskDb" "task-db") (list "project" "projectDb" "project-db") (list "iam" "iamDb" "iam-db") -}}
+{{- $caller := index $pair 0 -}}
+{{- $dial := index $pair 1 -}}
+{{- $database := index $pair 2 -}}
+{{- if and (hasKey $.Subcharts $caller) (hasKey $.Subcharts $database) -}}
+{{- $request := (default dict (index (default dict (default dict (index $.Subcharts $caller)).Values) $dial)).requestTimeoutSeconds -}}
+{{- $acquire := (default dict (default dict (default dict (index $.Subcharts $database)).Values).database).acquireTimeoutSeconds -}}
+{{- $requestIsNumber := or (kindIs "float64" $request) (kindIs "int64" $request) (kindIs "int" $request) -}}
+{{- $acquireIsNumber := or (kindIs "float64" $acquire) (kindIs "int64" $acquire) (kindIs "int" $acquire) -}}
+{{- if and $requestIsNumber $acquireIsNumber (ge (float64 $acquire) (float64 $request)) -}}
+{{- $refusals = append $refusals (printf (join "" (list
+      "%s.database.acquireTimeoutSeconds is %v and %s.%s.requestTimeoutSeconds is %v. The pool "
+      "wait must be strictly below the request timeout of the module that calls it, or the "
+      "caller's timeout always fires first and the pool's own error can never surface "
+      "(ADR-1006). Lower %s.database.acquireTimeoutSeconds, or raise "
+      "%s.%s.requestTimeoutSeconds."))
+      $database $acquire $caller $dial $request $database $caller $dial) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

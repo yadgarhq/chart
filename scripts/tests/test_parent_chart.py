@@ -5896,6 +5896,50 @@ def test_a_pre_0808_pin_reddens_the_derivation(pre_0808: Path, tmp_path: Path) -
     assert sites == built_in_sites(), sites
 
 
+def without_hostname_keys(values_object: dict) -> dict:
+    """A copy of `values_object` with `global.hostname` and the five per-site keys removed. PURE."""
+    copy = yaml.safe_load(yaml.safe_dump(values_object))
+    for path in (HOSTNAME_KEY, *HOSTNAME_KEYS):
+        *parents, leaf = path.split(".")
+        node = copy
+        for step in parents:
+            node = node.get(step) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict):
+            node.pop(leaf, None)
+    for path in (HOSTNAME_KEY, *HOSTNAME_KEYS):
+        assert value_at(copy, path) is _ABSENT, path
+    return copy
+
+
+def test_the_current_pin_renders_each_sites_own_built_in(pinned: Path, tmp_path: Path) -> None:
+    """With no hostname stated anywhere, the CURRENT pin keeps each site's own built-in (ADR-0808, yaadgaar #363).
+
+    `test_a_pre_0808_pin_reddens_the_derivation` checks this on the OLD pin only, so
+    nothing proved that today's children still fall back per site. PER-SITE, never a
+    substring: `iam`'s built-in carries a port the other four do not (ledger 1153).
+    """
+    values_object = without_hostname_keys(example_source()["helm"]["valuesObject"])
+    (tmp_path / "render").mkdir()
+    result = example_render(pinned, values_object, tmp_path / "render")
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    assert hostname_sites(documents) == built_in_sites()
+
+
+def test_stating_a_hostname_moves_every_site_off_its_built_in(pinned: Path, tmp_path: Path) -> None:
+    """THE CONSTRUCTED RED for the test above: the comparison can fail at every site."""
+    values_object = without_hostname_keys(example_source()["helm"]["valuesObject"])
+    values_object.setdefault("global", {})["hostname"] = "example.test"
+    (tmp_path / "render").mkdir()
+    result = example_render(pinned, values_object, tmp_path / "render")
+    assert result.returncode == 0, result.stderr
+    documents = [d for d in yaml.safe_load_all(result.stdout) if isinstance(d, dict) and d.get("apiVersion")]
+    sites = hostname_sites(documents)
+    assert all(sites[key] != built_in_sites()[key] for key in HOSTNAME_KEYS), sites
+
+
 def test_every_example_key_is_one_a_chart_declares(pinned: Path) -> None:
     assert unrecognised_keys(example_source()["helm"]["valuesObject"], pinned) == []
 
@@ -6030,9 +6074,11 @@ ARGO_CD_PART_OF = "argocd"
 # THE ENTRY NO PARENT EXAMPLE MAY CARRY (ledger 1266, ADR-0803 proposal (c)). It
 # was added on the claim that mariadb-operator writes `generate` back onto the
 # spec, so Argo and the operator revert each other. Measured read-only on kind
-# 2026-10-02, operator v26.6.0, 27 days of live CRs: live equals desired at both
-# pointers on all three CRs, `argocd-controller` is the only manager of both refs,
-# and the operator's `SetDefaults` writes them only when they are zero-valued
+# 2026-10-02, operator v26.6.0: live equals desired at both pointers on all
+# three CRs, and `argocd-controller` is the only manager of both refs, so the
+# operator never wrote them. THAT, NOT THE CRs' AGE, IS THE EVIDENCE: while the
+# entry existed Argo re-applied the ignored fields on every sync, so age proves
+# nothing. The operator's `SetDefaults` writes them only when they are zero-valued
 # (`api/v1alpha1/mariadb_types.go:959,970`) — every `-db` chart renders both with
 # an explicit name and `generate: true`. An entry that masks nothing hides a real
 # divergence the day one appears, so its return is refused, not tolerated.
@@ -7657,6 +7703,23 @@ def test_the_kind_example_without_its_registry_refuses_to_render(pinned: Path, t
     result = example_render(pinned, values_object, destination)
     assert result.returncode != 0, "the kind example rendered with no `seeder.registry`"
     assert any(message in result.stderr for message in REGISTRY_REQUIRED), result.stderr
+
+
+def test_a_render_without_the_seeder_job_reddens_the_seeding_gate() -> None:
+    """THE JOB BRANCH: a registry ConfigMap with no Job `seeder` leaves nothing writing it. PURE."""
+    declaration = {"roots": [{"path": "acme"}], "projects": [{"path": "acme/web"}]}
+    documents = [
+        {"kind": "ConfigMap", "metadata": {"name": "seeder-registry"}, "data": {"registry.json": json.dumps(declaration)}},
+    ]
+    assert kind_seeding_failures(documents) == ["the render holds no Job `seeder`, so nothing writes the registry"]
+
+
+def test_a_render_without_the_registry_configmap_reddens_the_seeding_gate() -> None:
+    """THE CONFIGMAP BRANCH: a Job `seeder` with no ConfigMap `seeder-registry` has no declaration. PURE."""
+    documents = [{"kind": "Job", "metadata": {"name": "seeder"}}]
+    assert kind_seeding_failures(documents) == [
+        "the render holds no ConfigMap `seeder-registry`, so the Job has no declaration"
+    ]
 
 
 @pytest.mark.parametrize("key", ["roots", "projects"])
