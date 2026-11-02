@@ -493,6 +493,30 @@ def test_the_parent_refuses_a_non_mapping_operator_block(
         assert raise_text not in message, message
 
 
+# yaadgaar #532: `create: null` inside an operator block is refused like the null
+# block above. `platform` declares no per-operator block, so helm keeps the nested
+# null; a block with no `create` key at all stays renderable.
+@pytest.mark.parametrize("operator", THE_OPERATOR_SUB_KEYS)
+def test_the_parent_refuses_a_null_create_inside_an_operator_block(tmp_path: Path, operator: str) -> None:
+    body = operators_overlay(f"    create: false\n    {operator}:\n      create: null\n")
+    message = refusal(tmp_path, f"operator-create-null-{operator}", body)
+    assert the_chart_that_refused("operator block", message) == THE_PARENT, message
+    assert f"platform.operators.{operator}.create is a null rather than a boolean" in message, message
+    assert THE_OPERATORS_REFUSAL not in message, message
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in message, message
+
+
+@pytest.mark.parametrize("operator", THE_OPERATOR_SUB_KEYS)
+def test_an_operator_block_without_a_create_key_stays_renderable(tmp_path: Path, operator: str) -> None:
+    body = operators_overlay(f"    create: false\n    {operator}: {{}}\n")
+    result = helm(
+        "template", "yadgar", str(CHART), *API_VERSIONS,
+        "-f", str(ADOPTER_VALUES), "-f", str(overlay(tmp_path / f"empty-{operator}.yaml", body)),
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_the_register_key_is_not_an_operator_block(tmp_path: Path) -> None:
     """`create: false` is a bool in the ranged block and must stay renderable."""
     body = operators_overlay("    create: false\n")
