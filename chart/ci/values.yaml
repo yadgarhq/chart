@@ -9,7 +9,7 @@
 # to fall back on, so a module that later REFUSES an absent `tls.enabled`
 # would redden the bare lint the moment its pin moves here — with nothing in
 # this repository's own diff to explain why. This file is what
-# `.github/workflows/ci.yaml`'s `push_validation` job and
+# `.github/workflows/ci.yaml`'s `tag_validation` job and
 # `test_helm_lint_strict_passes` both pass with `-f`, so the lint always runs
 # against an estate that names every switch, matching what an adopter who
 # reads `example/values.yaml` would actually ship.

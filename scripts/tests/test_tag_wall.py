@@ -34,8 +34,8 @@ reading pytest's own RESOLVED fixture closure rather than this file's source.
 
 EVERY TEST HERE ALSO RUNS IN `scripts/tests/test_parent_chart.py`'s OWN suite —
 there is no second copy: these are the SAME test objects, moved rather than
-duplicated, and `push_validation` (`ci.yaml`) still runs every one of them on
-`main` because it runs the whole `scripts/tests/` directory. Shared helpers
+duplicated, and the whole `scripts/tests/` directory still runs on every pull
+request through `ci / passed`. Shared helpers
 (`refusal`, `the_chart_that_refused`, `operators_overlay`, the `packaged`
 fixture, `parent_examples`, `parent_example_failures`, and the refusal phrases
 and shapes several of these tests are not the only reader of) are IMPORTED from

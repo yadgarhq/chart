@@ -34,11 +34,11 @@ form, or that ADR-0803 decided:
    cannot, and for the real duplicate that stood on `main` for seven commits
    today.
 
-6. THE PUSH PATH TO `main` IS VALIDATED. `.github/workflows/ci.yaml`'s
-   `push_validation` job is the only thing that checks the one commit that ever
-   changes the eight pins, and a workflow edit is exactly the kind of change
-   that reads correct while admitting nothing — so its condition is PARSED and
-   EVALUATED here rather than read.
+6. NO TEST SUITE RUNS ON `main` AFTER A MERGE (ADR-1119). `.github/workflows/ci.yaml`
+   has no job that runs this suite on a push to `main`; the wall for a bad pin
+   is `tag_validation`, which `release` needs. A workflow edit is exactly the
+   kind of change that reads correct while admitting something else — so each
+   job's condition is PARSED and EVALUATED here rather than read.
 
 7. THE PLATFORM LAYER IS WHOLE WHEN IT IS ON AND ABSENT WHEN IT IS OFF.
    `platform` is the ninth dependency and the only one with a `condition`, so
@@ -67,7 +67,7 @@ chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts` with
 `helm package chart -u` — the same command `ci-release.yaml` runs — and needs
 the registry reachable. The directory-only renders (test 1) need no registry, but
 they DO need `helm dependency update chart` to have run in this working tree,
-which is what `ci.yaml`'s `push_validation` job and the `helm lint and render`
+which is what `ci.yaml`'s `tag_validation` job and the `helm lint and render`
 pre-commit hook both do before they run anything.
 
 Run: python3 -m pytest scripts/tests/ -q
@@ -1481,14 +1481,15 @@ def test_the_one_source_gate_refuses_a_duplicate() -> None:
     assert stated_in_more_than_one_configmap(configmap_leaf_paths(siblings)) == []
 
 
-# ----------------------------- 6. the push path to `main` is validated, not assumed
+# ----------------------------- 6. no test suite runs on `main` after a merge
 
 
 WORKFLOW = REPO / ".github" / "workflows" / "ci.yaml"
 
-# The job added because NOTHING validated the one commit that ever changes the
-# eight pins. Named here so a rename arrives as a failure of this test rather
-# than as a push path that quietly stops being checked again.
+# ADR-1119: tests that run after a merge cannot stop a bad merge, so none runs on
+# a push to `main`. The job that used to (`push_validation`) is gone, and this
+# name is kept so that bringing it back arrives as a failure of this test rather
+# than as a quiet reversal of the ruling.
 PUSH_JOB = "push_validation"
 
 
@@ -1501,8 +1502,8 @@ def _admits(condition: str, context: dict[str, str], job: str) -> bool:
     DELIBERATELY NOT A GENERAL EXPRESSION PARSER, and not a port of
     `ci_verdict.py` from `yadgarhq/actions` either — that file is the merge
     gate's verdict over `ci-pr.yaml`'s conditions and has no business being
-    duplicated here. This models the shapes `push_validation` and
-    `tag_validation` actually use: `||`-joined groups of `&&`-joined clauses,
+    duplicated here. This models the shapes the jobs of `ci.yaml`
+    actually use: `||`-joined groups of `&&`-joined clauses,
     each clause either `github.<field> == '<literal>'` or
     `startsWith(github.<field>, '<literal>')`. A condition that grows past
     that shape REFUSES here rather than being approximated, because an
@@ -1550,59 +1551,32 @@ def _admits_every_clause(condition: str, context: dict[str, str], job: str) -> b
     return True
 
 
-def test_the_push_path_job_admits_a_push_to_main() -> None:
-    """MEASURED BY EVALUATION, BECAUSE A WORKFLOW EDIT CAN READ CORRECT AND ADMIT NOTHING.
+def test_no_job_runs_a_test_suite_on_a_push_to_main() -> None:
+    """ADR-1119: NOTHING EXCEPT THE SHARED GATE RUNS ON A PUSH TO `main`.
 
-    On the bot commit `adf30008` ("ci: pin gateway 0.9.49 in the parent chart"),
-    `main / detect`, `precommit`, `template`, `test`, `portability`, `workflows`
-    and `vulnerabilities` all reported `skipped` while `main / passed` reported
-    SUCCESS — correctly, because every one of those jobs' own conditions in
-    `ci-pr.yaml` reads `github.event_name != 'push'`. So the one commit that ever
-    changes the eight pins was checked by nothing. `push_validation` is this
-    repository's own answer to that, and the table below is the proof that its
-    condition admits the event it was written for and refuses the three it was not.
+    `push_validation` ran `helm lint --strict` and this whole suite after every
+    merge. Tests that run after a merge cannot stop it, so the job was removed.
+    What stops a bad release is `tag_validation` (`release` `needs:` it), and
+    what stops a bad merge is `ci / passed` on the pull request.
+
+    The one job that still admits a push to `main` is `main`, the shared
+    `ci-pr.yaml` call that carries the `version` job. It is a `uses:` call and
+    declares no `steps:`, so it runs no test of this repository's own.
     """
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    assert PUSH_JOB in jobs, (
-        f"`{PUSH_JOB}` is not a job in {WORKFLOW.name}. It is the only thing that "
-        f"validates a push to `main`; ADR-0722's `parent_bump.py` writes the pins "
-        f"straight to `main` over the Contents API."
+    assert PUSH_JOB not in jobs, (
+        f"`{PUSH_JOB}` is back in {WORKFLOW.name}. ADR-1119 ruled that no test "
+        f"suite runs on `main` after a merge."
     )
-    job = jobs[PUSH_JOB]
-    condition = str(job["if"])
-
-    cases = [
-        ({"github.event_name": "push", "github.ref": "refs/heads/main"}, True),
-        ({"github.event_name": "pull_request", "github.ref": "refs/heads/main"}, False),
-        ({"github.event_name": "push", "github.ref": "refs/heads/some-branch"}, False),
-        ({"github.event_name": "push", "github.ref": "refs/tags/v0.1.0"}, False),
-    ]
-    for context, expected in cases:
-        assert _admits(condition, context, PUSH_JOB) is expected, (
-            f"`{PUSH_JOB}`'s condition `{condition}` evaluates to "
-            f"{not expected} for {context}, and it must be {expected}."
-        )
-
-    # NO `needs:`, which is what keeps an upstream skip from skipping this job —
-    # the defect `test_ci_release_skip_propagation.py` in `yadgarhq/actions` was
-    # written for, where a job with no status function skipped because an INDIRECT
-    # ancestor had not concluded `success`.
-    assert not job.get("needs"), (
-        f"`{PUSH_JOB}` declares `needs: {job.get('needs')}`. A job with no "
-        f"`always()`/`success()` in its `if:` is skipped when any ancestor did "
-        f"not conclude `success`, so a `needs:` here can silently turn the push "
-        f"path back off."
-    )
-
-    # WHAT IT ACTUALLY RUNS, asserted loosely so a future edit cannot gut the job
-    # while the condition above stays green. A job that is admitted and does
-    # nothing is the same false green as a job that is never admitted.
-    body = yaml.safe_dump(job)
-    for fragment in ("pytest scripts/tests/", "helm lint --strict", "helm dependency update"):
-        assert fragment in body, (
-            f"`{PUSH_JOB}` no longer runs `{fragment}`. The push path validates a "
-            f"pin change by rendering and testing it; without this it is admitted "
-            f"and proves nothing."
+    pushed_to_main = {"github.event_name": "push", "github.ref": "refs/heads/main"}
+    for name, job in jobs.items():
+        # A job with no `if:` runs on every event, a push to `main` included.
+        if "if" in job and not _admits(str(job["if"]), pushed_to_main, name):
+            continue
+        assert "uses" in job and "steps" not in job, (
+            f"`{name}` admits a push to `main` and runs its own steps. ADR-1119: "
+            f"no test suite runs on `main` after a merge. Only the shared "
+            f"`ci-pr.yaml` call (`version`) belongs on that path."
         )
 
 
@@ -1648,7 +1622,7 @@ TAG_WALL_FILE = "scripts/tests/test_tag_wall.py"
 
 
 def test_the_tag_job_admits_a_push_to_a_tag_and_refuses_everything_else() -> None:
-    """MEASURED BY EVALUATION, same proof as `push_validation`'s own test above."""
+    """MEASURED BY EVALUATION, same proof as the push-path test above."""
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     assert TAG_JOB in jobs, (
         f"`{TAG_JOB}` is not a job in {WORKFLOW.name}. It is the wall `release` "
@@ -1688,8 +1662,8 @@ def test_the_release_job_needs_the_tag_job() -> None:
     )
 
     # `needs:` GATES ON `success()` ONLY WHEN `release`'s OWN `if:` CALLS NO
-    # STATUS FUNCTION ITSELF — the same rule `push_validation`'s and
-    # `tag_validation`'s own headers document. `if: always() && startsWith(...)`
+    # STATUS FUNCTION ITSELF — the rule `tag_validation`'s own
+    # header documents. `if: always() && startsWith(...)`
     # would keep `release`'s condition true regardless of `tag_validation`'s
     # result, running it even after a red tag gate — `needs:` without it would
     # be decoration.
