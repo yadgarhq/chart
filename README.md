@@ -332,7 +332,6 @@ suite needs the registry reachable rather than running offline.
 | an adopter's value reaches a child (goal item 6)       | `config.shared.tlsRotation.pollSeconds: 45` renders `45` while `splayMaxSeconds` keeps the chart's 300                                                                                                                                    |
 | a value for one child reaches no other                 | `config.…pollSeconds` and `gateway.toolsPoll.intervalSeconds` each land in their own ConfigMap only                                                                                                                                       |
 | no knob is stated in two ConfigMaps                    | every leaf key path in every rendered ConfigMap, refused when two ConfigMaps state one path                                                                                                                                               |
-| a push to `main` is validated                          | `push_validation`'s own `if:` evaluated against four event contexts, and it declares no `needs:`                                                                                                                                          |
 | a tag cannot publish past a render refusal             | `tag_validation`'s own `if:` admits a tag push and refuses else; `release` `needs:` it                                                                                                                                                    |
 | it installs on a bare cluster (D80)                    | every `enabled` and `create` false: no resource outside the built-in Kubernetes API groups                                                                                                                                                |
 | Envoy closes an idle connection first (ADR-1016)       | with only a minimal `gateway` and `platform` below the parent, `platform.gatewayListener.upstreamIdleTimeoutSeconds` not below `gateway.server.limits.headerReadTimeoutSeconds` is refused, and so is a gateway bound with no Envoy value |
@@ -346,18 +345,17 @@ whose effect on the rendered set nobody looked at is exactly the state those
 numbers exist to interrupt: update them in the same commit as the pin, and say in
 the pull request which module moved them.
 
-`push_validation` in `.github/workflows/ci.yaml` runs that suite and
-`helm lint --strict` on a push to `main`. ADR-0722's `parent_bump.py` writes the
-eight pins straight to `main` over the Contents API, which passes through no pull
-request, and every validation job of the shared `ci-pr.yaml` skips on a push — so
-until it existed the one commit that ever changes the pins was checked by nothing.
-**It is a notification and not a wall.** A broken pin makes `main` red and
-visible, but publishing fires on the TAG, not on this push.
+No test suite runs on `main` after a merge (ADR-1119): a test that runs after a
+merge cannot stop it. The pull request is gated by `ci / passed`. ADR-0722's
+`parent_bump.py` writes the eight pins straight to `main` over the Contents API,
+which passes through no pull request, so a pin commit is checked by nothing at
+the time it lands. Publishing fires on the TAG, not on that push, and the tag has
+a wall of its own.
 
-That tag's own wall is `tag_validation`, a twin job with the same render
-assertions and `helm lint --strict`, run against HEAD rather than the registry.
+That tag's wall is `tag_validation`: the render assertions and
+`helm lint --strict`, run against HEAD rather than the registry.
 Its suite is a dedicated file, `scripts/tests/test_tag_wall.py`, not the whole
-`scripts/tests/` directory `push_validation` runs: `yadgarhq/actions`'
+`scripts/tests/` directory: `yadgarhq/actions`'
 `no-test-skips` hook (ledger 837) refuses any `pytest` invocation narrowed by
 `-m`/`-k`/`--deselect`, in every repository, with no exemption — so the tests
 this wall CAN carry are moved to their own file, and the ones it cannot (one
