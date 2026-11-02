@@ -208,6 +208,18 @@ kind_up_python() {
 printable() {
   tr -d '\000-\037\177'
 }
+# The reason a pre-flight fetch failed, as " (pipx said: ...)", or nothing when
+# pipx said nothing. The last "ERROR:" line is the reason: pip 26 and later print
+# a "[notice]" line after it, so the last line alone would name the notice. With
+# no "ERROR:" line the last non-blank line stands in. CR splits lines, and the
+# line is cleaned by `printable` only after it is picked.
+fetch_reason() {
+  local line
+  line="$(printf '%s\n' "$1" | tr '\r' '\n' | { grep '^ERROR:' || true; } | tail -n 1)"
+  [[ -n "$line" ]] || line="$(printf '%s\n' "$1" | tr '\r' '\n' | awk 'NF { l = $0 } END { print l }')"
+  line="$(printf '%s' "$line" | printable)"
+  [[ -z "$line" ]] || printf ' (pipx said: %s)' "$line"
+}
 # Set by client_config_file, on first use only.
 CLIENT_CONFIG_FILE=""
 
@@ -1383,7 +1395,7 @@ copy_old_client_config() {
 # an enrolment token carries, and the bootstrap token cannot enrol an admin who
 # holds a credential (ADR-0655).
 upgrade_enrolled_client() {
-  local pin have cfg old copy=0 rc=0 tmp note
+  local pin have cfg old copy=0 rc=0 tmp note why
   [[ -x "$PIPX_BIN_DIR/yaadgaar" ]] || return 0
   pin="$(yaadgaar_version)"
   [[ -n "$pin" ]] || return 0
@@ -1415,9 +1427,9 @@ upgrade_enrolled_client() {
     return 0
   fi
   tmp="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-  if ! pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" >/dev/null 2>&1; then
+  if ! why="$(PIP_DISABLE_PIP_VERSION_CHECK=1 pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" 2>&1 >/dev/null)"; then
     rm -rf "$tmp"
-    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched"
+    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched$(fetch_reason "$why")"
     return 0
   fi
   rm -rf "$tmp"
@@ -1442,7 +1454,7 @@ upgrade_enrolled_client() {
 # touched, because pipx removes the old venv when a forced install fails; a
 # version that is missing, unreadable or not older than the pin is kept.
 upgrade_fresh_client() {
-  local bin="$1" pin have rc=0 tmp
+  local bin="$1" pin have rc=0 tmp why
   pin="$(yaadgaar_version)"
   [[ -n "$pin" ]] || return 0
   have="$("$bin" --version 2>/dev/null | awk '{ print $2; exit }' || true)"
@@ -1450,9 +1462,9 @@ upgrade_fresh_client() {
   version_older "$have" "$pin" || rc=$?
   [[ "$rc" -eq 0 ]] || return 0
   tmp="$(mktemp -d "$STATE_DIR/tmp.XXXXXX")"
-  if ! pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" >/dev/null 2>&1; then
+  if ! why="$(PIP_DISABLE_PIP_VERSION_CHECK=1 pipx runpip yaadgaar download --no-deps --only-binary=:all: "yaadgaar==$pin" -d "$tmp" 2>&1 >/dev/null)"; then
     rm -rf "$tmp"
-    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched"
+    log "[10/10] WARNING: yaadgaar==$pin could not be fetched; root's client yaadgaar $have kept, untouched$(fetch_reason "$why")"
     return 0
   fi
   rm -rf "$tmp"

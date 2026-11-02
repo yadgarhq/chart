@@ -258,13 +258,17 @@ says what is wrong and claims nothing about that.
 {{- if $block.create -}}
 {{- $operatorKeys = append $operatorKeys (printf "platform.operators.%s.create" $name) -}}
 {{- end -}}
-{{- else if not (kindIs "invalid" $block.create) -}}
+{{- else if hasKey $block "create" -}}
+{{- $createShape := kindOf $block.create -}}
+{{- if eq $createShape "invalid" -}}
+{{- $createShape = "null" -}}
+{{- end -}}
 {{- $refusals = append $refusals (printf (join "" (list
       "platform.operators.%s.create is a %s rather than a boolean, so this chart cannot read it as a "
       "toggle. helm compares a toggle against a bool, and a value of any other type aborts the whole "
       "render on an incompatible-types comparison where a key name is what you need. Write true or "
       "false unquoted, or remove the key."))
-      $name (kindOf $block.create)) -}}
+      $name $createShape) -}}
 {{- end -}}
 {{- else if ne $name "create" -}}
 {{- $blockShape := kindOf $block -}}
@@ -311,7 +315,7 @@ so it turns an absent key into `false` and hands a present `"true"` or `1` strai
 to `eq`.
 
 A PRESENT NIL `create` USED TO BE LEFT ALONE HERE, ON A REASON THAT IS FALSE FOR
-THE TWO BLOCKS THAT MATTER. The argument was that a nil never raised — `default
+THE ONE BLOCK THAT MATTERS, `nats`. The argument was that a nil never raised — `default
 false nil` is `false`, that comparison is legal — so it could be read as false
 "exactly as before". It is read as false HERE. Helm's dependency resolver does not
 read it as false at all: `platform` declares `nats` under `condition: nats.create`,
@@ -325,19 +329,21 @@ nothing in front of it, out of a key this clause had just read as false.
 SO ANY PRESENT `create` THAT IS NOT A BOOL IS REFUSED, AND `invalid` IS REPORTED AS
 `null`. `hasKey` is what separates a present nil from an ABSENT key, because
 `kindOf` answers `invalid` to both and cannot tell them apart (ADR-0794) — and an
-absent `create` is what `cert-manager`, `keda`, `mariadb-operator`, `global` and
-`preflight` all have in a default render, so refusing on the kind alone would
-refuse every render in the estate.
+absent `create` is what `cert-manager`, `keda`, `mariadb-operator`, `prometheus`,
+`global` and `preflight` all have in a default render, so refusing on the kind
+alone would refuse every render in the estate.
 
-IT IS REFUSED FOR EVERY BLOCK RATHER THAN FOR THE TWO DEPENDENCIES BY NAME, and
+IT IS REFUSED FOR EVERY BLOCK RATHER THAN FOR THE DEPENDENCIES BY NAME, and
 that is the ranging discipline this file already states rather than a widening
 nobody asked for. Nothing in the VALUES says which `platform.<name>` blocks are
 chart dependencies; `platform`'s own `Chart.yaml` does, and this chart does not
 read it. An enumeration here would be a list to keep in step by attention, and the
-day `platform` puts a sixth block behind a `condition:` the list would be wrong and
-silent. For a block that is NOT a dependency the refusal costs an adopter a values
-file that rendered nothing from a toggle they did write, which is not a
-configuration anyone wants either.
+day `platform` puts a further top-level block behind a `condition:` the list
+would be wrong and silent. At `platform` 0.2.19 the only top-level block behind a
+`condition:` is `nats`. The six operator conditions sit under `operators`, which
+the operators clause above covers. For a block that is NOT a dependency the
+refusal costs an adopter a values file that rendered nothing from a toggle they
+did write, which is not a configuration anyone wants either.
 
 `platform.operators.create` IS NOT REACHED BY THIS ARM AND DOES NOT NEED TO BE.
 Helm DELETES that key when it is nulled, because `platform` declares it, so the
@@ -347,11 +353,15 @@ survives. `nats.create` nulls differently — the `nats` SUBCHART's own values a
 coalesced into `platform.nats`, so the key comes back PRESENT and nil rather than
 deleted — which is why this arm sees it and that one it does not.
 
-A NIL OPERATOR SUB-KEY IS OUT OF SCOPE AND MEASURED SO. `platform.operators.
-certManager.create:` with nothing after it rendered 32 objects at exit 0 on both
-helm lines: the condition's FIRST path is unreadable, so helm falls through to
-`operators.create` and the dependency is correctly off. The sub-key range below
-therefore keeps its `invalid` exclusion, and the two ranges differ on purpose.
+A NIL OPERATOR SUB-KEY WAS OUT OF SCOPE AND IS NOW REFUSED (yaadgaar #532). `platform.
+operators.certManager.create:` with nothing after it rendered 32 objects at exit 0 on
+both helm lines: the condition's FIRST path is unreadable, so helm falls through to
+`operators.create`. That fall-through made it harmless, and it also means the
+line decides nothing: the adopter wrote a toggle and `operators.create` answers
+for it. `platform` declares no per-operator block, so helm keeps the nested nil
+and this chart can see it. The sub-key range below therefore refuses a present nil
+`create` as it refuses any other non-bool, reported as `null`, and the two ranges
+now agree.
 */}}
 {{- $creating := list -}}
 {{- if kindIs "map" $platform -}}
@@ -477,7 +487,7 @@ well as the disjoint one, so an implementation that matched loosely would go red
 
 THIS CLAUSE ASSUMES THE MINTED NAME IS A LITERAL, AND THAT MUST BE REVISITED IF IT
 STOPS BEING ONE. `platform.bootstrap.iamKeys` carries `create` and nothing else
-today — verified at `platform` 0.1.8, where that chart's own `values.yaml` argues
+today — re-verified 2026-11-02 at `platform` 0.2.19, where that chart's own `values.yaml` argues
 the omission under "WHY THE THREE NAMES ARE NOT KEYS HERE". Should `platform` ever
 gain a key for the minted name, an adopter could rename BOTH sides coherently, and
 a refusal keyed only on `iam.keysSecret` would then fire on a correct setup: the

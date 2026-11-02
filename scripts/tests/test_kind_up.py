@@ -2435,6 +2435,62 @@ def test_a_failed_pre_flight_keeps_the_client_and_never_forces(rig: Rig) -> None
     assert "WARNING" in proc.stdout and "0.1.5 kept" in proc.stdout
 
 
+def test_a_failed_pre_flight_logs_the_reason_pipx_gave(rig: Rig) -> None:
+    """chart#49: the warning named the pin and nothing about why the fetch failed."""
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1,
+                  "stderr": "ERROR: No matching distribution found for yaadgaar==9.9.9\n"}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "No matching distribution found" in proc.stdout
+
+
+def test_a_failed_fresh_pre_flight_logs_the_reason_pipx_gave(rig: Rig) -> None:
+    fresh_enrolment_with_root_client(rig, "0.1.5")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1,
+                  "stderr": "ERROR: No matching distribution found for yaadgaar==9.9.9\n"}] + rig.rules
+    proc = rig.main("--with-client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "No matching distribution found" in proc.stdout
+
+
+def pre_flight_warning(rig: Rig, stderr: str) -> str:
+    enrolled_with_client(rig, "0.1.5")
+    root_config(rig, "yaadgaar")
+    rig.rules = [{"cmd": "pipx", "match": ["runpip", "download"], "exit": 1, "stderr": stderr}] + rig.rules
+    proc = rig.run("pin_root_environment; ensure_client")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return next(line for line in proc.stdout.splitlines() if "could not be fetched" in line)
+
+
+def test_the_pre_flight_reason_is_the_error_line_not_a_trailing_notice(rig: Rig) -> None:
+    warning = pre_flight_warning(
+        rig,
+        "ERROR: No matching distribution found for yaadgaar==9.9.9\n"
+        "\n[notice] To update, run: pip install --upgrade pip\n",
+    )
+    assert "(pipx said: ERROR: No matching distribution found for yaadgaar==9.9.9)" in warning
+    assert "[notice]" not in warning
+
+
+def test_the_pre_flight_reason_has_its_control_characters_removed(rig: Rig) -> None:
+    warning = pre_flight_warning(rig, "ERROR: bad \x1b[31mred\x07 thing\n")
+    assert "(pipx said: ERROR: bad [31mred thing)" in warning
+    assert not any(c in warning for c in "\x1b\x07\r")
+
+
+def test_the_pre_flight_reason_splits_on_a_carriage_return(rig: Rig) -> None:
+    warning = pre_flight_warning(rig, "Downloading 10%\rERROR: no route to host\r\n")
+    assert "(pipx said: ERROR: no route to host)" in warning
+
+
+def test_a_silent_pre_flight_failure_prints_no_empty_reason(rig: Rig) -> None:
+    warning = pre_flight_warning(rig, "")
+    assert "pipx said" not in warning
+    assert warning.endswith("kept, untouched")
+
+
 def test_a_failed_forced_install_after_a_good_pre_flight_stops_the_run(rig: Rig) -> None:
     """pipx removes the old venv when a forced install fails: root has no client
     now, so the run stops and names the command that puts one back."""

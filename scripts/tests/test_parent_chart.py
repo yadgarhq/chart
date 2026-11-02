@@ -95,7 +95,7 @@ CHART = REPO / "chart"
 
 # WHAT THE EIGHT MODULES ALONE ARE — the render of `MODULES_ONLY_VALUES`, which
 # was the default install until ADR-0803 step B6 — measured 2026-09-19 on helm
-# 4.2.3 against the eight pins in `chart/Chart.yaml` today: config 0.2.0,
+# 4.2.3 against the eight pins in `chart/Chart.yaml` of that day: config 0.2.0,
 # gateway 0.9.49, iam 0.8.40, iam-db 0.7.41, project 0.1.18, project-db 0.3.6,
 # task 0.5.29 and task-db 0.6.30.
 #
@@ -128,7 +128,7 @@ CHART = REPO / "chart"
 # emit hooks. B6 moved the DEFAULTS to the whole estate and did not move this
 # dict: re-measured 2026-09-27 on helm 3.18.4 and 4.3.0 over
 # `MODULES_ONLY_VALUES`, 32 objects, the same six kinds. Re-measured 2026-09-24 on helm 3.18.4 and 4.3.0 with `platform`
-# 0.1.8 declared, which is the pin `chart/Chart.yaml` carries today: 32 objects, the
+# 0.1.8 declared (the pin of that day; `chart/Chart.yaml` has moved since): 32 objects, the
 # same six kinds, unchanged. It first read that way at 0.1.7. ADR-0777 makes the
 # assertion that this dict is UNCHANGED the load-bearing one; a step that adds an
 # object to `platform` moves `ADOPTER_EXPECTED` below and not this.
@@ -283,8 +283,8 @@ API_VERSIONS = tuple(
 )
 
 # WHAT THE WHOLE ESTATE PLUS ITS PLATFORM LAYER IS, re-measured 2026-09-24 on helm
-# 3.18.4 and 4.3.0 against the nine pins in `chart/Chart.yaml` today, `platform`
-# at 0.1.8. A LITERAL for the same reason `EXPECTED` is one.
+# 3.18.4 and 4.3.0 against the nine pins in `chart/Chart.yaml` of that day, `platform`
+# at 0.1.8, the pin of that day. A LITERAL for the same reason `EXPECTED` is one.
 #
 # A `platform` RELEASE MOVES THIS ONE AND NOT `EXPECTED`, because `platform` is
 # absent from the modules-only render. A MODULE release that adds or drops an object
@@ -354,7 +354,7 @@ ADOPTER_OBJECTS = 89
 # Job, and it landed in `platform` 0.1.7. MEASURED at that pin on 2026-09-24:
 # `RBAC_TRIPLE_NAMES_AT_R5` gained `envoy-gateway-probe` and `HOOK_JOBS_AT_R5` went
 # to 4, alongside `ADOPTER_OBJECTS` 77 → 81. RE-MEASURED THE SAME DAY at 0.1.8,
-# which is the pin `chart/Chart.yaml` declares today: all three still read that way.
+# the pin of that day: all three still read that way.
 #
 # `AGREEMENT_PAIRS_AT_R5` DID NOT MOVE WITH THEM, and the asymmetry is the point.
 # The new Job is a third RBAC identity and a fourth hook, so these two counts see
@@ -393,7 +393,7 @@ NOT_A_HOOK_BY_DESIGN = {"seeder"}
 
 # WHAT THE FLIP ABOVE LEAVES BEHIND, a literal for the same reason the two above
 # are literals. MEASURED 2026-09-24 at `platform` 0.1.7, and re-measured the same
-# day on helm 3.18.4 and 4.3.0 at 0.1.8, the pin `chart/Chart.yaml` declares today.
+# day on helm 3.18.4 and 4.3.0 at 0.1.8, the pin of that day.
 #
 # THE POSITIVE FORM IS WHAT MAKES THE RED CASE NON-VACUOUS. `!=
 # RBAC_TRIPLE_NAMES_AT_R5` alone goes green for a great many wrong lists, so a
@@ -460,7 +460,7 @@ LADDER = {
 # that is measured rather than reasoned. `platform`'s Envoy Gateway probe is a
 # SECOND Job — `envoy-gateway-probe`, post-install, with its own `PROBES=` line —
 # and `probes_declared` below reads the `preflight` Job alone. At 0.1.8, the pin
-# `chart/Chart.yaml` declares, re-measured 2026-09-24: the render declares
+# of that day, re-measured 2026-09-24: the render declares
 # `{preflight: [cert-manager, keda, mariadb-operator], envoy-gateway-probe:
 # [envoy-gateway]}` and `unpaired_probes` returns []. `ADOPTER_OBJECTS`,
 # `HOOK_JOBS_AT_R5` and `RBAC_TRIPLE_NAMES_AT_R5` moved at 0.1.7, where this was
@@ -979,7 +979,7 @@ def test_the_directory_and_the_package_render_the_same_objects(packaged: Path, m
 # BENEATH `platform` — six of them one level down and three of them two.
 #
 # MEASURED 2026-09-26 on helm 4.3.0 over `helm package chart -u` against the nine
-# pins in `chart/Chart.yaml` today, `platform` at 0.1.11:
+# pins in `chart/Chart.yaml` of that day, `platform` at 0.1.11:
 #
 #   tar tzf yadgar-0.1.0.tgz | grep -cE '^yadgar/charts/.*/Chart\.yaml$'   → 18
 #
@@ -4122,7 +4122,7 @@ def test_an_unreadable_platform_enabled_leaves_the_dependency_enabled(
 # this tuple — and compares the set of operator condition paths it declares
 # against this tuple. `platform` 0.1.8, the pin this comment originally named
 # as the trigger, had no `operators` key at all; `platform` 0.1.36, the pin
-# today, carries `operators` with SIX condition paths — `certManager`, `keda`,
+# when this was written, carries `operators` with SIX condition paths — `certManager`, `keda`,
 # `mariadbOperator`, `envoyGateway`, `argoCd` AND `prometheus` — and this tuple
 # now names all six, so the gate is green. `prometheus` joined at `platform`
 # 0.1.21 (ADR-0820). Ledger 1083's D-C3 sweep (opus review) ruled it IN SCOPE
@@ -4431,9 +4431,10 @@ def the_chart_that_refused(name: str, message: str) -> str:
 # THE LINE THE `nats.create: null` RED CASE REWRITES, AND IT IS IN THIS CHART.
 # Rewritten back to the `invalid` exclusion the clause carried before, which is the
 # change a contributor would really make — "a nil never raised, leave it alone" is
-# the reasoning the old comment gave.
-THE_PRESENT_NIL_ARM = '{{- else if hasKey $block "create" -}}'
-THE_PRESENT_NIL_ARM_OFF = '{{- else if not (kindIs "invalid" $block.create) -}}'
+# the reasoning the old comment gave. The `$wrote` line pins the `platform.<name>`
+# arm; the operator sub-key arm carries the same `hasKey` line (yaadgaar #532).
+THE_PRESENT_NIL_ARM = '{{- else if hasKey $block "create" -}}\n{{- $wrote := kindOf $block.create -}}'
+THE_PRESENT_NIL_ARM_OFF = '{{- else if not (kindIs "invalid" $block.create) -}}\n{{- $wrote := kindOf $block.create -}}'
 
 
 def test_excluding_a_nil_create_lets_the_broker_in_with_its_policy(tmp_path: Path) -> None:
@@ -5110,7 +5111,7 @@ THE_RENDER_CHECK_REFUSAL = "this render needs the API"
 # `DECLARED_API_VERSIONS` names, which is what ties the declaration to the render:
 # a module release that brings some other product's CRD arrives here as a failing
 # test rather than as a line in a job summary. Measured 2026-09-27 on helm 3.18.4
-# and 4.3.0 against the nine pins in `chart/Chart.yaml` today.
+# and 4.3.0 against the nine pins in `chart/Chart.yaml` of that day.
 DEFAULT_CRD_BEARING = {
     ("cert-manager.io", "Certificate"),
     ("cert-manager.io", "Issuer"),
