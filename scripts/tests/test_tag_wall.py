@@ -57,13 +57,23 @@ from __future__ import annotations
 
 import ast
 import collections
+import json
+import shutil
+import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from test_parent_chart import (
     A_DISJOINT_NAME,
+    ADOPTER_VALUES,
+    API_VERSIONS,
+    CHART,
+    EXPLICIT_TLS,
+    helm,
+    modules_only_file,
     THE_ADMIN_TOKEN_REFUSAL,
     THE_DELETED_OPERATORS_KEY_REFUSAL,
     THE_DEPENDENCY_REFUSAL,
@@ -76,6 +86,7 @@ from test_parent_chart import (
     THE_UNREADABLE_ENABLED_SHAPES,
     TOP_LEVEL_BLOCK,
     operators_overlay,
+    overlay,
     packaged,
     parent_example_failures,
     parent_examples,
@@ -448,6 +459,156 @@ def test_the_parent_refuses_the_operators_toggle_and_every_one_of_its_sub_keys(
         # stay shut and the assertions above read this clause's message alone.
         assert THE_ADMIN_TOKEN_REFUSAL not in message, message
         assert THE_DEPENDENCY_REFUSAL not in message, message
+
+
+# yaadgaar #334 (RULED): a sub-block under `platform.operators` that is not a
+# mapping is refused by name. `create` is the register key and is excluded BY NAME;
+# every other entry is an operator block, so a scalar there is an adopter's typo
+# that `platform` would otherwise skip in silence (the register key then decides
+# and nothing installs).
+THE_NON_MAPPING_OPERATOR_BLOCKS = (
+    ("true", "bool"),
+    ('"yes"', "string"),
+    ("1", "float64"),
+    ("[]", "slice"),
+    ("[a]", "slice"),
+    ("false", "bool"),
+    # `kindOf` reports an explicit null as `invalid`; the refusal relabels it.
+    # `platform` declares no per-operator block, so helm keeps the null key.
+    ("null", "null"),
+)
+
+
+@pytest.mark.parametrize("operator", THE_OPERATOR_SUB_KEYS)
+@pytest.mark.parametrize("scalar,kind", THE_NON_MAPPING_OPERATOR_BLOCKS)
+def test_the_parent_refuses_a_non_mapping_operator_block(
+    tmp_path: Path, operator: str, scalar: str, kind: str
+) -> None:
+    body = operators_overlay(f"    create: false\n    {operator}: {scalar}\n")
+    message = refusal(tmp_path, f"operator-block-{operator}-{kind}", body)
+    assert the_chart_that_refused("operator block", message) == THE_PARENT, message
+    assert f"platform.operators.{operator} is a {kind} rather than a mapping" in message, message
+    assert THE_OPERATORS_REFUSAL not in message, message
+    for raise_text in THE_TEXTS_A_RAISE_LEAVES:
+        assert raise_text not in message, message
+
+
+def test_the_register_key_is_not_an_operator_block(tmp_path: Path) -> None:
+    """`create: false` is a bool in the ranged block and must stay renderable."""
+    body = operators_overlay("    create: false\n")
+    result = helm(
+        "template",
+        "yadgar",
+        str(CHART),
+        *API_VERSIONS,
+        "-f",
+        str(ADOPTER_VALUES),
+        "-f",
+        str(overlay(tmp_path / "register-key.yaml", body)),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+# yaadgaar #234: the two operator refusals name every operator `platform` declares,
+# Prometheus included. The display names are keyed by the sub-key, and the key set
+# is held equal to `THE_OPERATOR_SUB_KEYS` (itself held equal to the pinned
+# platform's census), so a seventh operator reddens here until it is named.
+THE_OPERATOR_DISPLAY_NAMES = {
+    "certManager": "cert-manager",
+    "keda": "KEDA",
+    "mariadbOperator": "mariadb-operator",
+    "envoyGateway": "Envoy Gateway",
+    "argoCd": "Argo CD",
+    "prometheus": "Prometheus",
+}
+
+
+def test_the_operator_refusals_name_every_operator() -> None:
+    assert set(THE_OPERATOR_DISPLAY_NAMES) == set(THE_OPERATOR_SUB_KEYS)
+
+
+def test_the_operator_refusals_name_every_operator_in_their_text(tmp_path: Path) -> None:
+    mixed = refusal(tmp_path, "names-mixed", operators_overlay(sub_key_block("keda")))
+    non_map = refusal(tmp_path, "names-non-map", "platform:\n  enabled: true\n  operators: true\n")
+    for text in (mixed, non_map):
+        for name in THE_OPERATOR_DISPLAY_NAMES.values():
+            assert name in text, (name, text)
+
+
+# yaadgaar #343: `<caller>.<dial>.requestTimeoutSeconds` must exceed the `-db`
+# module's `database.acquireTimeoutSeconds`. At the pinned charts the `-db` schemas
+# bound acquire at 13 and the callers' schemas bound request at 14, so the parent's
+# refusal is unreachable from values alone; each case loosens a COPY of the vendored
+# `-db` schema (drops its acquire maximum), which is what the day a child widens its
+# bound looks like.
+THE_CALLER_DATABASE_PAIRS = (
+    ("task", "taskDb", "task-db"),
+    ("project", "projectDb", "project-db"),
+    ("iam", "iamDb", "iam-db"),
+)
+
+
+def chart_with_a_loosened_database_schema(destination: Path, database: str) -> Path:
+    copy = destination / "chart"
+    shutil.copytree(CHART, copy)
+    tarballs = sorted((copy / "charts").glob(f"{database}-*.tgz"))
+    assert len(tarballs) == 1, tarballs
+    with tarfile.open(tarballs[0], "r:gz") as archive:
+        archive.extractall(copy / "charts")
+    tarballs[0].unlink()
+    schema_path = copy / "charts" / database / "values.schema.json"
+    schema = json.loads(schema_path.read_text())
+    acquire = schema["properties"]["database"]["properties"]["acquireTimeoutSeconds"]
+    assert "maximum" in acquire, acquire
+    del acquire["maximum"]
+    schema_path.write_text(json.dumps(schema))
+    return copy
+
+
+def database_timeout_render(
+    tmp_path: Path, name: str, chart: Path, caller: str, dial: str, database: str, request: int, acquire: int
+) -> subprocess.CompletedProcess[str]:
+    values = overlay(
+        tmp_path / f"{name}.yaml",
+        f"{caller}:\n  {dial}:\n    requestTimeoutSeconds: {request}\n"
+        f"{database}:\n  database:\n    acquireTimeoutSeconds: {acquire}\n",
+    )
+    return helm(
+        "template",
+        "yadgar",
+        str(chart),
+        *API_VERSIONS,
+        "-f",
+        str(modules_only_file(tmp_path)),
+        "-f",
+        str(EXPLICIT_TLS),
+        "-f",
+        str(values),
+    )
+
+
+@pytest.mark.parametrize("caller,dial,database", THE_CALLER_DATABASE_PAIRS)
+def test_the_parent_holds_the_request_timeout_above_the_acquire_timeout(
+    tmp_path: Path, caller: str, dial: str, database: str
+) -> None:
+    chart = chart_with_a_loosened_database_schema(tmp_path / "loosened", database)
+    for name, request, acquire in (("equal", 20, 20), ("above", 20, 25)):
+        result = database_timeout_render(tmp_path, name, chart, caller, dial, database, request, acquire)
+        assert result.returncode != 0, (name, result.stdout[:500])
+        assert the_chart_that_refused(name, result.stderr) == THE_PARENT, result.stderr
+        assert f"{database}.database.acquireTimeoutSeconds is {acquire}" in result.stderr, result.stderr
+        assert f"{caller}.{dial}.requestTimeoutSeconds is {request}" in result.stderr, result.stderr
+    below = database_timeout_render(tmp_path, "below", chart, caller, dial, database, 20, 19)
+    assert below.returncode == 0, below.stderr
+
+
+@pytest.mark.parametrize("caller,dial,database", THE_CALLER_DATABASE_PAIRS)
+def test_the_shipped_timeouts_leave_the_pool_wait_below_the_request_timeout(
+    tmp_path: Path, caller: str, dial: str, database: str
+) -> None:
+    """The defaults and the largest pool wait the schema allows both render (ADR-0645)."""
+    result = database_timeout_render(tmp_path, "edge", CHART, caller, dial, database, 14, 13)
+    assert result.returncode == 0, result.stderr
 
 
 # THE PHRASE THIS CLAUSE ALONE WRITES, and the type-naming helper and table it
