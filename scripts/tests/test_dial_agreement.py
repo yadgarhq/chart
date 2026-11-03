@@ -46,15 +46,19 @@ happens to be. Its row:
 | --- | --- | --- | --- |
 | `test_every_dial_agrees_with_its_callee` | each of `RENDERS` | `DIAL_EDGES[render]`, 12 edges each | `test_a_dial_on_the_wrong_port_is_named` (gateway `project.port: 50051`) and `test_a_dial_whose_tls_disagrees_is_named` (gateway `project.tls.enabled: false`) and `test_a_tls_valkey_dial_to_a_cleartext_only_valkey_is_named` |
 
-NATS AND VALKEY ARE EDGES; MARIADB IS EXCLUDED. The gateway and iam dial
+NATS AND VALKEY ARE EDGES; MARIADB IS CHECKED AGAINST ITS CR. The gateway and iam dial
 NATS, and the gateway dials Valkey, in the same shape as the gRPC hops, and
 `platform` renders both Services, so all three are checked. A TLS Valkey dial
 goes to 6380 whatever port `gateway.rateLimit.addr` spells (the gateway
 binary's `TLS_PORT`). A `nats.conf` this file cannot read fails by name rather
 than being guessed at. A NATS broker with
 `allow_non_tls` accepts either posture on one port. The three `-db` modules'
-MariaDB dials are named exclusions: the mariadb-operator creates that Service
-at runtime, so the render holds nothing to check the port against.
+MariaDB dials are not edges: the mariadb-operator creates that Service at
+runtime, so the render holds nothing to check the port against. They stay
+named exclusions, and `mariadb_gate` checks them against the MariaDB CR
+instead (yaadgaar #542): `DB_HOST` is the CR's name, `DB_PORT` is its
+`spec.port` (3306 when unset), and `DB_SSL_MODE` is `required` exactly when
+`spec.tls.required` is true. Its count register is `MARIADB_EDGES`.
 
 A PIN BUMP THAT MOVES AN ENV NAME FAILS HERE, and that is wanted friction: the
 same pull request updates the adapter row.
@@ -280,7 +284,7 @@ WORKLOAD_EXCLUSIONS: dict[tuple[str, str], str] = {
 # DIAL-SHAPED ENV NO ADAPTER CLAIMS, AND WHY: (workload, variable) -> reason.
 MARIADB = (
     "MariaDB dial: the mariadb-operator creates the `<name>-mariadb` Service from the MariaDB CR at "
-    "runtime, so no Service is in the render to check the port against"
+    "runtime, so no Service is in the render to check the port against; `mariadb_gate` checks it against the CR"
 )
 ENROLMENT = (
     "the edge hostname an enrolling client is told to use (`iam.enrolment.gateway`), outside the cluster; "
@@ -665,6 +669,88 @@ def gate(documents: list[dict]) -> tuple[list[Edge], list[str]]:
     return edges, problems
 
 
+# ── THE PARTIAL MARIADB EDGE (yaadgaar #542) ─────────────────────────────────
+# The mariadb-operator creates the `<name>` Service at runtime, so the render
+# holds no Service to check a -db module's DB_HOST against. The MariaDB CR IS
+# rendered, so three of the four assertions an edge gets are still possible,
+# against the CR instead of a Service: the host is the CR's name, the port is
+# the CR's `spec.port` (3306 when unset), and `DB_SSL_MODE` is a TLS-required
+# mode exactly when `spec.tls.required` is true. The -db charts' `sslMode`
+# takes `required`, `verify-identity` and `preferred`: `required` and
+# `verify-identity` both refuse a cleartext connection, `preferred` falls back
+# to one. (`verify-ca` was removed because it crash-loops the pod, and there
+# is no `verify-full`.) Whether the operator's Service serves that port stays
+# unchecked, and is the reason these dials stay in ENV_EXCLUSIONS.
+
+MARIADB_MODULES = ("iam-db", "project-db", "task-db")
+MARIADB_DEFAULT_PORT = 3306
+MARIADB_TLS_REQUIRED_MODES = frozenset({"required", "verify-identity"})
+MARIADB_CR_COUNT = "expected one MariaDB CR labelled"
+MARIADB_HOST_MISMATCH = "DB_HOST is not the MariaDB CR name"
+MARIADB_PORT_MISMATCH = "DB_PORT is not the MariaDB CR port"
+MARIADB_PORT_NOT_INTEGER = "DB_PORT is not an integer"
+MARIADB_TLS_MISMATCH = "DB_SSL_MODE disagrees with the MariaDB CR"
+
+
+def mariadb_gate(documents: list[dict]) -> tuple[set[str], list[str]]:
+    """The partial MariaDB edge of every -db module: its edge ids and its problems. PURE."""
+    problems: list[str] = []
+    edges: set[str] = set()
+    for module in MARIADB_MODULES:
+        label = f"app.kubernetes.io/name={module}"
+        crs = [
+            d
+            for d in documents
+            if d["kind"] == "MariaDB" and (d["metadata"].get("labels") or {}).get("app.kubernetes.io/name") == module
+        ]
+        if len(crs) != 1:
+            problems.append(f"{module}: {MARIADB_CR_COUNT} {label}, found {len(crs)}")
+            continue
+        workloads = [d for d in documents if d["kind"] == "Deployment" and d["metadata"]["name"] == module]
+        if len(workloads) != 1:
+            problems.append(f"{module}: expected one Deployment named {module}, found {len(workloads)}")
+            continue
+        env: dict[str, str] = {}
+        for container in every_container(workloads[0]):
+            env.update(env_of(container))
+        keys = {
+            "DB_HOST": f"{module}.database.host",
+            "DB_PORT": f"{module}.database.port",
+            "DB_SSL_MODE": f"{module}.database.sslMode",
+        }
+        missing = [v for v in keys if v not in env]
+        for variable in missing:
+            problems.append(f"{module}: the render does not set {variable} ({keys[variable]})")
+        if missing:
+            continue
+        cr = crs[0]
+        name = cr["metadata"]["name"]
+        spec = cr.get("spec") or {}
+        port = int(spec.get("port", MARIADB_DEFAULT_PORT))
+        required = (spec.get("tls") or {}).get("required") is True
+        edges.add(f"{module}→{name}:{port}")
+        if env["DB_HOST"] != name:
+            problems.append(
+                f"{module}: {MARIADB_HOST_MISMATCH}: DB_HOST is '{env['DB_HOST']}' and the MariaDB CR is named '{name}' "
+                f"({keys['DB_HOST']})"
+            )
+        if not re.fullmatch(r"\d+", env["DB_PORT"]):
+            problems.append(f"{module}: {MARIADB_PORT_NOT_INTEGER}: DB_PORT is '{env['DB_PORT']}' ({keys['DB_PORT']})")
+        elif int(env["DB_PORT"]) != port:
+            problems.append(
+                f"{module}: {MARIADB_PORT_MISMATCH}: DB_PORT is {env['DB_PORT']} and the MariaDB CR serves {port} "
+                f"({keys['DB_PORT']})"
+            )
+        if (env["DB_SSL_MODE"] in MARIADB_TLS_REQUIRED_MODES) != required:
+            problems.append(
+                f"{module}: {MARIADB_TLS_MISMATCH}: DB_SSL_MODE is '{env['DB_SSL_MODE']}' and the MariaDB CR "
+                f"spec.tls.required is {str(required).lower()} ({keys['DB_SSL_MODE']})"
+            )
+    if not edges:
+        problems.append("no MariaDB edge was discovered: a gate over zero edges inspects nothing")
+    return edges, problems
+
+
 # ── GREEN ────────────────────────────────────────────────────────────────────
 
 
@@ -873,3 +959,159 @@ def test_a_nats_conf_that_is_not_json_fails_with_a_named_problem(renders):
 def test_zero_edges_is_refused():
     _, problems = gate([])
     assert "no edge was discovered: a gate over zero edges inspects nothing" in problems
+
+
+# ── THE PARTIAL MARIADB EDGE (yaadgaar #542) ─────────────────────────────────
+
+MARIADB_EDGES = frozenset({"iam-db→iam-db-mariadb:3306", "project-db→project-db-mariadb:3306", "task-db→task-db-mariadb:3306"})
+
+
+def mariadb_cr(documents: list[dict], module: str) -> dict:
+    return next(
+        d for d in documents if d["kind"] == "MariaDB" and d["metadata"]["labels"]["app.kubernetes.io/name"] == module
+    )
+
+
+@pytest.mark.parametrize("name", sorted(DIAL_EDGES))
+def test_every_db_module_dials_its_mariadb_cr(renders, name):
+    edges, problems = mariadb_gate(renders[name])
+    assert problems == [], "\n".join(problems)
+    assert edges == MARIADB_EDGES
+
+
+@pytest.mark.parametrize("module", ["iam-db", "project-db", "task-db"])
+def test_a_db_host_that_is_not_the_mariadb_cr_name_is_named(renders, module):
+    documents = copied(renders)
+    set_env(documents, module, "DB_HOST", f"{module}-mariadb-typo")
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"{module}: {MARIADB_HOST_MISMATCH}: DB_HOST is '{module}-mariadb-typo' and the MariaDB CR is named "
+        f"'{module}-mariadb' ({module}.database.host)"
+    ]
+
+
+@pytest.mark.parametrize("module", ["iam-db", "project-db", "task-db"])
+def test_a_db_port_that_is_not_the_cr_port_is_named(renders, module):
+    documents = copied(renders)
+    set_env(documents, module, "DB_PORT", "3307")
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"{module}: {MARIADB_PORT_MISMATCH}: DB_PORT is 3307 and the MariaDB CR serves 3306 ({module}.database.port)"
+    ]
+
+
+def test_a_cr_port_the_dial_does_not_follow_is_named(renders):
+    """The other direction: the CR moves to 3307 and DB_PORT stays at the 3306 default."""
+    documents = copied(renders)
+    mariadb_cr(documents, "task-db")["spec"]["port"] = 3307
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"task-db: {MARIADB_PORT_MISMATCH}: DB_PORT is 3306 and the MariaDB CR serves 3307 (task-db.database.port)"
+    ]
+
+
+def test_a_cr_port_the_dial_follows_agrees(renders):
+    documents = copied(renders)
+    mariadb_cr(documents, "task-db")["spec"]["port"] = 3307
+    set_env(documents, "task-db", "DB_PORT", "3307")
+    edges, problems = mariadb_gate(documents)
+    assert problems == []
+    assert "task-db→task-db-mariadb:3307" in edges
+
+
+def test_a_cr_that_requires_tls_with_a_dial_that_does_not_is_named(renders):
+    documents = copied(renders)
+    set_env(documents, "iam-db", "DB_SSL_MODE", "preferred")
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"iam-db: {MARIADB_TLS_MISMATCH}: DB_SSL_MODE is 'preferred' and the MariaDB CR spec.tls.required is true "
+        "(iam-db.database.sslMode)"
+    ]
+
+
+@pytest.mark.parametrize("tls", [{"enabled": True, "required": False}, {"enabled": True}, None])
+def test_a_dial_that_requires_tls_of_a_cr_that_does_not_is_named(renders, tls):
+    documents = copied(renders)
+    spec = mariadb_cr(documents, "project-db")["spec"]
+    spec.pop("tls")
+    if tls is not None:
+        spec["tls"] = tls
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"project-db: {MARIADB_TLS_MISMATCH}: DB_SSL_MODE is 'required' and the MariaDB CR spec.tls.required is false "
+        "(project-db.database.sslMode)"
+    ]
+
+
+def test_a_cr_that_does_not_require_tls_with_a_dial_that_does_not_agrees(renders):
+    documents = copied(renders)
+    mariadb_cr(documents, "task-db")["spec"]["tls"]["required"] = False
+    set_env(documents, "task-db", "DB_SSL_MODE", "preferred")
+    _, problems = mariadb_gate(documents)
+    assert problems == []
+
+
+def test_a_db_module_with_no_mariadb_cr_is_named(renders):
+    documents = [d for d in copied(renders) if not (d["kind"] == "MariaDB" and d["metadata"]["name"] == "iam-db-mariadb")]
+    _, problems = mariadb_gate(documents)
+    assert problems == [f"iam-db: {MARIADB_CR_COUNT} app.kubernetes.io/name=iam-db, found 0"]
+
+
+def test_a_db_module_with_two_mariadb_crs_is_named(renders):
+    documents = copied(renders)
+    twin = yaml.safe_load(yaml.safe_dump(mariadb_cr(documents, "iam-db")))
+    twin["metadata"]["name"] = "iam-db-mariadb-twin"
+    _, problems = mariadb_gate([*documents, twin])
+    assert problems == [f"iam-db: {MARIADB_CR_COUNT} app.kubernetes.io/name=iam-db, found 2"]
+
+
+def test_a_db_dial_the_render_does_not_set_is_named(renders):
+    documents = copied(renders)
+    container = containers(find(documents, "Deployment", "iam-db"))[0]
+    container["env"] = [e for e in container["env"] if e["name"] != "DB_SSL_MODE"]
+    _, problems = mariadb_gate(documents)
+    assert problems == ["iam-db: the render does not set DB_SSL_MODE (iam-db.database.sslMode)"]
+
+
+def test_a_mariadb_gate_over_nothing_is_refused():
+    edges, problems = mariadb_gate([])
+    assert edges == set()
+    assert "no MariaDB edge was discovered: a gate over zero edges inspects nothing" in problems
+
+
+def set_env(documents: list[dict], module: str, variable: str, value: str) -> None:
+    for e in containers(find(documents, "Deployment", module))[0]["env"]:
+        if e["name"] == variable:
+            e["value"] = value
+            return
+    raise AssertionError(f"{module} has no {variable}")
+
+
+def test_a_verify_identity_dial_against_a_cr_that_requires_tls_agrees(renders):
+    documents = copied(renders)
+    set_env(documents, "task-db", "DB_SSL_MODE", "verify-identity")
+    _, problems = mariadb_gate(documents)
+    assert problems == []
+
+
+def test_a_verify_identity_dial_against_a_cr_that_does_not_require_tls_is_named(renders):
+    documents = copied(renders)
+    set_env(documents, "task-db", "DB_SSL_MODE", "verify-identity")
+    mariadb_cr(documents, "task-db")["spec"]["tls"]["required"] = False
+    _, problems = mariadb_gate(documents)
+    assert problems == [
+        f"task-db: {MARIADB_TLS_MISMATCH}: DB_SSL_MODE is 'verify-identity' and the MariaDB CR "
+        "spec.tls.required is false (task-db.database.sslMode)"
+    ]
+
+
+def test_verify_identity_is_in_the_tls_required_set():
+    assert MARIADB_TLS_REQUIRED_MODES == frozenset({"required", "verify-identity"})
+
+
+@pytest.mark.parametrize("port", ["", "abc", "33o6", "-1"])
+def test_a_db_port_that_is_not_an_integer_is_named(renders, port):
+    documents = copied(renders)
+    set_env(documents, "project-db", "DB_PORT", port)
+    _, problems = mariadb_gate(documents)
+    assert problems == [f"project-db: {MARIADB_PORT_NOT_INTEGER}: DB_PORT is '{port}' (project-db.database.port)"]
