@@ -61,14 +61,13 @@ NO SKIPS (ADR-0650). `helm` absent is a failure, not a skip: this suite and the
 shared `helm lint and render` hook both need it, and a suite that skips when its
 subject is absent reports a pass nobody earned.
 
-THE PACKAGED-CHART RENDERS ARE NOT OFFLINE. Per ADR-0725 nothing under
-`chart/charts/` is committed, so the `packaged` fixture below resolves this
-chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts` with
-`helm package chart -u` — the same command `ci-release.yaml` runs — and needs
-the registry reachable. The directory-only renders (test 1) need no registry, but
-they DO need `helm dependency update chart` to have run in this working tree,
-which is what `ci.yaml`'s `tag_validation` job and the `helm lint and render`
-pre-commit hook both do before they run anything.
+THE PACKAGED-CHART RENDERS PACKAGE WHAT `chart/charts/` HOLDS. Per ADR-0725
+nothing under `chart/charts/` is committed, so a contributor runs
+`helm dependency update chart` by hand (it needs the registry) before
+`pytest scripts/tests`. CI does that update in its own steps: the `precommit`,
+`pre_pin_parent` and `tag_validation` jobs. The `packaged` fixture then runs
+`helm package chart` WITHOUT `-u`, so it packages the vendored candidate and not
+a fresh pull of the published pin (yaadgaar #561).
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -613,27 +612,89 @@ def stated_in_more_than_one_configmap(
     )
 
 
-@pytest.fixture(scope="module")
-def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The chart as `helm package` leaves it — the artifact an adopter downloads.
+def package_vendored(workspace: Path) -> Path:
+    """`helm package chart` over the `chart/` directory in `workspace`, NO `-u`.
 
-    PACKAGED THE WAY `ci-release.yaml` DOES IT PER ADR-0725: `helm package chart -u`,
-    with `-u` resolving this chart's eight dependencies from
-    `oci://ghcr.io/yadgarhq/charts` before packaging. Nothing under `chart/charts/`
-    is committed, so this fixture is also the assertion that resolving at package
-    time is what makes a release possible at all.
+    PACKAGES WHAT `chart/charts/` ALREADY HOLDS. `-u` re-pulls the nine
+    dependencies from `oci://ghcr.io/yadgarhq/charts` and replaces the vendored
+    ones, so a candidate that `yadgarhq/actions`' `pre_pin_parent` vendored over a
+    pin (or a hand-edited `charts/` member) never reached the package, and every
+    test reading `packaged` checked the PUBLISHED pin instead of the tree.
+    `ci-release.yaml` still releases with `-u`, which is right for a release;
+    this fixture exists to test the tree. Nothing under `chart/charts/` is
+    committed (ADR-0725), so `helm dependency update chart` has to have run in
+    this working tree first: a contributor runs it by hand, and CI runs it in the
+    `precommit`, `pre_pin_parent` and `tag_validation` jobs. Without it helm
+    refuses, and the message says so.
     """
-    workspace = tmp_path_factory.mktemp("package")
-    shutil.copytree(CHART, workspace / "chart")
-    result = helm("package", "chart", "-u", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
+    result = helm("package", "chart", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
     assert result.returncode == 0, (
-        "`helm package chart -u` failed, which is exactly what `ci-release.yaml` runs. "
-        f"If it names a dependency it cannot resolve, check the registry and the pin "
-        f"in `chart/Chart.yaml`.\n{result.stderr}"
+        "`helm package chart` failed. It packages what `chart/charts/` holds and does not "
+        "resolve dependencies; if it names a missing dependency, run "
+        f"`helm dependency update chart` first.\n{result.stderr}"
     )
     tarball = workspace / "yadgar-0.1.0.tgz"
     assert tarball.is_file(), sorted(path.name for path in workspace.iterdir())
     return tarball
+
+
+@pytest.fixture(scope="module")
+def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The chart as `helm package` leaves it — the artifact an adopter downloads.
+
+    Packaged from the vendored `chart/charts/`, not re-resolved with `-u`
+    (yaadgaar #561): see `package_vendored`.
+    """
+    workspace = tmp_path_factory.mktemp("package")
+    shutil.copytree(CHART, workspace / "chart")
+    return package_vendored(workspace)
+
+
+def test_the_packaged_fixture_packages_what_charts_holds(tmp_path: Path) -> None:
+    """A vendored candidate that differs from the published pin shows in the package.
+
+    RED-FIRST (yaadgaar #561): with `-u` the candidate's deleted hook line came back
+    from the registry and the second assert failed. The unedited copy is the
+    vacuousness guard: the line is really there to be deleted.
+    """
+    member = f"yadgar/charts/{THE_PROBE_TEMPLATE}"
+    (tmp_path / "clean").mkdir()
+    shutil.copytree(CHART, tmp_path / "clean" / "chart")
+    (tmp_path / "candidate").mkdir()
+    chart_with_a_vendored_line_deleted(tmp_path / "candidate", THE_PROBE_TEMPLATE, THE_HOOK_LINE)
+    texts = {}
+    for name in ("clean", "candidate"):
+        with tarfile.open(package_vendored(tmp_path / name), "r:gz") as archive:
+            texts[name] = archive.extractfile(member).read().decode()
+    assert THE_HOOK_LINE in texts["clean"]
+    assert THE_HOOK_LINE not in texts["candidate"], (
+        "the package carries the published pin's template, not the vendored candidate's. "
+        "`helm package` ran with `-u`, or something else replaced `chart/charts/`."
+    )
+
+
+def test_the_packaged_fixture_and_the_tls_helper_package_through_package_vendored() -> None:
+    """The recipe has ONE home. A fixture or helper that calls helm itself can regain `-u`.
+
+    A SOURCE CHECK, because the test above only drives `package_vendored` and so
+    cannot see a caller that bypasses it (reviewer mutant M2: `packaged` calling
+    `helm package chart -u` directly survived).
+    """
+    import ast
+
+    tree = ast.parse(Path(__file__).read_text())
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    for name in ("packaged", "parent_packaged_with_task_db_requiring_tls"):
+        calls = [
+            call.func.id
+            for call in ast.walk(functions[name])
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        assert "package_vendored" in calls, f"`{name}` does not call `package_vendored`"
+        strings = [node.value for node in ast.walk(functions[name]) if isinstance(node, ast.Constant)]
+        assert "-u" not in strings and "helm" not in calls, (
+            f"`{name}` runs helm package itself; it has to go through `package_vendored`"
+        )
 
 
 # THE MODULES ALONE: what an adopter who runs their own platform layer writes, and
@@ -6330,9 +6391,10 @@ TASK_DB_SCHEMA_TLS_NOW = (
 def parent_packaged_with_task_db_requiring_tls(destination: Path) -> Path:
     """A fresh package of the parent whose vendored `task-db` requires `tls.enabled`.
 
-    `helm package chart -u` IS `packaged`'s OWN RECIPE (ADR-0725: nothing under
-    `chart/charts/` is committed), run again here rather than shared with it, so
-    this mutation never touches the fixture every other test in this module reads.
+    PACKAGES THROUGH `package_vendored`, `packaged`'s OWN RECIPE (no `-u`: it
+    packages what `chart/charts/` holds, ADR-0725), run again here on a fresh
+    copy rather than shared with the fixture, so this mutation never touches the
+    package every other test in this module reads.
 
     THE MEMBER AND THE LINE ARE BOTH ASSERTED BEFORE THE REPACK, same discipline
     as `chart_with_a_vendored_line_rewritten`: a member this package no longer
@@ -6352,10 +6414,7 @@ def parent_packaged_with_task_db_requiring_tls(destination: Path) -> Path:
 
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copytree(CHART, destination / "chart")
-    result = helm("package", "chart", "-u", "--version", "0.1.0", "--app-version", "0.1.0", cwd=destination)
-    assert result.returncode == 0, result.stderr
-    tarball = destination / "yadgar-0.1.0.tgz"
-    assert tarball.is_file(), sorted(path.name for path in destination.iterdir())
+    tarball = package_vendored(destination)
 
     with tarfile.open(tarball, "r:gz") as archive:
         entries = [
