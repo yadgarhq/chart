@@ -5831,7 +5831,7 @@ def five_key_form(values_object: dict, host: str) -> dict:
                 "gatewayListener": {"hostname": host},
                 "edgeTLS": {"commonName": host, "dnsNames": [host]},
             },
-            "gateway": {"gateway": {"hostname": host}},
+            "gateway": {"gateway": {"hostname": host}, "cors": {"allowedOrigins": f"https://{host}"}},
             "iam": {"enrolment": {"gateway": f"https://{host}"}},
         },
     )
@@ -7754,7 +7754,11 @@ CALLER_LEAVES = {
     ("Job", "seeder"): "seeder-client-tls",
 }
 VERIFYING_SERVERS = ("iam", "iam-db", "task", "task-db", "project", "project-db")
-ADMITTED_COMMON_NAMES = {"seeder-client-tls": "seeder-caller", "project-client-tls": "project-caller"}
+ADMITTED_COMMON_NAMES = {
+    "gateway-client-tls": "gateway-caller",
+    "seeder-client-tls": "seeder-caller",
+    "project-client-tls": "project-caller",
+}
 
 
 def pod_spec(documents: list[dict], kind: str, name: str) -> dict | None:
@@ -7843,6 +7847,22 @@ def test_a_caller_with_its_leaf_unmounted_reddens_the_admit_gate(
     spec = pod_spec(documents, kind, name)
     spec["volumes"] = [v for v in spec["volumes"] if (v.get("secret") or {}).get("secretName") != secret]
     assert admit_failures(documents) == [f"{kind} `{name}` mounts no `{secret}`, so it presents no client leaf"]
+
+
+@pytest.mark.parametrize("secret", list(ADMITTED_COMMON_NAMES), ids=list(ADMITTED_COMMON_NAMES))
+def test_a_renamed_caller_common_name_reddens_the_admit_gate(pinned: Path, tmp_path: Path, secret: str) -> None:
+    """THE COMMON-NAME HALF'S RED CASES (yaadgaar 176): platform issues one caller leaf
+    under another common name. The callee's constant (`gateway-caller`, `seeder-caller`,
+    `project-caller`) then no longer matches the leaf, and the gate reads the RENDERED
+    Certificate, not a literal, so it must name that secret.
+    """
+    values_object = kind_values()
+    leaves = values_object["platform"].setdefault("certificates", {}).setdefault("leaves", {})
+    leaves.setdefault(secret, {})["commonName"] = "renamed-caller"
+    expected = ADMITTED_COMMON_NAMES[secret]
+    assert admit_failures(kind_render(pinned, values_object, tmp_path / "kind")) == [
+        f"`{secret}` is issued with common name 'renamed-caller', not `{expected}`"
+    ]
 
 
 def test_the_release_job_passes_the_release_app_for_the_argocd_nudge() -> None:
