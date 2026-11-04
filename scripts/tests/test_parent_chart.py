@@ -83,7 +83,11 @@ import atexit
 import subprocess
 import sys
 import tarfile
+import socket
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -5687,19 +5691,50 @@ GHCR = "https://ghcr.io"
 PARENT_REPOSITORY = "yadgarhq/charts/yadgar"
 
 
-def published_versions(repository: str = PARENT_REPOSITORY) -> list[str]:
-    """Every tag GHCR holds for `repository`, read anonymously from the OCI tags list."""
-    import json
-    import urllib.request
+REGISTRY_ATTEMPTS = 3
+REGISTRY_BACKOFF_SECONDS = 2.0
 
-    scope = f"{GHCR}/token?scope=repository:{repository}:pull"
-    token = json.load(urllib.request.urlopen(scope, timeout=30))["token"]
-    request = urllib.request.Request(
-        f"{GHCR}/v2/{repository}/tags/list?n=10000", headers={"Authorization": f"Bearer {token}"}
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        assert "next" not in (response.headers.get("Link") or ""), "the tags list is paginated; read every page"
-        return json.load(response)["tags"]
+
+class RegistryUnreachable(Exception):
+    """GHCR did not ANSWER. Distinct from an answer that is wrong, which is never retried (task 590)."""
+
+
+def unanswered(error: BaseException) -> bool:
+    """A transport fault (DNS, reset, timeout, 5xx) rather than an answer. PURE."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500
+    return isinstance(error, OSError)  # URLError, socket.gaierror and TimeoutError are all OSError
+
+
+def published_versions(repository: str = PARENT_REPOSITORY, pause=time.sleep) -> list[str]:
+    """Every tag GHCR holds for `repository`, read anonymously from the OCI tags list.
+
+    A registry that does not answer is tried `REGISTRY_ATTEMPTS` times with a growing pause,
+    then REFUSES with `RegistryUnreachable`. FAIL-CLOSED: never a skip and never an empty
+    listing, so a missing published parent cannot pass. A wrong answer or a 4xx is raised
+    at once and untouched.
+    """
+    last: BaseException | None = None
+    for attempt in range(1, REGISTRY_ATTEMPTS + 1):
+        try:
+            scope = f"{GHCR}/token?scope=repository:{repository}:pull"
+            token = json.load(urllib.request.urlopen(scope, timeout=30))["token"]
+            request = urllib.request.Request(
+                f"{GHCR}/v2/{repository}/tags/list?n=10000", headers={"Authorization": f"Bearer {token}"}
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                assert "next" not in (response.headers.get("Link") or ""), "the tags list is paginated; read every page"
+                return json.load(response)["tags"]
+        except Exception as error:
+            if not unanswered(error):
+                raise
+            last = error
+            if attempt < REGISTRY_ATTEMPTS:
+                pause(REGISTRY_BACKOFF_SECONDS * attempt)
+    raise RegistryUnreachable(
+        f"registry unreachable: {GHCR} did not answer for {repository} in {REGISTRY_ATTEMPTS} attempts; "
+        f"last error {last!r}. This is the network, not the chart; rerun the job."
+    ) from last
 
 
 def semver(version: str) -> tuple[int, int, int] | None:
@@ -5774,6 +5809,76 @@ A_LISTING = ["0.1.0", "0.3.8", "0.3.10", "sha256-abc.sig"]
 )
 def test_only_a_version_newer_than_every_published_one_is_being_cut(version: str, event: str, cut: bool) -> None:
     assert being_cut(version, event, A_LISTING) is cut
+
+
+class FakeRegistry:
+    """Stands in for `urllib.request.urlopen`: plays `script` one call at a time. An Exception is raised."""
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.calls = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self.calls += 1
+        step = self.script.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+
+class FakeResponse:
+    def __init__(self, document: dict) -> None:
+        self.headers: dict[str, str] = {}
+        self.body = json.dumps(document).encode()
+
+    def read(self, *args: object) -> bytes:
+        return self.body
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+A_DNS_FAILURE = urllib.error.URLError(socket.gaierror(-5, "No address associated with hostname"))
+
+
+def test_a_registry_that_never_answers_fails_naming_the_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """task 590: a DNS failure is retried a bounded number of times, then REFUSES. Never a pass, never a skip."""
+    registry = FakeRegistry([A_DNS_FAILURE] * 10)
+    pauses: list[float] = []
+    monkeypatch.setattr(urllib.request, "urlopen", registry)
+    with pytest.raises(RegistryUnreachable, match=r"registry unreachable.*ghcr\.io.*3 attempts.*-5"):
+        published_versions(pause=pauses.append)
+    assert registry.calls == 3, "bounded: exactly three attempts, not one and not unbounded"
+    assert len(pauses) == 2 and 0 < pauses[0] < pauses[1], "backs off between attempts, not after the last"
+
+
+def test_a_registry_that_answers_on_the_last_attempt_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = FakeResponse({"token": "t"})
+    listing = FakeResponse({"tags": ["0.3.8"]})
+    registry = FakeRegistry([A_DNS_FAILURE, TimeoutError("slow"), token, listing])
+    monkeypatch.setattr(urllib.request, "urlopen", registry)
+    assert published_versions(pause=lambda seconds: None) == ["0.3.8"]
+
+
+def test_a_wrong_answer_is_not_retried_or_called_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry that answers with the wrong shape is a different fault from one that does not answer."""
+    registry = FakeRegistry([FakeResponse({"no": "token"})] * 5)
+    monkeypatch.setattr(urllib.request, "urlopen", registry)
+    with pytest.raises(KeyError):
+        published_versions(pause=lambda seconds: None)
+    assert registry.calls == 1
+
+
+def test_a_registry_that_refuses_with_a_client_error_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    denied = urllib.error.HTTPError("https://ghcr.io/token", 403, "denied", {}, None)
+    registry = FakeRegistry([denied] * 5)
+    monkeypatch.setattr(urllib.request, "urlopen", registry)
+    with pytest.raises(urllib.error.HTTPError):
+        published_versions(pause=lambda seconds: None)
+    assert registry.calls == 1
 
 
 def test_the_registry_lists_the_published_parent() -> None:
