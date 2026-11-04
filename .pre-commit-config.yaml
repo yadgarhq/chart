@@ -84,9 +84,10 @@ repos:
   # API versions (K2), that the PACKAGED chart renders the same set as the
   # directory, that an adopter's own value reaches a child's rendered object (goal
   # item 6), and that every CRD-bearing resource can be switched off (D80). Per
-  # ADR-0725 the packaged-chart fixture resolves dependencies with
-  # `helm package chart -u`, the same as `ci-release.yaml`'s `chart` job, so this
-  # hook needs the registry reachable rather than running offline.
+  # ADR-0725 the packaged-chart fixture packages what `chart/charts/` holds
+  # (`helm package chart`, no `-u`; yaadgaar #561), which the `helm-lint` hook
+  # above resolves with `helm dependency update`, so this hook needs the
+  # registry reachable rather than running offline.
   #
   # PYYAML'S PIN matches `yadgarhq/actions`' own `pytest-scripts` hook.
   #

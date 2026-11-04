@@ -315,9 +315,19 @@ maximum pins a downgrade and nothing downstream notices.
 ## How a change here is proven
 
 `python3 -m pytest scripts/tests/ -q`, which the `pytest-scripts` pre-commit hook
-runs on every commit. The packaged-chart fixture resolves dependencies with
-`helm package chart -u`, the same command `ci-release.yaml` runs, so this
-suite needs the registry reachable rather than running offline.
+runs on every commit. Run `helm dependency update chart` first (the
+`helm lint and render` hook does): the packaged-chart fixture runs
+`helm package chart` WITHOUT `-u`, so it packages what `chart/charts/` holds,
+including a candidate that `yadgarhq/actions`' `pre_pin_parent` vendored over
+a pin. `ci-release.yaml` still releases with `-u`. The suite needs the registry
+reachable for that update rather than running offline.
+
+**Coordination with `yadgarhq/actions`.** `pre_pin_parent.py` deselects tests by
+id: `LITERAL_COUNT_TESTS` are the tests that assert `ADOPTER_OBJECTS`,
+`EXPECTED` or `ADOPTER_EXPECTED`, and a chart PR that adds or renames one must
+update that dict in `yadgarhq/actions` in the same window. Otherwise every
+chart-bearing consumer PR goes red with "no longer collects", which is
+fail-closed by design.
 
 | what                                                   | asserted as                                                                                                                                                                                                                               |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

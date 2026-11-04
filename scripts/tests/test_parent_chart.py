@@ -61,14 +61,13 @@ NO SKIPS (ADR-0650). `helm` absent is a failure, not a skip: this suite and the
 shared `helm lint and render` hook both need it, and a suite that skips when its
 subject is absent reports a pass nobody earned.
 
-THE PACKAGED-CHART RENDERS ARE NOT OFFLINE. Per ADR-0725 nothing under
-`chart/charts/` is committed, so the `packaged` fixture below resolves this
-chart's ten dependencies from `oci://ghcr.io/yadgarhq/charts` with
-`helm package chart -u` — the same command `ci-release.yaml` runs — and needs
-the registry reachable. The directory-only renders (test 1) need no registry, but
-they DO need `helm dependency update chart` to have run in this working tree,
-which is what `ci.yaml`'s `tag_validation` job and the `helm lint and render`
-pre-commit hook both do before they run anything.
+THE PACKAGED-CHART RENDERS PACKAGE WHAT `chart/charts/` HOLDS. Per ADR-0725
+nothing under `chart/charts/` is committed, so `helm dependency update chart`
+has to have run in this working tree (it needs the registry), which is what
+`ci.yaml`'s `tag_validation` job and the `helm lint and render` pre-commit hook
+both do before they run anything. The `packaged` fixture then runs `helm package
+chart` WITHOUT `-u`, so it packages the vendored candidate and not a fresh pull
+of the published pin (yaadgaar #561).
 
 Run: python3 -m pytest scripts/tests/ -q
 """
@@ -613,27 +612,64 @@ def stated_in_more_than_one_configmap(
     )
 
 
-@pytest.fixture(scope="module")
-def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The chart as `helm package` leaves it — the artifact an adopter downloads.
+def package_vendored(workspace: Path) -> Path:
+    """`helm package chart` over the `chart/` directory in `workspace`, NO `-u`.
 
-    PACKAGED THE WAY `ci-release.yaml` DOES IT PER ADR-0725: `helm package chart -u`,
-    with `-u` resolving this chart's eight dependencies from
-    `oci://ghcr.io/yadgarhq/charts` before packaging. Nothing under `chart/charts/`
-    is committed, so this fixture is also the assertion that resolving at package
-    time is what makes a release possible at all.
+    PACKAGES WHAT `chart/charts/` ALREADY HOLDS. `-u` re-pulls the nine
+    dependencies from `oci://ghcr.io/yadgarhq/charts` and replaces the vendored
+    ones, so a candidate that `yadgarhq/actions`' `pre_pin_parent` vendored over a
+    pin (or a hand-edited `charts/` member) never reached the package, and every
+    test reading `packaged` checked the PUBLISHED pin instead of the tree.
+    `ci-release.yaml` still releases with `-u`, which is right for a release;
+    this fixture exists to test the tree. Nothing under `chart/charts/` is
+    committed (ADR-0725), so `helm dependency update chart` has to have run in
+    this working tree first — the `helm lint and render` hook, `ci.yaml` and
+    `pre_pin_parent` all do. Without it helm refuses, and the message says so.
     """
-    workspace = tmp_path_factory.mktemp("package")
-    shutil.copytree(CHART, workspace / "chart")
-    result = helm("package", "chart", "-u", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
+    result = helm("package", "chart", "--version", "0.1.0", "--app-version", "0.1.0", cwd=workspace)
     assert result.returncode == 0, (
-        "`helm package chart -u` failed, which is exactly what `ci-release.yaml` runs. "
-        f"If it names a dependency it cannot resolve, check the registry and the pin "
-        f"in `chart/Chart.yaml`.\n{result.stderr}"
+        "`helm package chart` failed. It packages what `chart/charts/` holds and does not "
+        "resolve dependencies; if it names a missing dependency, run "
+        f"`helm dependency update chart` first.\n{result.stderr}"
     )
     tarball = workspace / "yadgar-0.1.0.tgz"
     assert tarball.is_file(), sorted(path.name for path in workspace.iterdir())
     return tarball
+
+
+@pytest.fixture(scope="module")
+def packaged(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The chart as `helm package` leaves it — the artifact an adopter downloads.
+
+    Packaged from the vendored `chart/charts/`, not re-resolved with `-u`
+    (yaadgaar #561): see `package_vendored`.
+    """
+    workspace = tmp_path_factory.mktemp("package")
+    shutil.copytree(CHART, workspace / "chart")
+    return package_vendored(workspace)
+
+
+def test_the_packaged_fixture_packages_what_charts_holds(tmp_path: Path) -> None:
+    """A vendored candidate that differs from the published pin shows in the package.
+
+    RED-FIRST (yaadgaar #561): with `-u` the candidate's deleted hook line came back
+    from the registry and the second assert failed. The unedited copy is the
+    vacuousness guard: the line is really there to be deleted.
+    """
+    member = f"yadgar/charts/{THE_PROBE_TEMPLATE}"
+    (tmp_path / "clean").mkdir()
+    shutil.copytree(CHART, tmp_path / "clean" / "chart")
+    (tmp_path / "candidate").mkdir()
+    chart_with_a_vendored_line_deleted(tmp_path / "candidate", THE_PROBE_TEMPLATE, THE_HOOK_LINE)
+    texts = {}
+    for name in ("clean", "candidate"):
+        with tarfile.open(package_vendored(tmp_path / name), "r:gz") as archive:
+            texts[name] = archive.extractfile(member).read().decode()
+    assert THE_HOOK_LINE in texts["clean"]
+    assert THE_HOOK_LINE not in texts["candidate"], (
+        "the package carries the published pin's template, not the vendored candidate's. "
+        "`helm package` ran with `-u`, or something else replaced `chart/charts/`."
+    )
 
 
 # THE MODULES ALONE: what an adopter who runs their own platform layer writes, and
