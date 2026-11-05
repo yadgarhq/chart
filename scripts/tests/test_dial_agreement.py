@@ -938,11 +938,23 @@ def nats_config(documents: list[dict]) -> dict:
     return find(documents, "ConfigMap", "nats-config")["data"]
 
 
-def test_a_dollar_inside_a_nats_json_string_is_not_rewritten(sources, tmp_path):
-    """A `merge` value holding "a: $b" parses, and the string is kept as written."""
-    values = {"platform": {"nats": {"config": {"merge": {"foo": "a: $b"}}}}}
-    documents = render(sources["example-values"] + overlay(tmp_path, values))
-    conf = nats_conf(nats_config(documents)["nats.conf"])
+def test_a_dollar_inside_a_nats_json_string_is_not_rewritten(renders):
+    """A nats.conf string holding "a: $b" parses, and the string is kept as written.
+
+    The string is written into the RENDERED ConfigMap, as the not-JSON case below
+    does. Yaadgaar 597 refuses the key this probe used: `nats.config.merge` now
+    takes only `authorization` (exactly the chart's own block) and
+    `allow_non_tls`, and a `ca_file` must be a plain absolute path. A free string
+    can still reach nats.conf through a non-bool `allow_non_tls` (TLS off) and
+    through the block merges (`nats.config.<block>.merge`); both are open holes
+    (yaadgaar 592, 660), so this test does not pin itself to either. The
+    property under test is the parser's: `nats_conf` keeps a `$` inside a string.
+    """
+    documents = copied(renders)
+    data = nats_config(documents)
+    assert data["nats.conf"].lstrip().startswith("{"), data["nats.conf"][:80]
+    data["nats.conf"] = data["nats.conf"].replace("{", '{\n  "foo": "a: $b",', 1)
+    conf = nats_conf(data["nats.conf"])
     assert isinstance(conf, dict), conf
     assert conf["foo"] == "a: $b"
     assert gate(documents)[1] == []
