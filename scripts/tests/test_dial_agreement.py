@@ -939,12 +939,15 @@ def nats_config(documents: list[dict]) -> dict:
 
 
 def test_a_dollar_inside_a_nats_json_string_is_not_rewritten(sources, tmp_path):
-    """A `merge` value holding "a: $b" parses, and the string is kept as written."""
-    values = {"platform": {"nats": {"config": {"merge": {"foo": "a: $b"}}}}}
+    """A `merge` value holding "a: $b" parses, and the string is kept as written.
+
+    Under `authorization`: platform holds `nats.config.merge` to `authorization`
+    and `allow_non_tls` (platform yaadgaar 597), so a top-level key is refused."""
+    values = {"platform": {"nats": {"config": {"merge": {"authorization": {"foo": "a: $b"}}}}}}
     documents = render(sources["example-values"] + overlay(tmp_path, values))
     conf = nats_conf(nats_config(documents)["nats.conf"])
     assert isinstance(conf, dict), conf
-    assert conf["foo"] == "a: $b"
+    assert conf["authorization"]["foo"] == "a: $b"
     assert gate(documents)[1] == []
 
 
