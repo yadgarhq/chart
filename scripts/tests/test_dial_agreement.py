@@ -938,11 +938,20 @@ def nats_config(documents: list[dict]) -> dict:
     return find(documents, "ConfigMap", "nats-config")["data"]
 
 
-def test_a_dollar_inside_a_nats_json_string_is_not_rewritten(sources, tmp_path):
-    """A `merge` value holding "a: $b" parses, and the string is kept as written."""
-    values = {"platform": {"nats": {"config": {"merge": {"foo": "a: $b"}}}}}
-    documents = render(sources["example-values"] + overlay(tmp_path, values))
-    conf = nats_conf(nats_config(documents)["nats.conf"])
+def test_a_dollar_inside_a_nats_json_string_is_not_rewritten(renders):
+    """A nats.conf string holding "a: $b" parses, and the string is kept as written.
+
+    The string is written into the RENDERED ConfigMap, as the not-JSON case below
+    does: platform refuses every values route that once carried one (yaadgaar 597
+    holds `nats.config.merge` to `authorization`, exactly the chart's own block,
+    and `allow_non_tls`; a `ca_file` is refused unless it is a plain absolute
+    path), so the property is the parser's and no longer reachable through values.
+    """
+    documents = copied(renders)
+    data = nats_config(documents)
+    assert data["nats.conf"].lstrip().startswith("{"), data["nats.conf"][:80]
+    data["nats.conf"] = data["nats.conf"].replace("{", '{\n  "foo": "a: $b",', 1)
+    conf = nats_conf(data["nats.conf"])
     assert isinstance(conf, dict), conf
     assert conf["foo"] == "a: $b"
     assert gate(documents)[1] == []
