@@ -49,7 +49,7 @@ spec:
     repoURL: ghcr.io/yadgarhq/charts
     chart: yadgar
     # THE SAME PIN AS `../application.yaml`. The suite holds the two equal.
-    targetRevision: 0.51.169
+    targetRevision: 0.51.170
     helm:
       valuesObject:
         global:
